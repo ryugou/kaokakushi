@@ -598,10 +598,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
    */
   const completeSingleExport = React.useCallback(() => {
     if (!media) return
-    if (effectivePlan === "free" && !chargedIds.includes(media.id)) {
+    // ExportGrant はプランを問わず作る。有料中に作らないと、降格後に
+    // 24時間以内でも FreeReexport にならず「降格は判定に影響しない」と矛盾する
+    const hasGrant = chargedIds.includes(media.id)
+    if (effectivePlan === "free" && !hasGrant) {
       setRemainingFree((n) => Math.max(0, n - 1))
-      setChargedIds((prev) => [...prev, media.id])
     }
+    // firstSuccessAt は更新しない。更新すると24時間の窓が延び続ける
+    if (!hasGrant) setChargedIds((prev) => [...prev, media.id])
 
     const label =
       effect.type === "stamp"
@@ -1112,7 +1116,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
       setBatchTrialUsed(true)
     }
-    // 通常の一括処理はProのみ。Proは書き出し無制限なので枠を消費しない
+
+    // ExportGrant はプランを問わず作る。Free の枠を減らすのは grant がない写真だけ
+    const withoutGrant = doneItems.filter((i) => !chargedIds.includes(i.mediaId))
+    if (withoutGrant.length > 0) {
+      if (effectivePlan === "free") {
+        setRemainingFree((n) => Math.max(0, n - withoutGrant.length))
+      }
+      setChargedIds((prev) => [...prev, ...withoutGrant.map((i) => i.mediaId)])
+    }
 
     const historyId = `batch-${doneItems.length}-${errorCount}`
     const entry: BatchHistoryItem = {

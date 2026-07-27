@@ -232,6 +232,7 @@ function SetupStage() {
               size="lg"
               className="h-12 flex-1 rounded-2xl text-sm font-bold"
               onClick={openBatchPicker}
+              disabled={batchItems.length > 0}
             >
               写真を選ぶ
             </Button>
@@ -241,6 +242,7 @@ function SetupStage() {
                 size="lg"
                 className="h-12 rounded-2xl text-sm text-muted-foreground"
                 onClick={clearBatchSelection}
+                disabled={batchItems.length > 0}
               >
                 クリア
               </Button>
@@ -253,7 +255,8 @@ function SetupStage() {
                   key={id}
                   type="button"
                   onClick={() => toggleBatchSelection(id)}
-                  className="relative overflow-hidden rounded-2xl ring-1 ring-foreground/10 transition-transform active:scale-95"
+                  disabled={batchItems.length > 0}
+                  className="relative overflow-hidden rounded-2xl ring-1 ring-foreground/10 transition-transform active:scale-95 disabled:opacity-60"
                 >
                   <MediaThumb media={findMedia(id)} className="aspect-square w-full rounded-2xl" />
                   <span className="absolute right-1 top-1 grid size-5 place-items-center rounded-full bg-card/90 text-muted-foreground">
