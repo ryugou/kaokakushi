@@ -3,9 +3,9 @@
 | 項目 | 内容 |
 | --- | --- |
 | 文書名 | 顔かくし 技術スタックおよびアーキテクチャ設計 |
-| バージョン | 1.29 |
+| バージョン | 2.0 |
 | 作成日 | 2026-07-27 |
-| 対象 | 写真・動画向け顔匿名化アプリ（iOS / Android） |
+| 対象 | 写真向け顔匿名化アプリ（**iOS 単独**） |
 | 上位文書 | 写真・動画向け顔匿名化アプリ 仕様書 v0.1 |
 | 本書の範囲 | 技術選定、モジュール構成、境界設計、データフロー、エラー設計、テスト戦略、リリース段階 |
 | 本書の対象外 | 画面ごとの視覚デザイン（配色・余白・タイポグラフィは `ui-mock/` を参照）、スタンプの意匠 |
@@ -14,19 +14,28 @@
 
 挙動の定義については **本書が正であり、`ui-mock/` は本書に追従します**（14 節）。
 
+**v2.0 での方針転換。** v1.x は Kotlin Multiplatform + Compose Multiplatform による iOS / Android 同時リリースを前提としていましたが、**iOS 単独リリース**へ変更しました。技術スタックは Swift + SwiftUI の単一ネイティブ構成です。ドメイン設計（クォータ、トリアージ、コミットジャーナル、ハッシュ正準化）は言語を移すだけで、判断の内容は v1.29 から変えていません。
+
 ---
 
 ## 1. 前提
 
 ### 1.1 実装体制
 
-本プロジェクトの実装者は Claude Code 単独です。この制約が技術選定を支配します。
+本プロジェクトの実装者は Claude Code 単独です。
 
-同一のドメインロジックを二度実装すると、実装コストが倍になるだけでなく、両者が徐々に乖離して仕様差異バグを生みます。したがって **共有できる層を最大化する構成** を最優先とします。
+v1.x では「同一のドメインロジックを二度実装しない」ことが技術選定を支配していましたが、**リリース対象が iOS のみになったため、この制約は消えました。** 二重実装する相手が存在しません。
+
+代わりに支配的となるのは次です。
+
+- **プラットフォームの機能をそのまま使えること。** 抽象化層を挟まない分、Vision や Core Image の新機能を即座に利用できます
+- **単一言語で完結すること。** Swift 以外の言語を持ち込みません。ビルド構成、テスト実行、デバッグ経路がすべて Xcode に閉じます
 
 ### 1.2 上位仕様からの変更点
 
-仕様書 4.2 は iOS / Android のフルネイティブ二本立て（Swift + SwiftUI / Kotlin + Jetpack Compose）を指定していますが、本設計ではこれを変更します。変更理由は 3 節に記述します。
+仕様書 4.2 は iOS / Android のフルネイティブ二本立て（Swift + SwiftUI / Kotlin + Jetpack Compose）を指定しています。本設計は **iOS 側のみを実装**し、Android は v1 のリリース対象から外します（15 節の逸脱一覧）。
+
+**Android を後から追加する場合、ドメイン層の再実装が必要になります。** Swift で書いたクォータ判定・トリアージ・コミットジャーナルは Android へ持ち込めません。これは iOS 単独リリースを選んだことの帰結として記録しておきます。移植時に参照できるよう、**ドメイン層の設計判断は本書に文章として残します**（6 節・7 節）。コードだけが仕様になる状態を避けます。
 
 仕様書のドメイン要件（プラン、課金、プライバシー、エラー、性能、テスト条件）は、15 節に列挙する逸脱を除いて変更しません。
 
@@ -38,133 +47,142 @@
 
 | 領域 | 採用技術 |
 | --- | --- |
-| 共有基盤 | Kotlin Multiplatform (KMP) |
-| 共有 UI | Compose Multiplatform (CMP) |
-| iOS プラットフォームアダプタ | Swift |
-| Android プラットフォームアダプタ | Kotlin |
-| ローカル DB | Room KMP |
-| DI | Koin |
-| 課金 | RevenueCat KMP SDK (`purchases-kmp`) |
-| 広告 | Google Mobile Ads（`expect`/`actual` で自前ラップ） |
-| クラッシュ解析 | Sentry KMP SDK |
+| 言語 | Swift 6（strict concurrency） |
+| UI | SwiftUI |
+| 状態管理 | Observation（`@Observable`） |
+| 非同期・排他 | Swift Concurrency（`actor`） |
+| ローカル DB | **GRDB**（SQLite） |
+| DI | イニシャライザ注入（フレームワーク不使用） |
+| 課金 | RevenueCat iOS SDK |
+| 広告 | Google Mobile Ads iOS SDK |
+| クラッシュ解析 | Sentry Cocoa SDK |
 | バックエンド | Rust + Axum（リモート設定と診断のみ） |
-| 対応 OS | iOS 17 以降 / Android 10 (API 29) 以降 |
+| 対応 OS | **iOS 26 以降** |
 
-### 2.2 iOS プラットフォームアダプタ
+### 2.2 プラットフォーム API
 
 | 用途 | 採用 API |
 | --- | --- |
-| 顔検出 | Vision |
+| 顔検出 | Vision（`DetectFaceRectanglesRequest`） |
 | 写真選択 | PhotosPicker |
+| カスタムスタンプの取り込み | `fileImporter`（UIDocumentPicker） |
 | 画像読み込み・向き正規化 | Image I/O |
 | エフェクト描画 | Core Image（`CIPixellate` / `CIGaussianBlur`） |
+| スタンプのラスタライズ | Core Graphics（`ImageRenderer` ではなく `CGContext`。5.1.1） |
 | エンコード・メタデータ除去 | Image I/O |
 | 写真ライブラリ保存 | PhotoKit（`PHAssetCreationRequest`） |
 | 署名鍵の保管 | Keychain（**鍵のみ**。データ本体は置かない） |
-| 署名付きデータの保管 | アプリ専用ディレクトリ上のファイル（HMAC 付き） |
+| 署名付きデータの保管 | アプリ専用ディレクトリ上のファイル（HMAC 付き、原子的置換） |
 | 動画（次リリース） | AVFoundation / AVAssetWriter |
 
-### 2.3 Android プラットフォームアダプタ
-
-| 用途 | 採用 API |
-| --- | --- |
-| 顔検出 | ML Kit Face Detection |
-| 写真選択 | Android Photo Picker |
-| 画像読み込み・向き正規化 | ImageDecoder |
-| エフェクト描画 | OpenGL ES 2.0（フラグメントシェーダ） |
-| エンコード・メタデータ除去 | `Bitmap.compress` + ExifInterface |
-| 写真ライブラリ保存 | MediaStore |
-| 署名鍵の保管 | Android Keystore（**鍵のみ**。エクスポート不可の HMAC 鍵） |
-| 署名付きデータの保管 | Proto DataStore（HMAC 付き） |
-| 動画（次リリース） | Jetpack Media3 Transformer |
-
-Android の最低対応が API 29 のため、`RenderEffect`（API 31 以降）は使用できません。ぼかしとモザイクは OpenGL ES 2.0 のフラグメントシェーダで実装します。
-
-**鍵とデータ本体を分けます。** Android Keystore は任意長のデータを格納する場所ではなく、鍵の保管とその鍵による暗号処理を提供する仕組みです。`UsageLedger` や `SubscriptionState` の本体は DataStore 側に置き、Keystore の鍵で HMAC を付けます。iOS の Keychain も同じ扱いとし、両 OS で `CryptoKeyStore`（鍵）と `ProtectedBlobStore`（署名付きデータ）の 2 契約に分けます（4 章）。
+**鍵とデータ本体を分けます。** Keychain は台帳のような可変データを繰り返し置き換える用途に向きません。`UsageLedger` や `SubscriptionState` の本体はファイルへ置き、Keychain の鍵で HMAC を付けます。`CryptoKeyStore`（鍵）と `ProtectedBlobStore`（署名付きデータ）の 2 つのプロトコルに分けます（4 章）。
 
 ---
 
 ## 3. 技術選定の根拠
 
-### 3.1 アプリの構造的な分割
+### 3.1 iOS 単独リリースが決めたこと
 
-本アプリは、共有できない層と共有すべき層が明確に分かれます。
+リリース対象が iOS のみである以上、**クロスプラットフォーム構成を採る理由がありません。**
 
-| 層 | 内容 | 共有可否 |
+v1.x で KMP + CMP を選んだ根拠は「ドメイン層とUI を二重実装しない」ことでした。実装対象が 1 プラットフォームなら、共有すべき相手が存在せず、抽象化のコストだけが残ります。
+
+| 構成 | iOS 単独での評価 |
+| --- | --- |
+| **Swift + SwiftUI** | **採用。** 追加の抽象化層がなく、プラットフォーム機能を直接使える |
+| KMP + CMP | 不採用。共有相手がいないのに Kotlin ツールチェーンと Swift 相互運用の複雑さを負う |
+| Flutter | 不採用。同上。加えて Vision / Core Image / PhotoKit をすべてブリッジ経由にする必要がある |
+
+### 3.2 SwiftUI を採る理由
+
+**UIKit ではなく SwiftUI を採ります。**
+
+- **iOS 26 を最低対応にできるため、SwiftUI の機能不足を回避策で埋める必要がありません。** 過去に SwiftUI 採用を妨げていた要因（リスト性能、ナビゲーション制御、テキスト編集）はいずれも解消済みです
+- 本アプリの主画面（顔レビュー、エフェクト調整）は `Canvas` による自前描画が主体です。この部分は UIKit でも SwiftUI でも実装量が変わりません
+- 設定・履歴・Paywall は宣言的に書けるほうが短く、状態の取り違えが起きにくくなります
+
+**`Canvas` と `UIViewRepresentable` の使い分け**を先に決めます。
+
+| 用途 | 実装 |
+| --- | --- |
+| 顔の枠、ハンドル、選択状態の描画 | SwiftUI `Canvas` |
+| プレビュー画像の表示 | SwiftUI `Image`（低解像度 `CGImage`） |
+| ピンチ・ドラッグによる領域編集 | SwiftUI ジェスチャ |
+| 原寸書き出しの描画 | Core Image（UI を経由しない。5.1） |
+
+**`UIViewRepresentable` を使うのは広告バナーだけ**とします。Google Mobile Ads の `BannerView` に SwiftUI 版が無いためです。
+
+### 3.3 GRDB を採る理由
+
+**SwiftData ではなく GRDB を採ります。**
+
+本設計の中核はコミットジャーナル（7.4.3）であり、次を要求します。
+
+- **明示的なトランザクション境界。** 手順 8 は「`OutputRecord` の insert」「`ExportRecord` の insert」「キュー状態の更新」「`Project` の更新」「`ExportCommit` の delete」を**単一トランザクション**で実行します
+- **原子性の検証可能性。** プロセス強制終了テスト（12.1.4）で、トランザクションが途中適用されないことを確認します
+- **ヘッドレス実行。** ドメインに近い層のテストを、シミュレータ起動なしで走らせます
+
+SwiftData の `ModelContext` は保存タイミングが暗黙的で、上記の 3 点をいずれも保証しにくい構造です。GRDB は `try dbQueue.write { db in ... }` が SQLite のトランザクションそのものであり、境界が明確です。
+
+| 観点 | GRDB | SwiftData |
 | --- | --- | --- |
-| メディアエンジン | 顔検出、デコード、GPU 加工、エンコード、写真ライブラリ保存 | 不可 |
-| ドメイン | トラック関連付け、キーフレーム補間、座標正規化、プラン判定、月次クォータ、キュー状態機械、ストレージ推定 | 可 |
-| UI | 顔レビュー、エフェクト選択、スタンプ、Paywall、履歴、バッチ | 可 |
-| 周辺 | 課金、広告、DB、分析、リモート設定 | 可 |
+| トランザクション境界 | **明示的** | 暗黙的（`ModelContext` の保存に依存） |
+| 原子性の保証 | SQLite に一致 | 実装依存 |
+| テストの実行環境 | インメモリ DB で完結 | シミュレータが必要になりやすい |
+| マイグレーション | `DatabaseMigrator` で明示 | スキーマ推論に依存 |
+| 型安全なクエリ | あり | あり |
 
-共有できないのは全体の 3〜4 割です。残り 6〜7 割を二重実装するかどうかが、単独実装での成否を決めます。
-
-### 3.2 検討した選択肢
-
-| 案 | UI コードベース | Android UI | iOS UI | 判定 |
-| --- | --- | --- | --- | --- |
-| A: Flutter + ネイティブメディア層 | 1 本 | 自前描画 | 自前描画 | 不採用 |
-| **B-1: KMP + CMP** | **1 本** | **ネイティブ** | 自前描画 | **採用** |
-| B-2: KMP のみ（UI は二本） | 2 本 | ネイティブ | ネイティブ | 不採用 |
-| C: フルネイティブ二本立て（仕様書 4.2） | 2 本 | ネイティブ | ネイティブ | 不採用 |
-
-### 3.3 採用理由
-
-**案 C を採らない理由。** キーフレーム補間、トラック関連付け、クォータ判定といった誤りやすいロジックを二重実装することになり、仕様差異バグの温床となります。単独実装では最も割に合いません。
-
-**案 A を採らない理由。** Flutter と CMP は UI の実現方式が同質です。どちらもネイティブコードへコンパイルされ、UI は自前のレンダリングエンジンが直接描画します（Flutter は Impeller、CMP は Skia）。ウェブ技術は使いません。両者の実質的な差は次の 2 点です。
-
-- Android では Jetpack Compose がプラットフォーム純正の UI ツールキットそのものであるため、CMP の Android は自前描画ではなく本物のネイティブになります。Flutter は Android でも自前描画です
-- 使用言語が Flutter は 3 つ（Dart / Swift / Kotlin）、CMP は 2 つ（Kotlin / Swift）になります
-
-**案 B-2 を採らない理由。** UI がこのアプリの実装量の最大部分を占めます。どの画面で iOS 純正の見た目が必要かが判明していない段階で全画面を二重化するのは過剰投資です。加えて本アプリの主画面（顔レビュー、エフェクト調整）は Canvas による自前描画が主体であり、B-2 を選んでも純正の見た目にはなりません。
-
-**案 B-1 を採る理由。** 上記に加えて、選択のリスクが片側にしか開かないためです。
-
-- KMP のドメイン層は B-1 / B-2 / C のいずれでもそのまま使える資産です。UI 戦略を変更しても破棄せずに済みます
-- CMP は `ComposeUIViewController` として組み込まれるため、iOS では画面単位で SwiftUI と混在できます。B-1 で開始し、純正感が必要な画面のみ後から SwiftUI へ差し替える段階移行が成立します
-- 対して Flutter は全か無かであり、後からネイティブへ寄せる経路が存在しません
+**SwiftData を採らないのは、機能不足ではなく制御の粒度の問題です。** 通常の CRUD アプリなら SwiftData で十分ですが、本設計は「どの順序で何が永続化されたか」に挙動が依存します。
 
 ### 3.4 選定時に確認した外部事実
 
-- Compose Multiplatform for iOS は 1.8.0（2025年5月）で Stable
-- KMP は Google が I/O 2024 で公式サポートを表明。Room が KMP 対応済み
-- ただし Google が支援しているのは KMP（ロジック共有）であり、CMP（iOS UI）は JetBrains 単独である。KMP の採用実績を CMP の実績と同一視しない
-- RevenueCat は公式 KMP SDK を提供。v3.0.0（2026年5月）で iOS フレームワークの手動リンクが不要化
-- Sentry KMP SDK は 0.26.0（2026年5月）でメジャーバージョン前。各プラットフォーム SDK のラッパー
+- iOS 26 は 2025 年秋のメジャーリリース。最低対応を 26 とすることで、`Observation`、Swift 6 の strict concurrency、Vision の Swift 専用 API がすべて前提にできる
+- Vision の `DetectFaceRectanglesRequest` は Swift Concurrency に対応した新 API。`VNDetectFaceRectanglesRequest`（旧 API）と併存する
+- RevenueCat iOS SDK は StoreKit 2 に対応済み
+- Sentry Cocoa SDK はメジャーバージョン到達済み。v1.x で懸念していた「KMP SDK がメジャー前」という問題は消える
+- GRDB は SQLite の薄いラッパーであり、SQLite 自体の原子性保証をそのまま利用できる
 
-### 3.5 CMP 採用に伴い受け入れるリスク
+### 3.5 iOS 単独リリースに伴い受け入れるリスク
 
 | リスク | 内容 | 緩和策 |
 | --- | --- | --- |
-| iOS の OS デザイン刷新に自動追随しない | CMP は自前描画のため、iOS 側の意匠変更にはフレームワークの対応を待つ | 影響は設定・履歴・Paywall 等に限定。必要なら当該画面のみ SwiftUI へ差し替える |
-| iOS のアクセシビリティ | Canvas 自前描画部分は `semantics` の明示的な付与が必須 | 仕様 29 章を受入条件とし、12 節のテスト戦略で担保 |
-| CMP は JetBrains 単独支援 | 将来の開発継続性が Google 支援の KMP ほど堅くない | ドメイン層を CMP に依存させない。UI 差し替え経路を確保しておく |
-| 広告 SDK の自前ラップ | 公式 KMP SDK が存在しない | `expect`/`actual` の薄いポートに閉じ込め、契約テストで両 OS の挙動を揃える |
+| Android 展開時の再実装 | ドメイン層を Swift で書くため、移植は書き直しになる | ドメインの判断を本書に文章として残す（1.2）。コードのみが仕様になる状態を避ける |
+| 市場の半分を取り逃す | Android 利用者へ届かない | v1 の検証を優先する経営判断として受け入れる。15 節に逸脱として記録 |
+| iOS 26 未満の端末を切る | 対応 OS が新しく、初期の到達範囲が狭い | 2026 年時点で iOS 26 の普及率は十分に高い。古い OS のための回避策コストを負わない |
+
+**逆に、iOS 単独にしたことで解消した制約があります。**
+
+| v1.x の制約 | v2.0 での扱い |
+| --- | --- |
+| 検出信頼度を使えない（ML Kit に API が無い） | **`VNFaceObservation.confidence` を使える。** 仕様 8.1 どおり `LowConfidence` をトリアージ理由へ戻す（5.7.1 / 6.5.2） |
+| ぼかしを OpenGL ES 2.0 のシェーダで自作 | Core Image の `CIGaussianBlur` を使う |
+| 両 OS の座標系・角度の差を吸収する契約テスト | 不要。Vision の座標系のみを扱う |
+| 広告 SDK の自前ラップ | 不要。iOS SDK を直接使う |
 
 ---
 
 ## 4. モジュール構成
 
+Swift Package Manager のローカルパッケージとして層を分け、**モジュール境界をコンパイラに強制させます。** 1 つのターゲットへ全部を入れると、依存の向きが規約でしか守られません。
+
 ```
 kaokakushi/
-├── composeApp/              CMP アプリ本体（共有 UI とエントリポイント）
-│   ├── commonMain/          全画面の Compose UI、ナビゲーション、StampRasterizer 実装（5.1.1）
-│   ├── androidMain/         Activity、AndroidView（広告バナー）
-│   └── iosMain/             ComposeUIViewController、UIKitViewController 埋め込み
+├── Kaokakushi.xcodeproj
+├── App/                     アプリ本体
+│   ├── KaokakushiApp.swift  エントリポイント、DI の組み立て
+│   ├── Navigation/          Route と画面解決
+│   ├── Screens/             SwiftUI の各画面
+│   └── PrivacyShield/       スクリーンショット対策（7.7）
 │
-├── shared/
-│   ├── domain/              純粋 Kotlin。プラットフォーム依存ゼロ
-│   ├── data/                Room KMP、ファイル管理、ProtectedBlobStore
-│   │   └── security/        CryptoKeyStore（HMAC 鍵のみ）
-│   ├── media/               画像選択・読み込み・検出・描画・エンコード・保存・共有
-│   ├── billing/             RevenueCat ラッパと権限解決
-│   ├── ads/                 AdPresenter
-│   └── analytics/           イベント定義と送信
-│
-├── iosApp/                  Xcode プロジェクト
-│   ├── App/                 SwiftUI シェル（画面単位の差し替え点）
-│   └── Media/               Vision / Core Image / PhotoKit 実装
+├── Packages/
+│   ├── Domain/              純粋 Swift。Foundation 以外に依存しない
+│   ├── Rendering/           StampRasterizer 実装（Core Graphics）
+│   ├── Persistence/         GRDB、ファイル管理、ProtectedBlobStore
+│   │   └── Security/        CryptoKeyStore（Keychain。HMAC 鍵のみ）
+│   ├── MediaKit/            Vision / Image I/O / Core Image / PhotoKit
+│   ├── Billing/             RevenueCat ラッパと権限解決
+│   ├── Ads/                 AdPresenter（Google Mobile Ads）
+│   └── Analytics/           イベント定義と送信
 │
 ├── server/                  Rust + Axum（リモート設定と診断のみ）
 │
@@ -173,66 +191,94 @@ kaokakushi/
 
 ### 4.1 依存の向き
 
-依存は **UI → domain ← 各アダプタ** の一方向とします。`domain` がポート（インターフェース）を定義し、`data` / `media` / `billing` / `ads` / `analytics` がそれを実装します。
+依存は **App → Domain ← 各アダプタ** の一方向とします。`Domain` がプロトコルを定義し、`Persistence` / `MediaKit` / `Rendering` / `Billing` / `Ads` / `Analytics` がそれを実装します。
 
-`domain` は他のいかなるモジュールにも依存しません。Kotlin 標準ライブラリと `kotlinx-datetime` 以外の依存を持ちません。**Compose の型（`IntSize`、`Color`、`Offset` 等）も使いません。** 必要な値型は `PixelSize` のようにドメイン側で定義します（5.2）。
+**`Domain` は `Foundation` 以外に依存しません。**
 
-この制約により、仕様書 30.1 が要求する単体テスト項目がすべて `commonTest` に収まり、JVM 上でエミュレータなしに実行できます。
+| 使ってよい | 使わない |
+| --- | --- |
+| `Foundation`（`Date`、`Data`、`UUID`、`Calendar`、`TimeZone`） | `SwiftUI`（`CGSize`、`Color`、`Angle` 等を含む） |
+| Swift 標準ライブラリ | `UIKit` / `CoreGraphics` / `CoreImage` |
+| | `GRDB` |
 
-### 4.2 ナビゲーションと iOS 差し替え経路
+**`CGSize` や `CGRect` も使いません。** 必要な値型は `PixelSize` / `PixelRect` / `NormalizedRect` としてドメイン側で定義します（5.2）。`CoreGraphics` の型を持ち込むと、暗黙に「原点は左下か左上か」といった描画系の前提が混入します。ドメインは 5.2.1 の規約だけに従います。
 
-ナビゲーションは Compose 側が所有します。画面は `Route` の sealed class で表現し、`Route` から Composable への解決を 1 箇所の `when` に集約します。
+**`Package.swift` の依存関係でこれを強制します。** `Domain` ターゲットの `dependencies` を空にすれば、規約違反はコンパイルエラーになります。
 
-v1 では全画面を Compose で実装します。iOS の特定画面を SwiftUI へ差し替える必要が生じた時点で、その `when` に分岐を追加し、`UIKitViewController` 経由で SwiftUI をホストする `UIViewController` を描画します。差し替え機構を先回りして実装することはしません（YAGNI）。設計上の要件は「`Route` を sealed class にすること」「画面解決を 1 箇所に集約すること」の 2 点のみです。
+この制約により、仕様書 30.1 が要求する単体テスト項目がすべてシミュレータなしで実行できます（12.1.1）。
+
+### 4.2 ナビゲーション
+
+画面は `Route` の enum で表現し、`Route` から `View` への解決を 1 箇所の `switch` に集約します。`NavigationStack` の `path` を `[Route]` として `@Observable` な状態オブジェクトが所有します。
+
+**画面遷移をドメインの状態から導出しません。** 「未保存出力があるときは新規加工を開始できない」（6.2.2.3）のような規則はドメインが判定し、UI はその結果を表示するだけです。遷移可否の判断を `View` の中へ書きません。
+
+### 4.3 並行性の方針
+
+Swift 6 の strict concurrency を有効にします。
+
+| 対象 | 隔離 |
+| --- | --- |
+| `Domain` の値型 | `Sendable`。判定関数はすべて純粋関数 |
+| `UsageLedgerStore` | **`actor`**。台帳の読み取り・変更・署名・保存を直列化する（7.4.3） |
+| `ExportStartGate` | **`actor`**。`sourceHash` 単位と月間認可のゲートを保持する（7.4.3） |
+| UI の状態オブジェクト | `@MainActor` |
+| `MediaKit` の重い処理 | `nonisolated` な `async` 関数。呼び出し側が並行度を制御する |
+
+**v1.x で Mutex を想定していた箇所は `actor` に置き換わります。** 排他の必要性と理由は変わりません（7.4.3 の「台帳更新は直列化する」）。
 
 ---
 
-## 5. ネイティブ境界の設計
+## 5. プラットフォーム境界の設計
 
 ### 5.1 基本方針
 
-**エフェクトの数学をすべてドメイン側に置き、ネイティブには描画プリミティブのみを残します。**
+**エフェクトの数学をすべて `Domain` に置き、`MediaKit` には描画プリミティブのみを残します。**
+
+iOS 単独になっても、この分離は維持します。理由は OS 間の差を吸収するためではなく、**エフェクトの計算をシミュレータなしでテストできる状態に保つため**です（12.1.1）。Core Image を呼び出す層に強度計算が混ざると、そのテストには実機が要ります。
 
 ```
-ネイティブ  顔検出 → 正規化座標の矩形群 + 頭部回転角 + 小顔フラグ（5.7.1）
+MediaKit   Vision で顔検出 → 正規化座標の矩形群 + 頭部回転角 + 信頼度 + 小顔フラグ（5.7.1）
     ↓
-ドメイン    拡張率適用（上 25% / 下 15% / 左右 15%）
-            形状決定（楕円 / 円 / 矩形 / 角丸）
-            切り抜きと背景処理の決定
-            → RenderSpec（正規化座標・相対強度のまま）
+Domain     拡張率適用（上 25% / 下 15% / 左右 15%）
+           形状決定（楕円 / 円 / 矩形 / 角丸）
+           切り抜きと背景処理の決定
+           → RenderSpec（正規化座標・相対強度のまま）
     ↓
-ドメイン    compileRenderDraft(spec, targetSize)
-            相対強度 → 絶対ピクセル値へ換算
-            正規化座標 → 出力キャンバス基準へ変換
-            → RenderDraft（stampRequests の rasterSize 算出済み）
+Domain     compileRenderDraft(spec, targetSize)
+           相対強度 → 絶対ピクセル値へ換算
+           正規化座標 → 出力キャンバス基準へ変換
+           → RenderDraft（stampRequests の rasterSize 算出済み）
     ↓
-アプリ層    StampRasterizer でスタンプ画像をビットマップ化
-            → RasterizedStampAsset（実体つき）を得る
+Rendering  StampRasterizer でスタンプ画像をビットマップ化
+           → RasterizedStampAsset（実体つき）を得る
     ↓
-ドメイン    bindRasterAssets(draft, assets) → RenderPlan
+Domain     bindRasterAssets(draft, assets) → RenderPlan
     ↓
-ネイティブ  RenderPlan を受け取り、4 プリミティブのみ実行
-            ①マスク内モザイク ②マスク内ぼかし ③単色塗り ④画像貼り付け
+MediaKit   RenderPlan を受け取り、4 プリミティブのみ実行
+           ①マスク内モザイク ②マスク内ぼかし ③単色塗り ④画像貼り付け
 ```
 
-顔領域の位置と大きさは、`RenderSpec` の段階では 0〜1 の正規化座標で保持します（仕様 19.3 と一致）。**永続化するのは `RenderSpec` 側の値だけ**で、ピクセル座標は保存しません。これにより拡張率やマージンの計算がプラットフォーム間でずれず、同じ設定を解像度の異なる出力へ適用できます。
+顔領域の位置と大きさは、`RenderSpec` の段階では 0〜1 の正規化座標で保持します（仕様 19.3 と一致）。**永続化するのは `RenderSpec` 側の値だけ**で、ピクセル座標は保存しません。これにより、同じ設定を解像度の異なる出力（プレビューと原寸）へ一貫して適用できます。
 
 #### 5.1.1 スタンプのラスタライズをドメインへ置かない
 
-**ラスタライズは Compose Canvas を使うため、`domain` の責務にできません。** 4.1 の「`domain` は Compose の型を使わない」と直接矛盾します。
+**ラスタライズは Core Graphics を使うため、`Domain` の責務にできません。** 4.1 の「`Domain` は `CoreGraphics` に依存しない」と直接矛盾します。
 
-**幾何情報は `RenderRegion` だけに持たせます。** ラスタライズ側にも `bounds` / `rotationDegrees` / `opacity` を持たせると、ラスタライズ時とネイティブ描画時に**二重適用**されます。`StampRasterizer` は「スタンプ画像そのものを、指定ピクセルサイズで作る」ことだけを行います。
+**`ImageRenderer`（SwiftUI）ではなく `CGContext` を使います。** `ImageRenderer` は `@MainActor` に隔離されており、一括処理 50 枚のラスタライズを直列化してしまいます。`CGContext` はバックグラウンドで実行でき、ピクセル形式とストライドも明示的に指定できます（5.1.2 の規約に必要）。
 
-```kotlin
-// domain — プラットフォーム非依存
-data class StampRasterRequest(
-    val source: StampSource,      // BuiltIn(code) または Custom(contentHash)（5.2）
-    val rasterSize: PixelSize,    // compileRenderDraft が算出する
-)
+**幾何情報は `RenderRegion` だけに持たせます。** ラスタライズ側にも `bounds` / `rotationDegrees` / `opacity` を持たせると、ラスタライズ時と描画時に**二重適用**されます。`StampRasterizer` は「スタンプ画像そのものを、指定ピクセルサイズで作る」ことだけを行います。
 
-// domain がポートを定義し、composeApp が実装する
-interface StampRasterizer {
-    suspend fun rasterize(request: StampRasterRequest): RasterizedStampAsset
+```swift
+// Domain — Foundation のみ
+struct StampRasterRequest: Sendable, Hashable {
+    let source: StampSource      // .builtIn(code) または .custom(contentHash)（5.2）
+    let rasterSize: PixelSize    // compileRenderDraft が算出する
+}
+
+// Domain がプロトコルを定義し、Rendering が実装する
+protocol StampRasterizer: Sendable {
+    func rasterize(_ request: StampRasterRequest) async throws -> RasterizedStampAsset
 }
 ```
 
@@ -242,53 +288,73 @@ interface StampRasterizer {
 | --- | --- |
 | 画面上の位置 | `RenderRegion.bounds` |
 | 回転 | `RenderRegion.rotationDegrees` |
-| 不透明度 | `RenderOp.Stamp.opacity` |
+| 不透明度 | `RenderOp.stamp.opacity` |
 | 顔領域の形状 | `RenderRegion.shape` |
 
 いずれも `RenderPlan` 側で**1 回だけ**適用します。
 
-`RenderOp.Stamp(bitmapId)` を組み立てる順序は次のとおりです（5.2 の二段階コンパイル）。
+`RenderOp.stamp(bitmapID:)` を組み立てる順序は次のとおりです（5.2 の二段階コンパイル）。
 
-1. `domain` が `compileRenderDraft` で寸法を確定し、`StampRasterRequest` の一覧を得る
-2. アプリケーション層が `StampRasterizer` でラスタライズし、`RasterizedStampAsset` を得る
-3. `domain` が `bindRasterAssets` で `RenderPlan` を生成する
+1. `Domain` が `compileRenderDraft` で寸法を確定し、`StampRasterRequest` の一覧を得る
+2. `Rendering` が `StampRasterizer` でラスタライズし、`RasterizedStampAsset` を得る
+3. `Domain` が `bindRasterAssets` で `RenderPlan` を生成する
 
-`domain` はポート（`StampRasterizer`）を定義するだけで、実装を持ちません。4.1 の依存の向きと一致します。
+`Domain` はプロトコルを定義するだけで、実装を持ちません。4.1 の依存の向きと一致します。
 
-スタンプをベクターで自作する方針の利点は変わりません。ネイティブ側は「画像を貼る」1 プリミティブで全スタンプを処理でき、スタンプの種類が増えてもネイティブコードは増えません。ラスタライズが Compose 側にあることで、**両 OS で同じ描画結果**になる点も維持されます。
+スタンプをベクターで自作する方針の利点は変わりません。`MediaKit` は「画像を貼る」1 プリミティブで全スタンプを処理でき、スタンプの種類が増えても描画コードは増えません。
 
 #### 5.1.2 ラスタ画像の受け渡し契約
 
-**ID とサイズだけでは、モジュール境界を越えて実体へ到達できません。** Compose の画像オブジェクト、Android の `Bitmap`、iOS の `CGImage` を共通型へ直接入れることはできないため、**OS 境界を越えられる形式**を定めます。
+**ID とサイズだけでは、モジュール境界を越えて実体へ到達できません。** `CGImage` を `Domain` の型へ入れることはできないため、**実体を指す形式**を定めます。
 
-```kotlin
-data class RasterizedStampAsset(
-    val bitmapId: String,
-    val rasterFileId: String,      // 専用ディレクトリ配下の一時ファイル
-    val pixelSize: PixelSize,
-    val rowBytes: Int,
-)
+```swift
+struct RasterizedStampAsset: Sendable {
+    let bitmapID: String
+    let rasterFileID: String      // 専用ディレクトリ配下の一時ファイル
+    let pixelSize: PixelSize
+    let rowBytes: Int
+}
 
-interface ImageEffectRenderer {
-    suspend fun render(
+protocol ImageEffectRenderer: Sendable {
+    func render(
         source: ImageSource,
         plan: RenderPlan,
-        rasterAssets: Map<String, RasterizedStampAsset>,   // bitmapId → 実体
-    ): RenderedImage
+        rasterAssets: [String: RasterizedStampAsset]   // bitmapID → 実体
+    ) async throws -> RenderedImage
 }
 ```
 
-**実体はファイル経由で渡します。** バイト配列を直接持たせる方式（`rgba8888: ByteArray`）も成立しますが、Pro の 1 バッチ 50 枚では、原寸スタンプのビットマップを複数枚同時にメモリへ載せることになります。専用ディレクトリの一時ファイルにすれば、ネイティブ側がメモリマップで読み、必要な範囲だけを GPU へ転送できます。`outputFileId` と同じく ID からパスを解決し、パス文字列は渡しません（7.4.3）。
+**実体はファイル経由で渡します。** `Data` を直接持たせる方式も成立しますが、Pro の 1 バッチ 50 枚では、原寸スタンプのビットマップを複数枚同時にメモリへ載せることになります。専用ディレクトリの一時ファイルにすれば、`CGDataProvider(url:)` でメモリマップして読めます。`outputFileID` と同じく ID からパスを解決し、パス文字列は渡しません（7.4.3）。
+
+##### ラスタファイルの形式
+
+**「RGBA8888」だけでは実装が一意に定まりません。** 次まで固定します。
 
 | 項目 | 規約 |
 | --- | --- |
-| ピクセル形式 | RGBA8888、**straight alpha**、sRGB（5.2.1） |
-| 行ストライド | `rowBytes`。`pixelSize.width * 4` と一致しない場合がある（アライメント） |
-| ID スコープ | `bitmapId` は**1 回の `render` 呼び出し内でのみ**一意。呼び出しをまたいで同じ ID が別実体を指してよい |
+| 構造 | **ヘッダなしの raw bytes** |
+| 行の順序 | **上から下** |
+| 各行の順序 | **左から右** |
+| チャネル順 | **R, G, B, A** |
+| ファイルサイズ | **`rowBytes * height` に厳密に一致する** |
+| `rowBytes` | **`>= width * 4`**（アライメントのため大きくてよい） |
+| 行末パディング | **ゼロ初期化する** |
+| アルファ | **straight alpha**。Core Graphics は premultiplied で描画するため、**保存前に straight へ変換する** |
+| 色空間 | sRGB（5.2.1） |
+
+**パディングをゼロ初期化しないと、未初期化メモリの内容がファイルへ書かれます。** `CGContext` が確保するバッファは、行末のアライメント領域を初期化する保証がありません。ここに残ったバイト列が、一時ファイルとしてディスクへ落ちます。プライバシー保護を目的とするアプリで、由来不明のメモリ内容を永続化することは許容できません。`CGBitmapContextGetData` の全域を明示的にゼロ埋めしてから描画します。
+
+**premultiplied → straight の変換を明示するのは、Core Graphics の既定が premultiplied だからです。** `CGImageAlphaInfo.premultipliedLast` のまま保存し、描画側で straight として扱うと、半透明のスタンプが暗くなります。
+
+##### 寿命とスコープ
+
+| 項目 | 規約 |
+| --- | --- |
+| ID スコープ | `bitmapID` は**1 回の `render` 呼び出し内でのみ**一意。呼び出しをまたいで同じ ID が別実体を指してよい |
 | 寿命 | `render` の呼び出し開始から復帰までの間、`rasterAssets` の全要素が有効であること |
 | 解放 | `render` の成功・失敗にかかわらず、復帰後に**呼び出し元が**一時ファイルを削除する。**解放は冪等**とし、二重解放と未解放の再解放をエラーにしない |
-| 再利用 | 同じ `StampRasterKey`（`source` と `rasterSize` の組）に対しては同一の `bitmapId` を返し、1 回の `render` 内で複数の `RenderRegion` から参照してよい |
-| 未解決 ID | `plan` が参照する `bitmapId` が `rasterAssets` に無い場合は描画を開始せず、エラーを返す（無視して描き飛ばさない）。`bindRasterAssets` が通っていれば起こりませんが、契約として残します |
+| 再利用 | 同じ `StampRasterKey`（`source` と `rasterSize` の組）に対しては同一の `bitmapID` を返し、1 回の `render` 内で複数の `RenderRegion` から参照してよい |
+| 未解決 ID | `plan` が参照する `bitmapID` が `rasterAssets` に無い場合は描画を開始せず、エラーを投げる（無視して描き飛ばさない）。`bindRasterAssets` が通っていれば起こりませんが、契約として残します |
 
 **ID スコープを呼び出し内に閉じるのは、同時レンダリングのためです。** 一括処理は将来 2 並列になります（6.5.8）。グローバルなレジストリを共有すると、片方の完了時の解放がもう片方の参照中実体を消します。呼び出しごとに集合が閉じていれば、この競合が起きません。
 
@@ -296,153 +362,172 @@ interface ImageEffectRenderer {
 
 再利用の単位を `StampRasterKey`（`source` と `rasterSize` の組）にするのは、同じスタンプでも顔の大きさが異なれば必要な解像度が変わるためです。1 枚に同じスタンプを 10 個置く場合、サイズが揃っていればラスタライズは 1 回で済みます。
 
-異常終了で一時ファイルが残った場合は、起動時の孤児ファイル掃除で回収します（7.4.3 の手順 0 と同じ扱い）。
+異常終了で一時ファイルが残った場合は、起動時の孤児ファイル掃除で回収します（8.4.1）。
 
 ### 5.2 RenderSpec と RenderPlan
 
 **記述（`RenderSpec`）とコンパイル済み命令（`RenderPlan`）を分けます。**
 
-以前の版は `RenderPlan` に `cellRatio` / `sigmaRatio` / `featherRatio` という**相対値**を入れたまま、5.1 では「強度の相対値をドメインで絶対値へ換算する」と書いていました。相対値のままネイティブへ渡せば、Core Image と OpenGL がそれぞれピクセル値へ換算するため OS 差が出ます。
+`RenderPlan` に `cellRatio` / `sigmaRatio` / `featherRatio` という**相対値**を残すと、Core Image を呼ぶ層が比率計算を持つことになります。エフェクトの数学を `Domain` に閉じる方針（5.1）と矛盾し、その計算のテストに実機が必要になります。
 
 同時に、「低解像度プレビューと原寸書き出しで**同じ `RenderPlan`**を使う」という表現も成立しません。`canvasSize` が異なる以上、別物です。
 
-```kotlin
-data class PixelSize(                   // ドメイン独自型。Compose の IntSize を使わない
-    val width: Int,
-    val height: Int,
-)
-
-/** 永続化・編集の対象。解像度に依存しない */
-data class RenderSpec(
-    val sourceCrop: NormalizedRect,     // 元画像のどこを切り出すか（出力比率の適用結果）
-    val scaleMode: SourceScaleMode,     // Fit / Fill
-    val background: BackgroundSpec,
-    val regions: List<RenderRegionSpec>,
-)
-
-data class RenderRegionSpec(
-    val bounds: NormalizedRect,         // 拡張率適用済み。出力キャンバス基準（5.2.1）
-    val rotationDegrees: Float,
-    val shape: MaskShape,               // Ellipse / Circle / Rectangle / Rounded(cornerRatio)
-    val featherRatio: Float,            // 領域短辺に対する比
-    val origin: RegionOrigin,           // Auto / Manual（描画順に使う）
-    val op: RenderOpSpec,
-)
-
-/** 組み込みスタンプとカスタムスタンプを文字列で混ぜない */
-sealed interface StampSource {
-    data class BuiltIn(val code: String) : StampSource
-    data class Custom(val contentHash: String) : StampSource
+```swift
+struct PixelSize: Sendable, Hashable {   // ドメイン独自型。CGSize を使わない
+    let width: Int
+    let height: Int
 }
 
-sealed interface RenderOpSpec {
-    data class Mosaic(val cellRatio: Float) : RenderOpSpec    // 領域短辺に対するセル比
-    data class Blur(val sigmaRatio: Float) : RenderOpSpec     // 領域短辺に対する σ 比
-    data class Solid(val color: SrgbArgb8888, val opacity: Float) : RenderOpSpec
-    data class Stamp(val source: StampSource, val opacity: Float) : RenderOpSpec
+/// 永続化・編集の対象。解像度に依存しない
+struct RenderSpec: Sendable, Equatable {
+    let sourceCrop: NormalizedRect       // 元画像のどこを切り出すか（出力比率の適用結果）
+    let scaleMode: SourceScaleMode       // fit / fill
+    let background: BackgroundSpec
+    let regions: [RenderRegionSpec]
 }
 
-sealed interface BackgroundSpec {
-    data object None : BackgroundSpec
-    data class Blur(val sigmaRatio: Float) : BackgroundSpec     // キャンバス短辺に対する比
-    data class Solid(val color: SrgbArgb8888) : BackgroundSpec
+struct RenderRegionSpec: Sendable, Equatable {
+    let bounds: NormalizedRect           // 拡張率適用済み。出力キャンバス基準（5.2.1）
+    let rotationDegrees: Double
+    let shape: MaskShape                 // ellipse / circle / rectangle / rounded(cornerRatio)
+    let featherRatio: Double             // 領域短辺に対する比
+    let origin: RegionOrigin             // auto / manual（描画順に使う）
+    let op: RenderOpSpec
+}
+
+/// 組み込みスタンプとカスタムスタンプを文字列で混ぜない
+enum StampSource: Sendable, Hashable {
+    case builtIn(code: String)
+    case custom(contentHash: String)
+}
+
+enum RenderOpSpec: Sendable, Equatable {
+    case mosaic(cellRatio: Double)                        // 領域短辺に対するセル比
+    case blur(sigmaRatio: Double)                         // 領域短辺に対する σ 比
+    case solid(color: SrgbArgb8888, opacity: Double)
+    case stamp(source: StampSource, opacity: Double)
+}
+
+enum BackgroundSpec: Sendable, Equatable {
+    case none
+    case blur(sigmaRatio: Double)                         // キャンバス短辺に対する比
+    case solid(color: SrgbArgb8888)
 }
 ```
 
 ##### 二段階コンパイル
 
-**一段階では依存が循環します。** `StampRasterRequest.rasterSize` は、対象解像度における `RenderRegion` のピクセル寸法から決まります。その寸法を計算するのはコンパイル処理です。一方で以前の `compileRenderPlan` は、先に `bitmapId` を要求していました。
+**一段階では依存が循環します。** `StampRasterRequest.rasterSize` は、対象解像度における `RenderRegion` のピクセル寸法から決まります。その寸法を計算するのはコンパイル処理です。しかし `RenderPlan` の構築には `bitmapID` が要ります。
 
 コンパイルを 2 つに分けます。
 
-```kotlin
-/** 第1段階: 解像度は確定したが、スタンプ実体はまだ束ねていない */
-data class RenderDraft(
-    val canvasSize: PixelSize,
-    val sourcePlacement: SourcePlacement,
-    val background: BackgroundOp,
-    val regions: List<RenderRegionDraft>,
-    val stampRequests: List<StampRasterRequest>,   // rasterSize は算出済み
-)
+```swift
+struct StampRasterKey: Sendable, Hashable {
+    let source: StampSource
+    let rasterSize: PixelSize
+}
 
-data class StampRasterKey(
-    val source: StampSource,
-    val rasterSize: PixelSize,
-)
+/// 第1段階: 解像度は確定したが、スタンプ実体はまだ束ねていない
+struct RenderDraft: Sendable {
+    let canvasSize: PixelSize
+    let sourcePlacement: SourcePlacement
+    let background: BackgroundOp
+    let regions: [RenderRegionDraft]
+    let stampRequests: [StampRasterRequest]   // rasterSize は算出済み
+}
 
-fun compileRenderDraft(
+/// RenderRegion との違いは op だけ。bitmapID の代わりに StampRasterKey を持つ
+struct RenderRegionDraft: Sendable {
+    let bounds: PixelRect
+    let rotationDegrees: Double
+    let shape: MaskShape
+    let featherPx: Double
+    let order: Int
+    let op: RenderOpDraft
+}
+
+enum RenderOpDraft: Sendable {
+    case mosaic(cellSizePx: Double)
+    case blur(sigmaPx: Double)
+    case solid(color: SrgbArgb8888, opacity: Double)
+    case stamp(key: StampRasterKey, opacity: Double)   // ← ここが RenderOp との差
+}
+
+func compileRenderDraft(
     spec: RenderSpec,
-    targetSize: PixelSize,
-): RenderDraft
+    targetSize: PixelSize
+) throws -> RenderDraft
 
-/** 第2段階: ラスタ実体を束ねて RenderPlan にする */
-fun bindRasterAssets(
+/// 第2段階: ラスタ実体を束ねて RenderPlan にする
+func bindRasterAssets(
     draft: RenderDraft,
-    assets: Map<StampRasterKey, RasterizedStampAsset>,
-): RenderPlan
+    assets: [StampRasterKey: RasterizedStampAsset]
+) throws -> RenderPlan
 ```
+
+**`RenderRegionDraft` と `RenderOpDraft` を明示的に定義します。** これが無いと、`bindRasterAssets` が「どの領域のどの `StampRasterKey` へ、どの `bitmapID` を差し込むのか」を表現できません。`bindRasterAssets` は `RenderOpDraft.stamp(key:opacity:)` の `key` で `assets` を引き、`RenderOp.stamp(bitmapID:opacity:)` へ置換します。それ以外の `case` は値をそのまま移します。
 
 処理の順序は次のとおりです。
 
-1. `compileRenderDraft(spec, targetSize)` で寸法を確定し、`stampRequests` を得る
-2. アプリケーション層が各 `StampRasterRequest` をラスタライズする
-3. `bindRasterAssets(draft, assets)` で `RenderPlan` を得る
+1. `compileRenderDraft(spec:targetSize:)` で寸法を確定し、`stampRequests` を得る
+2. `Rendering` が各 `StampRasterRequest` をラスタライズする
+3. `bindRasterAssets(draft:assets:)` で `RenderPlan` を得る
 
-`bindRasterAssets` は、`draft.stampRequests` に対応する `assets` が 1 件でも欠けていれば失敗します。未解決のまま `RenderPlan` を作れません（5.1.2 の「未解決 ID を無視しない」を型で保証します）。
+`bindRasterAssets` は、`draft.stampRequests` に対応する `assets` が 1 件でも欠けていれば `throw` します。未解決のまま `RenderPlan` を作れません（5.1.2 の「未解決 ID を無視しない」を型で保証します）。
 
 ##### コンパイル済みの命令
 
-```kotlin
-/** 特定解像度へコンパイル済み。絶対ピクセル値のみを持つ */
-data class RenderPlan(
-    val canvasSize: PixelSize,
-    val sourcePlacement: SourcePlacement,
-    val background: BackgroundOp,
-    val regions: List<RenderRegion>,
-)
-
-data class PixelRect(
-    val left: Int,
-    val top: Int,
-    val rightExclusive: Int,
-    val bottomExclusive: Int,
-)
-
-data class SourcePlacement(
-    val sourceRect: NormalizedRect,     // 元画像のどこを使うか
-    val destinationRect: PixelRect,     // キャンバス上のどこへ置くか
-    val scaleMode: SourceScaleMode,
-)
-
-enum class SourceScaleMode { Fit, Fill }
-
-data class RenderRegion(
-    val bounds: PixelRect,              // 出力キャンバス基準の絶対ピクセル
-    val rotationDegrees: Float,
-    val shape: MaskShape,
-    val featherPx: Float,
-    val order: Int,                     // 描画順（5.2.1）
-    val op: RenderOp,
-)
-
-sealed interface RenderOp {
-    data class Mosaic(val cellSizePx: Float) : RenderOp
-    data class Blur(val sigmaPx: Float) : RenderOp
-    data class Solid(val color: SrgbArgb8888, val opacity: Float) : RenderOp
-    data class Stamp(val bitmapId: String, val opacity: Float) : RenderOp
+```swift
+/// 特定解像度へコンパイル済み。絶対ピクセル値のみを持つ
+struct RenderPlan: Sendable {
+    let canvasSize: PixelSize
+    let sourcePlacement: SourcePlacement
+    let background: BackgroundOp
+    let regions: [RenderRegion]
 }
 
-sealed interface BackgroundOp {
-    data object None : BackgroundOp
+struct PixelRect: Sendable, Equatable {
+    let left: Int
+    let top: Int
+    let rightExclusive: Int
+    let bottomExclusive: Int
+}
 
-    /** 何をどうぼかして背景へ敷くかを明示する */
-    data class BlurFromSource(
-        val sourceRect: NormalizedRect,
-        val sigmaPx: Float,
-        val scaleMode: SourceScaleMode,
-    ) : BackgroundOp
+struct SourcePlacement: Sendable {
+    let sourceRect: NormalizedRect       // 元画像のどこを使うか
+    let destinationRect: PixelRect       // キャンバス上のどこへ置くか
+    let scaleMode: SourceScaleMode
+}
 
-    data class Solid(val color: SrgbArgb8888) : BackgroundOp
+enum SourceScaleMode: Sendable { case fit, fill }
+
+struct RenderRegion: Sendable {
+    let bounds: PixelRect                // 出力キャンバス基準の絶対ピクセル
+    let rotationDegrees: Double
+    let shape: MaskShape
+    let featherPx: Double
+    let order: Int                       // 描画順（5.2.1）
+    let op: RenderOp
+}
+
+enum RenderOp: Sendable {
+    case mosaic(cellSizePx: Double)
+    case blur(sigmaPx: Double)
+    case solid(color: SrgbArgb8888, opacity: Double)
+    case stamp(bitmapID: String, opacity: Double)
+}
+
+enum BackgroundOp: Sendable {
+    case none
+
+    /// 何をどうぼかして背景へ敷くかを明示する
+    case blurFromSource(
+        sourceRect: NormalizedRect,
+        sigmaPx: Double,
+        scaleMode: SourceScaleMode
+    )
+
+    case solid(color: SrgbArgb8888)
 }
 ```
 
@@ -459,12 +544,12 @@ sealed interface BackgroundOp {
 | キャンバス上のどこへ置くか | `SourcePlacement.destinationRect` |
 | Fit か Fill か | `SourcePlacement.scaleMode` |
 | 余白の埋め方 | `RenderPlan.background` |
-| 背景ぼかしの**元範囲** | `BackgroundOp.BlurFromSource.sourceRect` |
+| 背景ぼかしの**元範囲** | `BackgroundOp.blurFromSource` の `sourceRect` |
 | 顔領域の位置 | `RenderRegion.bounds`（**出力キャンバス基準の絶対ピクセル**） |
 
-`BackgroundOp.Blur(sigmaPx)` から `BlurFromSource` へ変えたのは、`sigma` だけでは「元画像全体をぼかすのか、切り抜き範囲をぼかすのか、どの倍率で敷くのか」が決まらないためです。一般的な用途では `sourceRect` に元画像全体を指定し、`Fill` でキャンバス全面へ拡大します。
+`BackgroundOp.blur(sigmaPx:)` ではなく `blurFromSource` にしたのは、`sigma` だけでは「元画像全体をぼかすのか、切り抜き範囲をぼかすのか、どの倍率で敷くのか」が決まらないためです。一般的な用途では `sourceRect` に元画像全体を指定し、`Fill` でキャンバス全面へ拡大します。
 
-`RenderRegion.bounds` の基準を**出力キャンバス**に確定します。元画像基準にすると、ネイティブ側が切り抜き変換を再実装することになり、「数学はドメイン」の方針に反します。`compileRenderDraft` が `sourcePlacement` を適用したあとの座標へ変換します。
+`RenderRegion.bounds` の基準を**出力キャンバス**に確定します。元画像基準にすると、`MediaKit` が切り抜き変換を再実装することになり、「数学はドメイン」の方針に反します。`compileRenderDraft` が `sourcePlacement` を適用したあとの座標へ変換します。
 
 ##### `sourceCrop` の不変条件
 
@@ -472,7 +557,7 @@ sealed interface BackgroundOp {
 
 - `width > 0` かつ `height > 0`
 - `0.0 <= left`、`right <= 1.0`、`0.0 <= top`、`bottom <= 1.0`
-- 違反は `compileRenderDraft` が例外とする（クランプで黙って直さない）
+- 違反は `compileRenderDraft` が `throw` する（クランプで黙って直さない）
 
 黙ってクランプすると、比率計算の誤りが出力の見た目としてしか現れず、原因の特定が遅れます。
 
@@ -480,7 +565,7 @@ sealed interface BackgroundOp {
 
 #### 5.2.1 座標・回転・色の共通規約
 
-**同じ `RenderPlan` を両 OS へ渡してゴールデン画像テストで一致させる以上、数値の解釈を規約として固定します。** 未定義のままだと、OS アダプタがそれぞれ独自に解釈し、同じ数値でも位置・回転・色・境界がずれます。
+**数値の解釈を規約として固定します。** 未定義のままだと、`MediaKit` の実装者（将来の自分を含む）が独自に解釈し、ゴールデン画像テストの期待値が「たまたま今の実装が出す値」になります。規約を先に決め、テストはそれを検証する手段に留めます。
 
 ##### `NormalizedRect`
 
@@ -507,13 +592,13 @@ sealed interface BackgroundOp {
 
 ##### ピクセルへの丸め
 
-`compileRenderDraft` が正規化値をピクセルへ変換する規則を固定します。両 OS が独自に丸めると、1 ピクセルの差でゴールデン画像テストが落ちます。
+`compileRenderDraft` が正規化値をピクセルへ変換する規則を固定します。丸めが未定義だと、プレビューと原寸で 1 ピクセルずれ、ゴールデン画像テストが不安定になります。
 
 | 値 | 丸め |
 | --- | --- |
 | `left` / `top` | **floor** |
 | `right` / `bottom` | **ceil** |
-| `featherPx` / `cellSizePx` / `sigmaPx` | 丸めない（`Float` のまま渡す） |
+| `featherPx` / `cellSizePx` / `sigmaPx` | 丸めない（`Double` のまま渡す） |
 
 `left` / `top` を floor、`right` / `bottom` を ceil にすると、領域は必ず**外側へ広がる**方向に丸められます。内側へ丸めると顔の縁が 1 ピクセル露出しうるため、安全側へ倒します。
 
@@ -534,14 +619,14 @@ sealed interface BackgroundOp {
 
 | 優先 | 対象 |
 | --- | --- |
-| 1（先） | `RegionOrigin.Auto`（自動検出された顔） |
-| 2（後） | `RegionOrigin.Manual`（利用者が追加した手動領域） |
+| 1（先） | `RegionOrigin.auto`（自動検出された顔） |
+| 2（後） | `RegionOrigin.manual`（利用者が追加した手動領域） |
 
 同一区分内は `RenderSpec.regions` の並び順を保ちます。
 
 **手動領域を後に置くのは、利用者の明示的な指示を最終結果にするためです。** 自動検出の結果に不足があって手動で足した領域が、自動領域に上書きされては意味がありません。
 
-`OverlappingFaces` を正式なトリアージ理由として扱い、ゴールデンテストにも含める以上（6.5.2）、重なり順をテスト実装任せにはできません。
+`overlappingFaces` を正式なトリアージ理由として扱い、ゴールデンテストにも含める以上（6.5.2）、重なり順をテスト実装任せにはできません。
 
 ##### 背景処理と顔エフェクトの適用順
 
@@ -563,11 +648,10 @@ sealed interface BackgroundOp {
 
 ##### 色
 
-```kotlin
-@JvmInline
-value class SrgbArgb8888(
-    val value: UInt,    // 0xAARRGGBB
-)
+```swift
+struct SrgbArgb8888: Sendable, Hashable {
+    let value: UInt32    // 0xAARRGGBB
+}
 ```
 
 | 項目 | 規約 |
@@ -576,61 +660,66 @@ value class SrgbArgb8888(
 | ビット配置 | `0xAARRGGBB` |
 | アルファ | **straight alpha**（premultiplied ではない） |
 | `opacity` の乗算 | **レンダラーが 1 回だけ**乗算する。ドメインは色へ焼き込まない |
-| premultiplied への変換 | Core Image / OpenGL が必要とする場合、**OS アダプタ側で**変換する |
+| premultiplied への変換 | Core Image と Core Graphics が premultiplied を要求するため、**`MediaKit` / `Rendering` 側で**変換する |
 
-`Long` ではなく専用の value class にするのは、符号やビット幅の解釈をアダプタ任せにしないためです。
+`UInt32` を裸で使わず専用型にするのは、ビット配置の解釈を呼び出し側任せにしないためです。
 
-`opacity` を「1 回だけ」と定めるのは、`SrgbArgb8888` のアルファと `RenderOp.Solid.opacity` の両方があるためです。前者は色そのものの不透明度、後者はエフェクト全体の適用強度で、レンダラーが両方を掛け合わせます。ドメイン側で事前に畳み込みません。
+`opacity` を「1 回だけ」と定めるのは、`SrgbArgb8888` のアルファと `RenderOp.solid` の `opacity` の両方があるためです。前者は色そのものの不透明度、後者はエフェクト全体の適用強度で、レンダラーが両方を掛け合わせます。ドメイン側で事前に畳み込みません。
 
 ##### `FaceDetector` の変換責務
 
-**両 OS の実装は、OS API の座標系と角度をこの規約へ変換してから `DetectedFace` を返します。**
+**`MediaKit` は Vision の座標系と角度をこの規約へ変換してから `DetectedFace` を返します。**
 
-Vision は左下原点の正規化座標を返し、ML Kit は左上原点のピクセル座標を返します。角度の符号も一致しません。この差を吸収するのはアダプタの責務であり、ドメインへ持ち込みません。契約テストで両 OS の変換結果が一致することを検証します（12.1）。
+**Vision は左下原点の正規化座標を返します。** 本設計は左上原点なので、Y 軸の反転が必要です。`VNImageRectForNormalizedRect` は `CGImage` の座標系（左下原点）を前提とするため、そのまま使うと上下が反転します。変換は `MediaKit` の責務であり、`Domain` へ持ち込みません。
 
-エフェクト強度は **`RenderSpec` の段階で領域サイズに対する相対値** として保持します（仕様 11.1）。`compileRenderDraft` が対象解像度で絶対ピクセルへ換算するため、低解像度プレビューと原寸書き出しで見た目が一致し、ゴールデン画像テストが成立します。**ネイティブ側は比率計算を一切行いません。**
+同様に、`VNFaceObservation` の `yaw` / `pitch` / `roll` は `NSNumber?` のラジアン値です。度への変換、`nil` の扱い（該当角度が推定できなかった場合）、符号の向きを 5.7.1 の共通モデルへ揃えます。
+
+エフェクト強度は **`RenderSpec` の段階で領域サイズに対する相対値** として保持します（仕様 11.1）。`compileRenderDraft` が対象解像度で絶対ピクセルへ換算するため、低解像度プレビューと原寸書き出しで見た目が一致し、ゴールデン画像テストが成立します。**`MediaKit` は比率計算を一切行いません。**
 
 ### 5.3 拡張率の適用
 
-```kotlin
-fun expand(face: NormalizedRect, effect: EffectSetting): NormalizedRect
+```swift
+func expand(face: NormalizedRect, effect: EffectSetting) -> NormalizedRect
 ```
 
 既定値は上 25% / 下 15% / 左右 15%（仕様 8.4）。スタンプはモザイクより大きめの拡張率を用います。
 
 **画像外へはみ出す場合もクランプしません。** クランプすると顔が露出する方向へ倒れるためです。はみ出しはマスク描画側で処理します。これは仕様 9.5 の「平滑化によって顔が露出する場合は、領域を小さくするのではなく拡張する」と同じ思想です。
 
-### 5.4 ネイティブ契約（v1 = 写真のみ）
+### 5.4 プラットフォームプロトコル（v1 = 写真のみ）
 
-**12 のプラットフォーム契約がありますが、すべてが「メディア」ではありません。** 実装先モジュールを契約ごとに指定します。
+**12 のプロトコルがありますが、すべてが「メディア」ではありません。** 実装先モジュールをプロトコルごとに指定します。
 
-| 契約 | 責務 | 実装モジュール | iOS | Android |
-| --- | --- | --- | --- | --- |
-| `PhotoPicker` | OS 標準ピッカー。画像のみ | `shared/media` | PhotosPicker | Photo Picker |
-| `FilePicker` | カスタムスタンプ用画像の取り込み。対応形式は 8.1 に従う | `shared/media` | UIDocumentPicker | SAF |
-| `ImageLoader` | 読み込み、向き正規化、検出用縮小、HEIC 対応 | `shared/media` | Image I/O | ImageDecoder |
-| `FaceDetector` | 顔検出。正規化座標で返す | `shared/media` | Vision | ML Kit |
-| `ImageEffectRenderer` | RenderPlan の 4 プリミティブ実行 | `shared/media` | Core Image | OpenGL ES 2.0 |
-| `ImageEncoder` | JPEG / PNG エンコード、メタデータ除去 | `shared/media` | Image I/O | Bitmap.compress + ExifInterface |
-| `MediaSaver` | 写真ライブラリ保存、登録日時の指定 | `shared/media` | PhotoKit | MediaStore |
-| `SharePresenter` | OS 共有シートの提示と結果の返却 | `shared/media` | UIActivityViewController | `Intent.ACTION_SEND` |
-| `CryptoKeyStore` | HMAC 鍵の生成と保持。**鍵のみ扱う** | `shared/data`（`security` パッケージ） | Keychain | Android Keystore |
-| `ProtectedBlobStore` | 署名済み状態の原子的な読み書き | `shared/data` | 保護ファイル（原子的置換） | Proto DataStore |
-| `AdPresenter` | バナー・全画面広告 | `shared/ads` | GADBannerView | AdView |
-| `PrivacyShield` | 画面スナップショット対策（7.7） | `composeApp`（アプリシェル） | `sceneWillResignActive` | `onPause` |
+iOS 単独になっても、これらをプロトコルとして切る理由は残ります。**テストダブルを差し込む点**であり、12.1.2 の saga テストが成立する境界だからです。
 
-`CryptoKeyStore` と `ProtectedBlobStore` を `shared/media` へ置きません。`shared/media` は画像の入出力に閉じた責務であり、ここへ鍵と台帳の保管を混ぜると、写真処理のテストダブルが鍵ストアまで抱えることになります。`PrivacyShield` はライフサイクルに紐づくため、アプリシェル側の責務です。
-
-### 5.5 動画対応で追加する契約（v2）
-
-以下 4 契約を **v1 の設計時点で定義**し、実装のみ v2 に回します。
-
-| 契約 | 責務 | iOS | Android |
+| プロトコル | 責務 | 実装モジュール | 使用 API |
 | --- | --- | --- | --- |
-| `VideoProbe` | 長さ、解像度、コーデック、回転、HDR 判定 | AVAsset | MediaExtractor |
-| `VideoFrameSource` | 時刻指定のフレーム取得 | AVAssetReader | MediaCodec |
-| `PreviewRenderer` | エフェクト適用済みテクスチャ出力 | MTKView | GLSurfaceView |
-| `VideoExporter` | 書き出し | AVAssetWriter | Media3 Transformer |
+| `PhotoPicker` | 写真選択。画像のみ | `MediaKit` | PhotosPicker |
+| `FilePicker` | カスタムスタンプ用画像の取り込み。対応形式は 8.1 に従う | `MediaKit` | `fileImporter` |
+| `ImageLoader` | 読み込み、向き正規化、検出用縮小、HEIC 対応 | `MediaKit` | Image I/O |
+| `FaceDetector` | 顔検出。正規化座標で返す | `MediaKit` | Vision |
+| `ImageEffectRenderer` | `RenderPlan` の 4 プリミティブ実行 | `MediaKit` | Core Image |
+| `ImageEncoder` | JPEG / HEIC エンコード、メタデータ除去 | `MediaKit` | Image I/O |
+| `MediaSaver` | 写真ライブラリ保存、登録日時の指定 | `MediaKit` | PhotoKit |
+| `SharePresenter` | 共有シートの提示と結果の返却 | `MediaKit` | `ShareLink` / `UIActivityViewController` |
+| `StampRasterizer` | スタンプのラスタライズ（5.1.1） | `Rendering` | Core Graphics |
+| `CryptoKeyStore` | HMAC 鍵の生成と保持。**鍵のみ扱う** | `Persistence/Security` | Keychain |
+| `ProtectedBlobStore` | 署名済み状態の原子的な読み書き | `Persistence` | 保護ファイル（原子的置換） |
+| `AdPresenter` | バナー・全画面広告 | `Ads` | Google Mobile Ads |
+| `PrivacyShield` | 画面スナップショット対策（7.7） | `App` | `scenePhase` |
+
+`CryptoKeyStore` と `ProtectedBlobStore` を `MediaKit` へ置きません。`MediaKit` は画像の入出力に閉じた責務であり、ここへ鍵と台帳の保管を混ぜると、写真処理のテストダブルが鍵ストアまで抱えることになります。`PrivacyShield` はライフサイクルに紐づくため、`App` 側の責務です。
+
+### 5.5 動画対応で追加するプロトコル（v2）
+
+以下 4 つを **v1 の設計時点で定義**し、実装のみ v2 に回します。
+
+| プロトコル | 責務 | 使用 API |
+| --- | --- | --- |
+| `VideoProbe` | 長さ、解像度、コーデック、回転、HDR 判定 | AVAsset |
+| `VideoFrameSource` | 時刻指定のフレーム取得 | AVAssetReader |
+| `PreviewRenderer` | エフェクト適用済みテクスチャ出力 | MTKView |
+| `VideoExporter` | 書き出し | AVAssetWriter |
 
 ##### v1 で先取りする範囲
 
@@ -651,9 +740,18 @@ fun expand(face: NormalizedRect, effect: EffectSetting): NormalizedRect
 
 ### 5.6 プレビューと書き出しの一致
 
-インタラクティブなプレビューは低解像度で `composeApp` の Compose Canvas により両 OS 共通で描画し、書き出しのみ原寸でネイティブが処理します。これは仕様 8.3 の「検出用縮小画像を使い、書き出し時は元解像度へ適用する」と整合します。
+インタラクティブなプレビューも書き出しも、**同じ `ImageEffectRenderer`（Core Image）が処理します。** 違うのは `targetSize` だけです。
 
-両者の乖離を防ぐため、**同一の `RenderSpec` から生成したプレビュー用と原寸用の `RenderPlan`** に対するゴールデン画像テストで、差分を許容誤差内に抑えます。解像度が異なる以上、`RenderPlan` そのものは別物です（5.2）。一致の根拠は `RenderSpec` の共通性と `compileRenderDraft` の決定性にあります。
+v1.x では「プレビューは Compose Canvas、書き出しはネイティブ」という二系統でしたが、iOS 単独ではその必要がありません。**描画経路を 1 本にできるため、プレビューと書き出しの乖離という問題自体が消えます。**
+
+- プレビュー: `compileRenderDraft(spec:targetSize: 長辺 1,280 程度)` → `render` → `Image` で表示
+- 書き出し: `compileRenderDraft(spec:targetSize: 原寸)` → `render` → `ImageEncoder`
+
+これは仕様 8.3 の「検出用縮小画像を使い、書き出し時は元解像度へ適用する」と整合します。
+
+**顔の枠・ハンドル・選択状態だけは SwiftUI `Canvas` が描きます。** これらは加工結果ではなく操作用のオーバーレイであり、書き出しには含まれません。
+
+ゴールデン画像テストは、**同一の `RenderSpec` から生成したプレビュー用と原寸用の出力**を比較し、差分を許容誤差内に抑えます。解像度が異なる以上、`RenderPlan` そのものは別物です（5.2）。一致の根拠は `RenderSpec` の共通性と `compileRenderDraft` の決定性にあります。
 
 ### 5.7 顔検出の座標処理
 
@@ -661,29 +759,54 @@ fun expand(face: NormalizedRect, effect: EffectSetting): NormalizedRect
 
 1. 元画像の向き情報を正規化する
 2. 検出用に長辺 1,920 ピクセル程度へ縮小する
-3. 顔検出を実行する
-4. **ネイティブ側で正規化座標へ変換して返す**
-5. 以降、ドメインは顔領域をピクセル座標として保持しない（出力サイズは `RenderPlan` 生成時にのみ受け取る。5.1）
+3. `DetectFaceRectanglesRequest` を実行する
+4. **`MediaKit` で正規化座標へ変換して返す**（Y 軸の反転を含む。5.2.1）
+5. 以降、`Domain` は顔領域をピクセル座標として保持しない（出力サイズは `compileRenderDraft` 呼び出し時にのみ受け取る。5.1）
 
 検出用画像上で顔の短辺が 24 ピクセル未満の検出結果には、顔単位のフラグ `isSmallFace` を立てます（仕様 8.5）。
 
 #### 5.7.1 顔単位の共通モデル
 
-`FaceDetector` が返す顔は、**両 OS が等しく提供できる値だけ**で構成します。片方にしかない値をドメインへ流すと、OS ごとに挙動が変わります（6.5.2 参照）。
+`FaceDetector` が返す顔を、`Domain` 側の値型へ変換して渡します。Vision の型（`FaceObservation`）を `Domain` へ流しません。
 
-```kotlin
-data class DetectedFace(
-    val bounds: NormalizedRect,   // Vision: boundingBox / ML Kit: getBoundingBox
-    val yawDegrees: Float,        // Vision: yaw        / ML Kit: getHeadEulerAngleY
-    val pitchDegrees: Float,      // Vision: pitch      / ML Kit: getHeadEulerAngleX
-    val rollDegrees: Float,       // Vision: roll       / ML Kit: getHeadEulerAngleZ
-    val isSmallFace: Boolean,     // 検出用画像上の短辺で判定
-)
+```swift
+struct DetectedFace: Sendable, Equatable {
+    let faceTrackID: String
+    let bounds: NormalizedRect    // 左上原点へ変換済み（5.2.1）
+    let confidence: Double        // 0.0〜1.0
+    let yawDegrees: Double?       // 推定できなかった場合は nil
+    let pitchDegrees: Double?
+    let rollDegrees: Double?
+    let isSmallFace: Bool         // 検出用画像上の短辺で判定
+}
 ```
 
-これらの顔単位の値と、ドメイン側で計算する端接触・重なりが、6.5.2 の `triage` の入力になります。写真単位の `ReviewRequired` と名前が重ならないよう、顔単位では `requiresReview` という名称を使いません。
+##### `confidence` を含める（v1.x からの変更）
 
-iOS の `confidence` はこのモデルに含めません。Android に対応する値がないためです（6.5.2）。
+**v1.x では `confidence` を除外していました。** ML Kit の `Face` に検出信頼度のアクセサが無く、片方の OS だけで判定すると警告の量が非対称になるためです。その代替として頭部回転角（`extremePose`）をトリアージ理由に据えていました。
+
+**iOS 単独になったため、この制約は消えます。** `FaceObservation.confidence` を使えるので、仕様 8.1 が求める「検出信頼度を保持する」をそのまま実装します。逸脱 1 件が解消します（15 節）。
+
+`extremePose` は削除しません。信頼度と頭部回転角は別の失敗を捉えます。
+
+| 理由 | 捉える状況 |
+| --- | --- |
+| `lowConfidence` | 検出器自身が確信を持てていない。誤検出または見落としの近傍 |
+| `extremePose` | 検出はできているが、横向き・上向きで**拡張率の既定値では隠しきれない**可能性がある |
+
+##### 角度が `nil` になる場合
+
+`VNFaceObservation` の `yaw` / `pitch` / `roll` は `NSNumber?` であり、**推定できないことがあります。** `0` として扱うと「正面を向いている」と誤認します。
+
+| 状況 | 扱い |
+| --- | --- |
+| 角度が得られた | 度へ変換して保持する |
+| 角度が `nil` | **`nil` のまま保持する。`0` で埋めない** |
+| `extremePose` の判定 | 角度が `nil` の顔は**この理由では警告しない**（判定材料が無いため） |
+
+角度が `nil` の顔を安全側へ倒す必要はありません。`lowConfidence` と `isSmallFace` が別途判定するためです。ここで一律に警告すると、警告が多すぎて利用者が読まなくなります。
+
+これらの顔単位の値と、`Domain` 側で計算する端接触・重なりが、6.5.2 の `triage` の入力になります。写真単位の `reviewRequired` と名前が重ならないよう、顔単位では `requiresReview` という名称を使いません。
 
 ---
 
@@ -693,7 +816,7 @@ iOS の `confidence` はこのモデルに含めません。Android に対応す
 
 **検出された顔は、すべて加工対象の状態で初期化します。** これはドメインの不変条件とし、UI の慣習に委ねません。
 
-```kotlin
+```swift
 // FaceTrack の生成時、isMasked は常に true
 // 「残す」は利用者の明示的な操作によってのみ false になる
 ```
@@ -735,63 +858,69 @@ iOS の `confidence` はこのモデルに含めません。Android に対応す
 
 **通常クォータ、`ExportGrant`、トライアル台帳を別々の値として持ちません。1 つの署名済みオブジェクトとして原子的に置き換えます。**
 
-```kotlin
-data class UsageLedger(
-    val period: YearMonth,                       // 消費を計上している年月
-    val consumedExportIds: Set<String>,          // 計上済みの書き出し
-    val grants: Map<String, GrantEntry>,         // sourceHash → 権利
-    val trialEntries: Map<String, TrialEntry>,   // sourceHash → トライアル消費
-    val trialReservations: Map<String, String>,  // sourceHash → exportId。認可時の予約（6.5.6.1）
-    val lastObservedAt: Instant,                 // 後退させない基準時刻（6.2.2.5）
-    val monthlyBlockedPeriod: YearMonth?,        // 破損修復により当月を封じた場合の年月
-    val trialIntegrityLocked: Boolean,           // 破損修復によりトライアルを封じたか
-)
+```swift
+struct YearMonth: Sendable, Hashable, Comparable {
+    let year: Int
+    let month: Int          // 1...12
+}
 
-data class GrantEntry(
-    val firstSuccessAt: Instant,
-    val ownerExportId: String,   // この要素を作った書き出し
-)
+struct UsageLedger: Sendable, Equatable {
+    let period: YearMonth                        // 消費を計上している年月
+    let consumedExportIDs: Set<String>           // 計上済みの書き出し
+    let grants: [GrantEntry]                     // 権利（6.2.4）
+    let trialEntries: [TrialEntry]               // トライアル消費
+    let trialReservations: [TrialReservation]    // 認可時の予約（6.5.6.1）
+    let lastObservedAt: Date                     // 後退させない基準時刻（6.2.2.5）
+    let monthlyBlockedPeriod: YearMonth?         // 破損修復により当月を封じた場合の年月
+    let trialIntegrityLocked: Bool               // 破損修復によりトライアルを封じたか
+}
 
-data class TrialEntry(val ownerExportId: String)
+extension UsageLedger {
+    var consumed: Int { consumedExportIDs.count }
 
-val UsageLedger.consumed: Int get() = consumedExportIds.size
+    func grant(for source: SourceIdentity) -> GrantEntry? {
+        grants.first { isSameSource($0.source, source) }
+    }
+}
 ```
 
-**各要素に `ownerExportId` を持たせます。** 7.4.3 のロールバックで「この書き出しが追加したもの」と「以前から存在したもの」を、**台帳そのものから**判別するためです。Room 側の記録だけに頼ると、台帳を書いた直後に落ちた場合に判別できません。
+`GrantEntry` / `TrialEntry` / `TrialReservation` の定義と、`Dictionary` ではなく配列にした理由は 6.2.4 に示します。
 
-**消費を件数ではなく書き出し ID の集合で持ちます。** 単なる `Int` では、7.4.3 が要求する「同じ `exportId` の再適用を弾く」も「特定の書き出しの消費だけ取り消す」も実装できません。集合にすれば、再適用は自然に冪等になり、ロールバックは該当 ID の削除で済みます。
+**各要素に `ownerExportID` を持たせます。** 7.4.3 のロールバックで「この書き出しが追加したもの」と「以前から存在したもの」を、**台帳そのものから**判別するためです。DB 側の記録だけに頼ると、台帳を書いた直後に落ちた場合に判別できません。
 
-`grants` を `Map<sourceHash, GrantEntry>` にしたのも同じ理由です。同一 `sourceHash` への追記が上書きにならず、`firstSuccessAt` を維持できます（6.2.0）。
+**消費を件数ではなく書き出し ID の集合で持ちます。** 単なる `Int` では、7.4.3 が要求する「同じ `exportID` の再適用を弾く」も「特定の書き出しの消費だけ取り消す」も実装できません。集合にすれば、再適用は自然に冪等になり、ロールバックは該当 ID の削除で済みます。
 
-3 つを別々の ProtectedBlobStore 値として更新すると、片方だけ書けた状態が生じます。1 つの署名済みオブジェクトなら、置き換えは全部か無かです。
+`grants` も同じ理由で、同一素材への追記が上書きにならないようにします。既存要素があれば `firstSuccessAt` を維持します（6.2.0）。
+
+3 つを別々の `ProtectedBlobStore` 値として更新すると、片方だけ書けた状態が生じます。1 つの署名済みオブジェクトなら、置き換えは全部か無かです。
 
 ##### 判定
 
-```kotlin
-sealed interface QuotaDecision {
-    object Unlimited : QuotaDecision        // Standard / Pro
-    object FreeReexport : QuotaDecision     // 24 時間以内の再書き出し。消費しない
-    object Consume : QuotaDecision          // 1 消費する
-    data class Blocked(val reason: QuotaBlockReason, val limit: Int?) : QuotaDecision
+```swift
+enum QuotaBlockReason: Sendable {
+    case monthlyLimitReached      // 通常の月間上限
+    case ledgerIntegrityFailure   // 台帳破損による当月封鎖（6.2.5）
 }
 
-enum class QuotaBlockReason {
-    MonthlyLimitReached,      // 通常の月間上限
-    LedgerIntegrityFailure,   // 台帳破損による当月封鎖（6.2.5）
+enum QuotaDecision: Sendable, Equatable {
+    case unlimited                                        // Standard / Pro
+    case freeReexport                                     // 24 時間以内の再書き出し。消費しない
+    case consume                                          // 1 消費する
+    case blocked(reason: QuotaBlockReason, limit: Int?)
 }
 
-data class QuotaEvaluation(
-    val decision: QuotaDecision,
-    val updatedLedger: UsageLedger,   // 時刻更新・月次更新・期限切れ grant の整理を含む
-)
+struct QuotaEvaluation: Sendable {
+    let decision: QuotaDecision
+    let updatedLedger: UsageLedger   // 時刻更新・月次更新・期限切れ grant の整理を含む
+}
 
-fun evaluate(
+func evaluate(
     ledger: UsageLedger,
-    access: SingleExportAccess,       // Plan ではない。6.3 が解決した能力を受け取る
-    sourceHash: String,
-    effectiveNow: Instant,            // 6.2.2.5 で正規化済み。端末時刻を直接渡さない
-    zone: TimeZone,
-): QuotaEvaluation
+    access: SingleExportAccess,      // Plan ではない。6.3 が解決した能力を受け取る
+    source: SourceIdentity,          // 6.2.4
+    effectiveNow: Date,              // 6.2.2.5 で正規化済み。端末時刻を直接渡さない
+    timeZone: TimeZone
+) -> QuotaEvaluation
 ```
 
 **判定結果だけでなく更新後の台帳も返します。** `QuotaDecision` しか返さないと、`lastObservedAt` の前進、月次更新、期限切れ `grant` の削除を永続化できません。
@@ -804,20 +933,20 @@ fun evaluate(
 
 `EntitlementResolver` が確定した能力を渡します。
 
-```kotlin
-enum class SingleExportAccess {
-    Metered,      // 月間枠の対象
-    Unlimited,    // 月間枠の対象外
+```swift
+enum SingleExportAccess: Sendable {
+    case metered      // 月間枠の対象
+    case unlimited    // 月間枠の対象外
 }
 
-data class ResolvedCapabilities(
-    val singleExportAccess: SingleExportAccess,
-    val canUsePremiumStamps: Boolean,
-    val canUseCustomStamps: Boolean,
-    val canUseProBatch: Boolean,      // 制限なしの一括処理
-    val canUseBatchTrial: Boolean,    // クレジット消費による一括トライアル
-    val shouldShowAds: Boolean,
-)
+struct ResolvedCapabilities: Sendable, Equatable {
+    let singleExportAccess: SingleExportAccess
+    let canUsePremiumStamps: Bool
+    let canUseCustomStamps: Bool
+    let canUseProBatch: Bool      // 制限なしの一括処理
+    let canUseBatchTrial: Bool    // クレジット消費による一括トライアル
+    let shouldShowAds: Bool
+}
 ```
 
 `Plan` を参照してよいのは能力解決の内側だけです。`QuotaPolicy`、`AdFrequencyPolicy`、開始ゲート、一括処理の可否判定、既存作品の編集可否、UI の活性制御は、すべて `ResolvedCapabilities` を見ます。
@@ -828,13 +957,13 @@ data class ResolvedCapabilities(
 
 解決そのものを状態型にします。
 
-```kotlin
-sealed interface CapabilityResolution {
-    data class Resolved(val capabilities: ResolvedCapabilities) : CapabilityResolution
-    data object VerificationRequired : CapabilityResolution
+```swift
+enum CapabilityResolution: Sendable {
+    case resolved(ResolvedCapabilities)
+    case verificationRequired
 }
 
-fun resolveCapabilities(state: SubscriptionCacheState): CapabilityResolution
+func resolveCapabilities(_ state: SubscriptionCacheState) -> CapabilityResolution
 ```
 
 `VerificationRequired` の間の挙動を定めます。
@@ -884,7 +1013,7 @@ v1 では次を規則とします。
 | 動作 | 条件 |
 | --- | --- |
 | `grants` へ `sourceHash` を追加する | 利用可能な出力の生成が正常に完了した時点＝コミット手順 8 の完了（7.4.3）。プランを問わない |
-| `consumedExportIds` へ `exportId` を追加する | `QuotaDecision` が `Consume` のときだけ |
+| `consumedExportIds` へ `exportID` を追加する | `QuotaDecision` が `Consume` のときだけ |
 | `firstSuccessAt` を更新する | しない。同一 `sourceHash` の有効な grant があれば、そのまま維持する |
 
 有料プランでの書き出し時に grant を作らないと、次の経路が破綻します。
@@ -944,7 +1073,7 @@ enum class OutputState { Generated, Delivered, Discarded }
 バッチの状態は、各 `OutputRecord`（型定義は 7.4.3）の状態から集計して導出します。
 
 ```kotlin
-// バッチの未受け渡し枚数 = records.count { it.batchId == id && it.state == Generated }
+// バッチの未受け渡し枚数 = records.count { it.batchID == id && it.state == Generated }
 ```
 
 一括保存が部分的に成功した場合、**すでに `Delivered` の写真を再保存せず、`Generated` の写真だけを再試行**します。
@@ -1114,9 +1243,82 @@ fun rollPeriod(ledger: UsageLedger, effectiveNow: Instant, zone: TimeZone): Usag
 
 #### 6.2.4 同一素材の判定
 
-仕様 14.3 は「新しいプロジェクトとして作り直しても、元素材識別子とローカルハッシュが一致すれば同一素材として扱う」と定めます。`PHAsset.localIdentifier` や MediaStore の URI は再インストールや再選択で変わりうるため、**ハッシュを主、識別子を従**とします。
+仕様 14.3 は「新しいプロジェクトとして作り直しても、元素材識別子とローカルハッシュが一致すれば同一素材として扱う」と定めます。
 
-ハッシュは `ファイルサイズ + 先頭 64KB + 末尾 64KB + 撮影日時` の複合とします。48 メガピクセルの HEIC を全読みする負荷を避けるためです。
+##### 単一ハッシュでは足りない
+
+`sourceHash` 1 本にすると、**OS が画像を変換した場合に同一素材と判定できません。**
+
+PhotosPicker は、要求形式や iCloud の状態によって HEIC を JPEG へ変換して返します。変換後は先頭・末尾のバイト列が別物になるため、**同じ写真が別ハッシュになり、無料枠を二重に消費します。** これは 6.2.4 が掲げる「同一素材なのに二重消費する方向へ倒さない」に正面から反します。
+
+`representation` をハッシュ入力へ含めない（後述）だけでは解決しません。含めなくても、バイト列そのものが異なるためです。
+
+##### 複合 ID にする
+
+素材の識別を、**2 つの独立した手掛かりの OR** とします。
+
+```swift
+struct SourceIdentity: Sendable, Hashable {
+    /// 写真ライブラリの asset 識別値を端末内でハッシュ化したもの。
+    /// 取得できない場合（ファイル取り込み等）は nil
+    let providerAssetKeyHash: String?
+
+    /// サイズ・先頭 64KB・末尾 64KB・撮影日時から算出（後述の正準化規則）
+    let contentFingerprint: String
+}
+
+func isSameSource(_ a: SourceIdentity, _ b: SourceIdentity) -> Bool {
+    if let ka = a.providerAssetKeyHash, let kb = b.providerAssetKeyHash, ka == kb {
+        return true
+    }
+    return a.contentFingerprint == b.contentFingerprint
+}
+```
+
+| 状況 | 同一判定 |
+| --- | --- |
+| asset 識別値が取得でき、一致する | **同一。** OS がトランスコードしても判定できる |
+| asset 識別値が取得できないが、内容が一致する | **同一。** ファイル取り込みや再インストール後もこの経路で拾える |
+| asset 識別値が取得できず、表現も変わった | 同一と判定できない（保証の限界） |
+
+**`PHAsset.localIdentifier` を平文で保存しません。** 仕様 14.5 は不正利用防止のための識別子収集を制限しています。端末内でソルト付きハッシュへ変換し、元の値を復元できない形で持ちます。ソルトは `CryptoKeyStore` の鍵から導出します。
+
+##### 台帳の保持形式
+
+**OR 条件を `Dictionary` のキーで表せません。** 台帳の各集合を配列とし、要素が `SourceIdentity` 全体を持ちます。
+
+```swift
+struct GrantEntry: Sendable, Equatable {
+    let source: SourceIdentity
+    let firstSuccessAt: Date
+    let ownerExportID: String
+}
+
+struct TrialEntry: Sendable, Equatable {
+    let source: SourceIdentity
+    let ownerExportID: String
+}
+
+struct TrialReservation: Sendable, Equatable {
+    let source: SourceIdentity
+    let exportID: String
+}
+```
+
+**線形探索で構いません。** 各集合の要素数には上限があります。
+
+| 集合 | 上限 |
+| --- | --- |
+| `grants` | 24 時間以内に成功した書き出しの素材数。実用上は数件〜数十件 |
+| `trialEntries` | `configuredCreditCount`（既定 5） |
+| `trialReservations` | 同時実行数。v1 は 1、将来 2（6.5.8） |
+| `consumedExportIDs` | 月間上限（既定 5） |
+
+**不変条件: `isSameSource` が真になる要素を、同じ集合内に 2 件持ちません。** 追加時は必ず既存要素を `isSameSource` で検索し、見つかれば置き換えではなく既存を維持します（`grants` の `firstSuccessAt` を延長しないため。6.2.0）。
+
+##### `contentFingerprint` の構成
+
+`ファイルサイズ + 先頭 64KB + 末尾 64KB + 撮影日時` の複合とします。48 メガピクセルの HEIC を全読みする負荷を避けるためです。
 
 理論上の衝突時は「別素材なのに無料で再書き出しできる」方向へ倒れます。これはユーザーに有利な安全側であり許容します。逆方向（同一素材なのに二重消費）へ倒れる設計は採りません。
 
@@ -1207,7 +1409,7 @@ enum class SourceRepresentation {
 
 `UsageLedger` を平文で DB に保存すると、DB を書き換えるだけで無料枠が無制限になります。一方で仕様 14.5 は、不正利用防止のためだけに端末固有識別子や過剰な個人情報を収集することを禁じています。
 
-折衷案として、Keychain / Keystore の鍵で `UsageLedger` に HMAC 署名を付与します。サーバー照合も端末識別子の収集も行いません。
+折衷案として、Keychain の鍵で `UsageLedger` に HMAC 署名を付与します。サーバー照合も端末識別子の収集も行いません。
 
 ##### 読み込み結果の分類
 
@@ -1422,7 +1624,7 @@ data class ReviewIssueId(
 )
 
 data class ReviewIssue(
-    val issueId: ReviewIssueId,
+    val issueID: ReviewIssueId,
     val affectedFaceTrackIds: Set<String>,
 )
 
@@ -1447,11 +1649,11 @@ fun triage(result: DetectionResult, detectionRevision: Long): List<ReviewIssue>
 
 ##### 再検出時は対応づけを試みない
 
-**「再検出しても同じ顔へ同じ ID が付く」とは保証できません。** 新旧の顔を対応づけるアルゴリズムが必要になりますが、検出順が変わっただけでも別の `faceTrackId` になりえます。誤った対応づけは「別人の顔に対する判断を、この顔の判断として扱う」ことを意味し、匿名化確認としては最悪の失敗です。
+**「再検出しても同じ顔へ同じ ID が付く」とは保証できません。** 新旧の顔を対応づけるアルゴリズムが必要になりますが、検出順が変わっただけでも別の `faceTrackID` になりえます。誤った対応づけは「別人の顔に対する判断を、この顔の判断として扱う」ことを意味し、匿名化確認としては最悪の失敗です。
 
 v1 では対応づけを試みません。
 
-- `issueId` に **`detectionRevision`** を含める
+- `issueID` に **`detectionRevision`** を含める
 - **再検出のたびに `detectionRevision` を増やす**
 - 再検出時は、その写真の **`ReviewIssue` / `ReviewDecision` / `Reviewed` をすべて破棄する**
 
@@ -1461,7 +1663,7 @@ v1 では対応づけを試みません。
 
 | 理由 | `affectedFaceTrackIds` |
 | --- | --- |
-| `SmallFace` / `ExtremePose` / `FaceAtEdge` | 対象の `faceTrackId` 1 件 |
+| `SmallFace` / `ExtremePose` / `FaceAtEdge` | 対象の `faceTrackID` 1 件 |
 | `OverlappingFaces` | 重なる 2 件を**辞書順に並べる**（順序で別 ID にならないように） |
 | `NoFaceDetected` | 空。ID は写真 ID と `detectionRevision` から生成する |
 
@@ -1610,7 +1812,7 @@ sealed interface ReviewResolution {
     data object AcceptedAsIs : ReviewResolution
 
     /** 手動で隠す範囲を追加した。どの領域かを保持する */
-    data class ManualRegionAdded(val regionId: String) : ReviewResolution
+    data class ManualRegionAdded(val regionID: String) : ReviewResolution
 
     /** 顔を隠さずそのまま保存すると選んだ */
     data object UnmaskedExportConfirmed : ReviewResolution
@@ -1621,12 +1823,12 @@ data class ReviewDecision(
 )
 ```
 
-**`ManualRegionAdded` は `regionId` を持ちます。** 単なる列挙値だと、どの手動領域を追加したのかが分かりません。あとから利用者がその領域を削除した場合に、判断だけが残って「対応済み」と表示されます。
+**`ManualRegionAdded` は `regionID` を持ちます。** 単なる列挙値だと、どの手動領域を追加したのかが分かりません。あとから利用者がその領域を削除した場合に、判断だけが残って「対応済み」と表示されます。
 
 領域の作成と判断の記録は、**1 つのドメインコマンドで原子的に**行います。片方だけが成立する状態を作りません。
 
 - 手動領域の作成が失敗すれば、判断も記録しない
-- `regionId` の領域が削除されたら、対応する `ReviewResolution` も破棄して `Unreviewed` へ戻す
+- `regionID` の領域が削除されたら、対応する `ReviewResolution` も破棄して `Unreviewed` へ戻す
 
 **判断は `ReviewIssue` ごとに記録します（理由ごとではありません）。** 1 枚の写真には複数の警告が同時に付き、同じ理由が複数件つくこともあります（6.5.2）。
 
@@ -1773,24 +1975,24 @@ Free の単体書き出しには月間認可ゲートがありますが（7.4.3�
 ```kotlin
 data class UsageLedger(
     // ...
-    val trialReservations: Map<String, String>,   // sourceHash → exportId
+    val trialReservations: Map<String, String>,   // sourceHash → exportID
 )
 ```
 
 | 契機 | 操作 | 保存先 |
 | --- | --- | --- |
-| 認可時（`BatchTrial(true)` と判定。手順 −2） | `trialReservations[sourceHash] = exportId` を**同じ `transact` の中で**追加する | ProtectedBlobStore |
+| 認可時（`BatchTrial(true)` と判定。手順 −2） | `trialReservations[sourceHash] = exportID` を**同じ `transact` の中で**追加する | ProtectedBlobStore |
 | `Prepared` の保存に失敗（手順 0） | **補償トランザクション**で予約を削除する | ProtectedBlobStore |
 | 台帳への適用（手順 4） | **同じ台帳トランザクション内で**予約を削除し、`trialEntries[sourceHash]` へ移す | ProtectedBlobStore |
-| 最終確定（手順 8） | **台帳には触らない**（Room のみ） | — |
-| ロールバック | この `exportId` が所有する**予約または `trialEntries`** を削除する | ProtectedBlobStore |
+| 最終確定（手順 8） | **台帳には触らない**（DB のみ） | — |
+| ロールバック | この `exportID` が所有する**予約または `trialEntries`** を削除する | ProtectedBlobStore |
 | 起動時 | コミットの無い予約を孤児として削除する。**その完了後に新規認可を許可する** | ProtectedBlobStore |
 
 **残数計算は `trialEntries` と `trialReservations` の合計で行います。** 予約を数えなければ、予約を作った意味がありません。
 
 **不変条件: 同じ `sourceHash` が `trialEntries` と `trialReservations` の両方に存在してはなりません。** 予約から entry への移動は同一トランザクション内の削除と追加であり、中間状態が観測されません。この条件を台帳の検証時にも確認します。
 
-予約の削除は `ownerExportId` と同じ規則で、**その `exportId` が所有する予約だけ**を対象とします（6.2）。
+予約の削除は `ownerExportID` と同じ規則で、**その `exportID` が所有する予約だけ**を対象とします（6.2）。
 
 **予約はコミットより先に作られます。** 認可トランザクション（手順 −2）で予約を作り、その後に手順 0 で `Prepared` を保存します。順序がこの向きである以上、`Prepared` の保存に失敗した場合の補償が必要です。
 
@@ -2002,9 +2204,26 @@ Pro を必要とするのは、バッチという単位に対する操作だけ�
 
 ## 7. データモデルと永続化
 
-### 7.1 Room KMP
+### 7.1 データベース構成
 
-仕様 19 章のテーブルを採用し、`Batch` を追加します。
+GRDB（SQLite）を使います。採用理由は 3.3 に示します。
+
+##### データベースを 2 つに分ける
+
+**バックアップの単位はファイルであり、テーブルではありません。** OS のバックアップ規則が扱えるのはパスなので、1 つの SQLite ファイルの中で「このテーブルは対象外」と指定することはできません（7.3.1）。
+
+保存するデータの性質でファイルを分けます。
+
+**`runtime.db`（バックアップ対象外）**
+
+| テーブル | 備考 |
+| --- | --- |
+| `ExportCommit` | 書き出しのコミットジャーナル。行に HMAC を付ける（7.4.3） |
+| `OutputRecord` | 写真ごとの出力状態。`exportID` でコミットと対応づける。実体はパスではなく `outputFileID` で参照し、`outputByteSize` と `outputSha256` を持つ（7.4.3） |
+| `ExportQueueItem` | 一括処理のキュー状態（6.5.8） |
+| `PendingFileDeletion` | 参照 0 になった実体の削除候補。DB のコミット後に削除し、失敗は起動時 GC で再試行（8.4.1） |
+
+**`user-data.db`（バックアップ方針は 16 節で決定）**
 
 | テーブル | 備考 |
 | --- | --- |
@@ -2014,24 +2233,35 @@ Pro を必要とするのは、バッチという単位に対する操作だけ�
 | `EffectSetting` | 仕様 19.4 |
 | `ExportSetting` | 仕様 19.5 |
 | `CustomStamp` | 仕様 19.6。スタンプ一覧の項目（8.4） |
-| `StampAsset` | 新規。プロジェクトが参照する不変の画像実体。内容ハッシュを主キーとし参照カウントを持つ（8.4） |
-| `ExportRecord` | 仕様 19.7。`batchId` を追加 |
-| `OutputRecord` | 新規。写真ごとの出力状態。`exportId` でコミットと対応づける。実体はパスではなく `outputFileId` で参照し、`outputByteSize` と `outputSha256` を持つ（7.4.3） |
-| `ExportCommit` | 新規。書き出しのコミットジャーナル。行に HMAC を付ける（7.4.3） |
-| `Batch` | 新規。バッチ単位の履歴（7.2.6） |
-| `PendingFileDeletion` | 新規。参照 0 になった実体の削除候補。Room コミット後に削除し、失敗は起動時 GC で再試行（8.4.1） |
-| `BatchPreset` | 新規。一括設定プリセット（6.5.8） |
+| `StampAsset` | プロジェクトが参照する不変の画像実体のメタデータ。内容ハッシュを主キーとし参照カウントを持つ（8.4） |
+| `ExportRecord` | 仕様 19.7。`batchID` を追加 |
+| `Batch` | バッチ単位の履歴（7.2.6） |
+| `BatchPreset` | 一括設定プリセット（6.5.8） |
+
+**`runtime.db` を復元してはいけない理由は明確です。** `ExportCommit` を別端末へ復元しても、対応する一時ファイルは存在せず、`UsageLedger`（バックアップ対象外）との整合も失われます。復元された途端に全件が復旧エラーになります。
+
+##### 2 つの DB にまたがるトランザクションを作らない
+
+**この分割は制約を生みます。** 手順 8 の単一トランザクション（7.4.3）は `OutputRecord`・`ExportRecord`・キュー状態・`Project` を同時に更新しますが、このうち `ExportRecord` と `Project` は `user-data.db` 側です。
+
+**SQLite の `ATTACH DATABASE` を使い、1 つの接続から両ファイルを扱います。** GRDB は `DatabaseQueue` の設定で `ATTACH` を実行でき、**アタッチされた DB をまたぐトランザクションは原子的です**（SQLite が 2 相コミットを行います）。手順 8 の原子性はこれで保たれます。
+
+`ATTACH` を使わず 2 つの接続に分けると、手順 8 が 2 つのトランザクションに割れ、その間で落ちた場合に「出力は公開済みだがキューは `exporting`」という状態が残ります。7.4.3 が排除しようとした不整合そのものです。
+
+##### 保護ストア
 
 以下は DB ではなく **`ProtectedBlobStore`** へ保存します。改ざんで権限や枠を書き換えられないようにするためです（6.2.5 の HMAC 署名つき）。
 
-**鍵の保管とデータの保管を分けます。** Android Keystore が保持できるのは暗号鍵であり、任意のデータを置くストレージではありません。iOS の Keychain も、台帳のような可変データを繰り返し置き換える用途には向きません。
+**鍵の保管とデータの保管を分けます。** Keychain は、台帳のような可変データを繰り返し置き換える用途に向きません。
 
-| 役割 | 契約 | iOS | Android |
-| --- | --- | --- | --- |
-| 鍵 | `CryptoKeyStore` | Keychain | Android Keystore（エクスポート不可） |
-| 署名済みデータ本体 | `ProtectedBlobStore` | アプリ専用ディレクトリ上のファイル（原子的置換） | Proto DataStore |
+| 役割 | プロトコル | 実装 |
+| --- | --- | --- |
+| 鍵 | `CryptoKeyStore` | Keychain（`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`） |
+| 署名済みデータ本体 | `ProtectedBlobStore` | アプリ専用ディレクトリ上のファイル（原子的置換） |
 
-いずれも原子的な置き換えができることを要件とします。台帳は 1 つのオブジェクトとして丸ごと差し替えるため、部分更新の途中状態が観測されてはいけません（6.2）。
+原子的な置き換えができることを要件とします。台帳は 1 つのオブジェクトとして丸ごと差し替えるため、部分更新の途中状態が観測されてはいけません（6.2）。実装は一時ファイルへ書いてから `FileManager.replaceItemAt` です。
+
+**`ThisDeviceOnly` を指定するのは、鍵を別端末へ移行させないためです。** ただしこれは**アンインストール時の削除を保証しません**（7.3.1）。
 
 - `SubscriptionState`（6.3 の `Entitlement` キャッシュ）。読み込み失敗時の扱いは 6.3 に定義する
 - `UsageLedger`（6.2）。通常クォータ・grant・トライアル台帳・基準時刻を1つの署名済みオブジェクトとして原子的に置き換える。残クレジットは保存せず台帳から導出する
@@ -2128,18 +2358,40 @@ Pro を必要とするのは、バッチという単位に対する操作だけ�
 
 **「アプリ専用領域をバックアップ対象外」と一括で書きません。** その書き方だと、カスタムスタンプをバックアップしない方針が確定したことになりますが、これは 16 節の未決事項です。ディレクトリ単位で指定します。
 
-| ディレクトリ | バックアップ | 根拠 |
+| パス | バックアップ | 根拠 |
 | --- | --- | --- |
-| 一時処理ファイル | **対象外** | 復元しても意味がない |
-| 未受け渡し出力 | **対象外** | 24 時間で消えるもの。端末移行後に復元しても期限切れ |
-| ラスタスタンプ一時ファイル | **対象外** | `render` 呼び出し内でのみ有効（5.1.2） |
-| `ProtectedBlobStore` | **対象外** | HMAC 鍵と寿命を揃えるため（6.2.5） |
-| カスタムスタンプ / `StampAsset` | **16 節で決定するまで未確定** | 利用者が作った資産であり、失われると再作成が必要 |
-| Room DB | **データ種別ごとに決定** | 履歴と設定で判断が異なりうる |
+| `tmp/processing/` | **対象外** | 復元しても意味がない |
+| `Library/Application Support/outputs/` | **対象外** | 24 時間で消えるもの。端末移行後に復元しても期限切れ |
+| `tmp/raster/` | **対象外** | `render` 呼び出し内でのみ有効（5.1.2） |
+| `Library/Application Support/protected/` | **対象外** | HMAC 鍵と寿命を揃えるため（6.2.5） |
+| `Library/Application Support/runtime.db` | **対象外** | 復元しても整合しない（7.1） |
+| `Library/Application Support/stamps/` | **16 節で決定するまで未確定** | 利用者が作った資産であり、失われると再作成が必要 |
+| `Library/Application Support/user-data.db` | **16 節で決定するまで未確定** | 履歴と設定。スタンプと方針を揃える |
 
-除外の指定は iOS が `isExcludedFromBackup`、Android が `data_extraction_rules.xml` です。
+除外の指定は各パスへ `URL.setResourceValues` で `isExcludedFromBackup = true` を設定します。**ディレクトリ単位で設定し、その配下に作るファイルへ個別指定を要しない構成**にします。ファイルごとに設定すると、新しく作ったファイルへの設定漏れが起きます。
 
-**Room DB を一括で決められないのは、テーブルごとに性質が違うためです。** `ExportCommit` は復元しても対応するファイルが無く、`UsageLedger` との整合も失われます（対象外が妥当）。一方で `BatchPreset` や `CustomStamp` は利用者の設定であり、復元されたほうが自然です。v1 の決定は 16 節で行います。
+**スタンプと `user-data.db` の方針を揃えます。** `StampAsset` のメタデータは `user-data.db` にあり、実体は `stamps/` にあります。片方だけ復元されると、参照はあるが実体が無い状態（またはその逆）になります。16 節では 2 つをまとめて決めます。
+
+#### 7.3.2 再インストール後に鍵だけが残る場合
+
+**「再インストールすれば Keychain の鍵とデータの両方が消える」と仮定できません。**
+
+`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` が保証するのは「別端末へ移行しないこと」であり、**アンインストール時に削除されることではありません。** Apple もこの挙動を文書上の保証としていません。実際、アプリを削除して再インストールしたときに Keychain の項目が残る事例が知られています。
+
+したがって次を**正式な状態**として扱います。
+
+| `ProtectedBlobStore` | `CryptoKeyStore` | 扱い |
+| --- | --- | --- |
+| `Missing` | `Missing` | 通常の新規台帳を作る（6.2.5） |
+| `Missing` | **`Existing`** | **同じく通常の新規台帳を作る。** 鍵はそのまま再利用してよい |
+| `Valid` | `Existing` | 通常経路 |
+| `IntegrityFailure` | `Existing` | 保守的台帳へ修復（6.2.5） |
+
+**「データが無いのに鍵がある」を異常として扱いません。** 再インストール直後の正常な状態でありえます。ここで復旧エラーにすると、再インストールした利用者がアプリを使えません。
+
+鍵を再利用するか新しく生成するかは、どちらでも安全性が変わりません。**再利用します。** 古い鍵を削除して新規生成する処理は、その削除自体が失敗しうる余計な経路を増やします。
+
+なお、**再インストールで無料枠が戻ることは仕様 14.5 が許容しています**（6.2.5）。鍵が残っていても台帳が無ければ新規台帳になるため、この挙動は変わりません。
 
 ### 7.4 原子的書き出しと受け渡し
 
@@ -2182,23 +2434,23 @@ Pro を必要とするのは、バッチという単位に対する操作だけ�
 
 ##### 非公開を構造で保証する
 
-**「公開しない」と文章で書くだけでは防げません。** `OutputRecord` を手順 5 で作ると、Room の監視クエリはその直後から `Generated` を観測できます。UI の購読先が `OutputRecord` である以上、手順 5〜7 の間に画面へ現れます。
+**「公開しない」と文章で書くだけでは防げません。** `OutputRecord` を手順 5 で作ると、GRDB の ValueObservationはその直後から `Generated` を観測できます。UI の購読先が `OutputRecord` である以上、手順 5〜7 の間に画面へ現れます。
 
-`OutputRecord` の作成を**手順 8 へ移し、コミット行の削除と同一の Room トランザクションで実行します。**
+`OutputRecord` の作成を**手順 8 へ移し、コミット行の削除と同一の DB トランザクションで実行します。**
 
 ```
 手順 5〜7:
   OutputRecord はまだ作らない
   ExportCommit と verifiedOutput だけで健全性を確認する
 
-手順 8（単一 Room トランザクション）:
+手順 8（単一トランザクション）:
   OutputRecord(Generated) を insert
   ExportCommit を delete
 ```
 
 これにより不変条件が観測可能な形になります。
 
-| Room の状態 | 意味 |
+| DB の状態 | 意味 |
 | --- | --- |
 | コミットあり・`OutputRecord` なし | **非公開**（処理中または復旧対象） |
 | コミットなし・`OutputRecord` あり | **公開済み**（会計確定済み） |
@@ -2252,7 +2504,7 @@ enum class ShareResult { Completed, Canceled, Unknown, Failed }
 | 更新対象 | 保存先 |
 | --- | --- |
 | 完成済みファイルの公開 | ファイルシステム |
-| `OutputRecord` = `Generated` | Room |
+| `OutputRecord` = `Generated` | DB |
 | Free 枠の消費、`ExportGrant` の作成 | ProtectedBlobStore |
 | 一括トライアル台帳への `sourceHash` 追加 | ProtectedBlobStore |
 
@@ -2268,11 +2520,11 @@ enum class ShareResult { Completed, Canceled, Unknown, Failed }
 
 ```kotlin
 data class ExportCommit(
-    val exportId: String,
-    val projectId: String,
-    val batchId: String?,
+    val exportID: String,
+    val projectID: String,
+    val batchID: String?,
     val sourceHash: String,
-    val outputFileId: String,                 // パスではなく ID。専用ディレクトリ配下で解決する
+    val outputFileID: String,                 // パスではなく ID。専用ディレクトリ配下で解決する
     val authorization: ExportAuthorization,   // 開始前に固定する
     val verifiedOutput: VerifiedOutput?,      // Prepared では null。FileVerified 以降は必須
     val finalizedAt: Instant?,                // 最終確定処理の effectiveNow
@@ -2280,7 +2532,7 @@ data class ExportCommit(
     val intent: AccountingIntent?,            // Prepared では null
     val applied: AccountingApplied?,          // 台帳へ適用したあとに埋まる
     val state: ExportCommitState,
-    val signature: ByteArray,                 // Keychain / Keystore の鍵による HMAC
+    val signature: ByteArray,                 // Keychain の鍵による HMAC
 )
 
 /** 手順1の検証結果。これ自体も HMAC の対象に含める */
@@ -2306,7 +2558,7 @@ sealed interface GrantAction {
 
 /** 台帳へ適用しようとする内容。時刻は finalizedAt から導出する */
 data class AccountingIntent(
-    val consumeExportId: String?,
+    val consumeExportID: String?,
     val grantAction: GrantAction,
     val trialSourceHashToEnsure: String?,
 )
@@ -2331,7 +2583,7 @@ enum class ExportCommitState {
 
 **「適用しようとする内容」と「実際に適用された結果」を分けます。** 台帳を更新する前に「実際に新規追加した値」を確定することはできません。前者は `FileVerified` で、後者は `AccountingCommitted` で埋まります。
 
-ただし `AccountingApplied` を Room へ書く前に落ちる可能性があるため、**これだけを根拠にロールバックできません。** 台帳側の `ownerExportId`（6.2）が最終的な判断材料です。
+ただし `AccountingApplied` を DB へ書く前に落ちる可能性があるため、**これだけを根拠にロールバックできません。** 台帳側の `ownerExportID`（6.2）が最終的な判断材料です。
 
 ###### grant の操作を型で分ける
 
@@ -2409,13 +2661,13 @@ data class ExportCommit(
 3. `ExportCommit(AccountingCommitted)` を保存する
 4. ファイルを再検証する
 5. `ExportCommit(ReadyToPublish)` を保存する
-6. Room の最終トランザクションを実行する
+6. 最終トランザクションを実行する
 
-**異常終了後は、月をまたいだかどうかにかかわらず、手順 1 からやり直します。** 新しい `finalizedAt` を決め直すため、経過時間の長短で分岐しません。`Finalizing` 以降で中断した場合も同じです。既に適用済みの会計要素は `ownerExportId` で識別して取り消せます（6.2）。
+**異常終了後は、月をまたいだかどうかにかかわらず、手順 1 からやり直します。** 新しい `finalizedAt` を決め直すため、経過時間の長短で分岐しません。`Finalizing` 以降で中断した場合も同じです。既に適用済みの会計要素は `ownerExportID` で識別して取り消せます（6.2）。
 
 これにより「利用者が受け取った時刻」と「消費を計上した時刻」が必ず一致します。
 
-**以前の版にあった「過去月の `consumeExportId` を現在月へ加算しない」という規則は削除します。** 成功時点が最終確定である以上、過去月の消費という状態自体が発生しません。
+**以前の版にあった「過去月の `consumeExportID` を現在月へ加算しない」という規則は削除します。** 成功時点が最終確定である以上、過去月の消費という状態自体が発生しません。
 
 `authorization` は開始時に固定したままです（権限の固定と会計時刻の確定は別の話です）。長時間の中断後に復旧しても、**権限は開始時のもの、時刻は確定時のもの**を使います。
 
@@ -2491,7 +2743,7 @@ sealed interface ExportAccountingMode {
 - 月間上限へ達した
 - リモート設定で上限が下がった
 
-**認可の粒度は写真ごとの `exportId` です。** バッチ単位ではありません。この粒度により、6.7 の「契約終了時に未完了バッチを `paused` にする」と両立します。
+**認可の粒度は写真ごとの `exportID` です。** バッチ単位ではありません。この粒度により、6.7 の「契約終了時に未完了バッチを `paused` にする」と両立します。
 
 | Pro 失効時点の状態 | 扱い |
 | --- | --- |
@@ -2502,19 +2754,21 @@ sealed interface ExportAccountingMode {
 
 **月間枠の対象となる単体書き出しは同時に 1 件までとします。** 「クォータを消費する書き出し」を条件にできない理由は開始ゲートの項で述べます。消費するかどうかは認可の結果であり、ゲートを取る時点では未確定です。並列に走らせると、開始時の判定が両方 `Consume` になり上限を超えます。
 
-##### 会計内容はファイル検証後に確定する
+##### 状態ごとの必須フィールド
 
-**`Prepared` では `intent` を `null` にします。** 生成中に月や 24 時間期限をまたぐこと、アプリが長時間バックグラウンドへ入ることがあるためです。
+**会計フィールドは `Finalizing` で確定します。`FileVerified` ではありません。**
 
-| 状態 | 会計フィールド |
+| 状態 | 必須フィールド |
 | --- | --- |
-| `Prepared` | `finalizedAt` / `finalizedPeriod` / `intent` / `applied` はすべて `null` |
-| `FileVerified` | `finalizedAt` / `finalizedPeriod` / `intent` が必須。検証完了時点の `effectiveNow` と最新の `UsageLedger` から確定する |
-| `AccountingCommitted` 以降 | `applied` も必須 |
+| `Prepared` | `authorization` のみ |
+| `FileVerified` | 上記 ＋ `verifiedOutput` |
+| `Finalizing` | 上記 ＋ `finalizedAt` / `finalizedPeriod` / `intent` |
+| `AccountingCommitted` | 上記 ＋ `applied` |
+| `ReadyToPublish` | 上記 ＋ ファイル再検証済み |
 
-`accountingMode` は `authorization` に固定されているため、ここで再評価するのは**計上先の年月と grant の時刻だけ**です。
+`accountingMode` は `authorization` に固定されているため、`Finalizing` で決めるのは**計上先の年月と grant の時刻だけ**です。
 
-**中断して後日復旧した場合は、`finalizedAt` を復旧時点の `effectiveNow` で置き直します。** `FileVerified` で一度確定した値をそのまま使いません。7 月 31 日に検証を終えて 8 月に復旧した場合、成果物を受け取るのは 8 月であり、消費もそこへ計上します。既に暫定適用していた会計要素は冪等に取り消してから再適用します（前掲「時刻はすべて最終確定処理から導出する」）。
+生成中に月や 24 時間期限をまたぐこと、アプリが長時間バックグラウンドへ入ることがあるため、`Prepared` や `FileVerified` の時点で会計内容を確定できません。
 
 ##### 台帳更新は直列化する
 
@@ -2546,7 +2800,7 @@ interface UsageLedgerStore {
 
 この不変条件がないと、6.2 の所有者方式が壊れます。
 
-1. Export A が grant を作り、`ownerExportId` が A になる
+1. Export A が grant を作り、`ownerExportID` が A になる
 2. 同じ `sourceHash` の Export B も正常完了する。B は既存 grant を使うので所有者にならない
 3. A のファイル異常でロールバックし、A 所有の grant を削除する
 4. **B は成功しているのに grant が消える**
@@ -2559,7 +2813,7 @@ interface UsageLedgerStore {
 
 ロックを `ReadyToPublish` で解放してはいけません。その保存後、コミット行の削除前にも復旧対象となる区間が残っています（7.4.3 の手順 6〜8）。ここで解放すると、同じ `sourceHash` の次の処理とロールバックが競合します。
 
-この制約を設けない場合、grant とトライアル台帳が複数の成功 `exportId` を保持する必要があり、モデルが複雑になります。v1 では直列化を選びます。
+この制約を設けない場合、grant とトライアル台帳が複数の成功 `exportID` を保持する必要があり、モデルが複雑になります。v1 では直列化を選びます。
 
 ##### 開始ゲート
 
@@ -2606,14 +2860,14 @@ val requiresMeteredSingleExportGate =
 
 これにより、2 件が同じ未更新の台帳を見て両方 `Consume` として認可される経路がなくなります。
 
-`OutputRecord` にも `exportId` を持たせ、どのコミットに対応するかを一意にします。
+`OutputRecord` にも `exportID` を持たせ、どのコミットに対応するかを一意にします。
 
 ```kotlin
 data class OutputRecord(
-    val exportId: String,
-    val projectId: String,
-    val batchId: String?,
-    val outputFileId: String,      // パスではなく ID。専用ディレクトリ配下で解決する
+    val exportID: String,
+    val projectID: String,
+    val batchID: String?,
+    val outputFileID: String,      // パスではなく ID。専用ディレクトリ配下で解決する
     val outputByteSize: Long,      // verifiedOutput からコピー
     val outputSha256: ByteArray,   // verifiedOutput からコピー
     val state: OutputState,
@@ -2628,41 +2882,41 @@ data class OutputRecord(
 
 **サイズも記録します。** ダイジェストだけでは、手順 7 の「サイズが記録値と一致する」を判定できません。サイズ比較はダイジェスト計算より安く、途中書き込みを先に弾けます。
 
-**パスを DB へ直接持ちません。** `outputFileId` から専用ディレクトリ配下のパスを解決します。パス文字列を保存すると、DB を書き換えるだけで `../` を含む値を注入でき、期限切れ削除の処理に別のアプリ内部ファイルを消させる経路ができます。ID からの解決なら、削除対象が構造的に専用ディレクトリの外へ出ません。
+**パスを DB へ直接持ちません。** `outputFileID` から専用ディレクトリ配下のパスを解決します。パス文字列を保存すると、DB を書き換えるだけで `../` を含む値を注入でき、期限切れ削除の処理に別のアプリ内部ファイルを消させる経路ができます。ID からの解決なら、削除対象が構造的に専用ディレクトリの外へ出ません。
 
 **期限を `OutputRecord` 自身が持ちます。** 判定は `effectiveNow >= expiresAt` です（6.2.2.5）。`ExportCommit` は完了後に削除するため、**コミットが消えたあとも単独で期限を判定できる**必要があります。
 
 ##### 手順と書き込み順
 
-保存先が Room と ProtectedBlobStore にまたがるため、**書き込み順を固定します。**
+保存先が DB と ProtectedBlobStore にまたがるため、**書き込み順を固定します。**
 
 | 順 | 操作 | 保存先 |
 | --- | --- | --- |
 | −2 | `transact` 内で時刻正規化・月次更新・期限切れ grant の整理を**永続化**する。`BatchTrial(true)` なら**同じトランザクション内で**トライアル予約を作る | ProtectedBlobStore |
 | −1 | `transact` の結果として `ExportAuthorization` を得る。`Blocked` なら以降へ進まない | — |
-| 0 | `ExportCommit(Prepared)` を保存（`intent` / `finalizedAt` は `null`）。**保存に失敗したら補償トランザクションで予約を削除する** | Room |
+| 0 | `ExportCommit(Prepared)` を保存（`intent` / `finalizedAt` は `null`）。**保存に失敗したら補償トランザクションで予約を削除する** | DB |
 | 1 | 一時ファイルを生成し、サイズ・SHA-256・デコードを検証して `VerifiedOutput` を得る | ファイルシステム |
-| 2 | `verifiedOutput` を確定し `ExportCommit(FileVerified)` を保存（`finalizedAt` はまだ `null`） | Room |
-| 3 | `finalizedAt` を決め、`intent` を確定して `ExportCommit(Finalizing)` を保存 | Room |
+| 2 | `verifiedOutput` を確定し `ExportCommit(FileVerified)` を保存（`finalizedAt` はまだ `null`） | DB |
+| 3 | `finalizedAt` を決め、`intent` を確定して `ExportCommit(Finalizing)` を保存 | DB |
 | 4 | `UsageLedger` を冪等に適用する。**予約を削除して `trialEntries` へ移すのも同じ台帳トランザクション内** | ProtectedBlobStore |
-| 5 | `applied` を埋めて `ExportCommit(AccountingCommitted)` を保存 | Room |
-| 6 | `verifiedOutput` と出力ファイルの**健全性**を確認し、`ExportCommit(ReadyToPublish)` を保存 | ファイルシステム / Room |
+| 5 | `applied` を埋めて `ExportCommit(AccountingCommitted)` を保存 | DB |
+| 6 | `verifiedOutput` と出力ファイルの**健全性**を確認し、`ExportCommit(ReadyToPublish)` を保存 | ファイルシステム / DB |
 | 7 | （欠番。以前の版で `OutputRecord` を作っていた位置） | — |
-| 8 | **単一 Room トランザクション**（下記）。**ここが会計の最終確定境界** | Room |
+| 8 | **単一トランザクション**（下記）。**ここが会計の最終確定境界** | DB |
 
 **手順 8 を省くと、書き出しのたびにコミット行が永久に蓄積します。** ジャーナルは中断からの復旧のためだけに存在するので、役目を終えたら消します。
 
-**トライアル台帳の更新は手順 4 です。手順 8 ではありません。** 手順 8 は Room だけのトランザクションであり、`ProtectedBlobStore` を同時に更新できません。予約から `trialEntries` への移動は、台帳トランザクションの中で行います。
+**トライアル台帳の更新は手順 4 です。手順 8 ではありません。** 手順 8 は DB だけのトランザクションであり、`ProtectedBlobStore` を同時に更新できません。予約から `trialEntries` への移動は、台帳トランザクションの中で行います。
 
 ###### 手順 8 の内容
 
-**Room に保存する状態は `OutputRecord` だけではありません。** `ExportRecord` と写真ごとのキュー状態も同じ Room にあります。`OutputRecord` の insert とコミットの delete だけでは、次の不整合が残ります。
+**DB に保存する状態は `OutputRecord` だけではありません。** `ExportRecord` と写真ごとのキュー状態も同じ DB にあります。`OutputRecord` の insert とコミットの delete だけでは、次の不整合が残ります。
 
 - 出力は公開済みだが、キューは `exporting` のまま
 - キューは `completed` だが、`ExportRecord` が無い
 - 履歴上は失敗だが、成果物は存在する
 
-手順 8 の単一 Room トランザクションへ次をすべて含めます。
+手順 8 の単一トランザクションへ次をすべて含めます。
 
 | 操作 | 対象 |
 | --- | --- |
@@ -2684,7 +2938,7 @@ data class OutputRecord(
 
 | 確認項目 | 目的 |
 | --- | --- |
-| `outputFileId` から解決したファイルが存在する | 実体がある |
+| `outputFileID` から解決したファイルが存在する | 実体がある |
 | ファイルサイズが 0 でなく、`verifiedOutput.byteSize` と一致する | 途中書き込みでない |
 | SHA-256 が `verifiedOutput.sha256` と一致する | 内容が入れ替わっていない |
 | 簡易デコードが成功する | 画像として開ける |
@@ -2697,11 +2951,11 @@ data class OutputRecord(
 
 | 順 | 操作 | 保存先 |
 | --- | --- | --- |
-| 1 | `UsageLedgerStore.transact` で、この `exportId` が所有する会計要素（消費・grant・トライアル台帳・**トライアル予約**）を**冪等に**取り消す | ProtectedBlobStore |
+| 1 | `UsageLedgerStore.transact` で、この `exportID` が所有する会計要素（消費・grant・トライアル台帳・**トライアル予約**）を**冪等に**取り消す | ProtectedBlobStore |
 | 2 | 台帳の保存が成功したことを確認する | ProtectedBlobStore |
-| 3 | `OutputRecord` を削除する（存在する場合のみ。手順 8 未到達なら存在しない） | Room |
-| 4 | `outputFileId` のファイルを削除する | ファイルシステム |
-| 5 | `ExportCommit` を削除する | Room |
+| 3 | `OutputRecord` を削除する（存在する場合のみ。手順 8 未到達なら存在しない） | DB |
+| 4 | `outputFileID` のファイルを削除する | ファイルシステム |
+| 5 | `ExportCommit` を削除する | DB |
 | 6 | `sourceHash` ゲートと月間認可ゲートを解放する | メモリ |
 
 規則は次のとおりです。
@@ -2709,7 +2963,7 @@ data class OutputRecord(
 - **手順 1 が失敗した場合、2 以降を実行しません。** コミットとファイルを残したまま復旧エラーとします。台帳を戻せていないのにジャーナルを消すと、消費だけが残って根拠が失われます
 - **手順 1 の完了後に落ちても、再起動時に同じロールバックを冪等に再実行できます。** 取り消しは集合からの削除であり、二重実行は無害です
 - **`ExportCommit` の削除後にのみゲートを解放します。** 解放が早いと、ロールバック途中の台帳を次の認可が読みます（開始ゲートの項）
-- 取り消してよいのは、台帳の `ownerExportId` がこの `exportId` と一致する要素だけです（6.2）
+- 取り消してよいのは、台帳の `ownerExportID` がこの `exportID` と一致する要素だけです（6.2）
 
 ###### 状態別のロールバック経路
 
@@ -2719,11 +2973,11 @@ data class OutputRecord(
 | --- | --- | --- |
 | `Prepared` | トライアル予約のみ（認可時に作る） | 手順 1〜6。予約の取り消しは必要。`OutputRecord` は未作成 |
 | `FileVerified` | 予約のみ。`finalizedAt` は未確定 | 手順 1〜6 |
-| `Finalizing` | 未適用または適用途中 | 手順 1〜6。`intent` の内容を `ownerExportId` と突き合わせて取り消す |
-| `AccountingCommitted` | 適用済み | 手順 1〜6。`applied` ではなく台帳の `ownerExportId` を根拠にする |
+| `Finalizing` | 未適用または適用途中 | 手順 1〜6。`intent` の内容を `ownerExportID` と突き合わせて取り消す |
+| `AccountingCommitted` | 適用済み | 手順 1〜6。`applied` ではなく台帳の `ownerExportID` を根拠にする |
 | `ReadyToPublish` | 適用済み | 手順 6 の健全性確認に合格すれば手順 8 のトランザクションを実行して完了。不合格なら手順 1〜6 |
 
-`FileVerified` で `applied` を根拠にできない理由は、`AccountingApplied` を Room へ書く前に落ちる可能性があるためです（コミットジャーナルの項）。台帳側の `ownerExportId` が唯一の判断材料です。
+`FileVerified` で `applied` を根拠にできない理由は、`AccountingApplied` を DB へ書く前に落ちる可能性があるためです（コミットジャーナルの項）。台帳側の `ownerExportID` が唯一の判断材料です。
 
 ###### 会計の最終確定境界
 
@@ -2743,14 +2997,14 @@ data class OutputRecord(
 
 **2. 所有者モデルが破綻する**
 
-`ownerExportId` を根拠にコミット削除後のロールバックを許すと、次が成立します。
+`ownerExportID` を根拠にコミット削除後のロールバックを許すと、次が成立します。
 
 1. Export A が grant を作り、所有者が A になる
 2. A のコミットを正常に削除する
 3. 同じ素材を Export B で正常に再書き出しする
 4. B は既存 grant を利用するため、所有者は A のまま
 5. 後から A の出力ファイルが失われる
-6. `ownerExportId` を根拠に grant を削除する
+6. `ownerExportID` を根拠に grant を削除する
 7. **B も正常成功しているのに grant が消える**
 
 トライアル台帳でも同じです。7.4.3 の非終端コミット直列化は、**非終端の間しか効きません。** A のコミットは既に削除済みなので、B の開始を止められません。
@@ -2761,7 +3015,7 @@ data class OutputRecord(
 
 | 状況 | 扱い |
 | --- | --- |
-| 元素材と設定から再生成できる | 同じ `exportId` の復旧として、**追加消費なしで再生成する** |
+| 元素材と設定から再生成できる | 同じ `exportID` の復旧として、**追加消費なしで再生成する** |
 | 再生成できない（元素材が削除された等） | 出力を復元できない旨を利用者へ通知し、壊れた `OutputRecord` を削除する |
 | 月間枠 | **戻さない** |
 | grant | **戻さない** |
@@ -2775,7 +3029,7 @@ data class OutputRecord(
 
 手順 0 で `Prepared` を先に書くのは、**生成中に落ちたときに孤児となる一時ファイルを起動時に特定するため**です。ジャーナルに記録のない一時ファイルは掃除対象になります。
 
-冪等性の鍵は 2 種類です。**クォータ消費は `exportId`、トライアル消費は `sourceHash`。** 前者は同じ書き出しの再実行、後者は同じ写真の再書き出しを弾くもので、目的が異なります。台帳が集合を保持しているため（6.2）、再適用は自然に無害です。
+冪等性の鍵は 2 種類です。**クォータ消費は `exportID`、トライアル消費は `sourceHash`。** 前者は同じ書き出しの再実行、後者は同じ写真の再書き出しを弾くもので、目的が異なります。台帳が集合を保持しているため（6.2）、再適用は自然に無害です。
 
 ##### 署名の対象と再署名
 
@@ -2821,7 +3075,7 @@ v1 の脅威モデルを明記します。
 
 ##### コミット行の改ざん対策
 
-`ExportCommit` は Room にありますが、その内容が ProtectedBlobStore の台帳更新を駆動します。**Room を書き換えれば台帳を任意に操作できてしまう**ため、コミット行にも Keychain / Keystore の鍵で HMAC を付けます（6.2.5 と同じ方式）。
+`ExportCommit` は DB にありますが、その内容が ProtectedBlobStore の台帳更新を駆動します。**DB を書き換えれば台帳を任意に操作できてしまう**ため、コミット行にも Keychain の鍵で HMAC を付けます（6.2.5 と同じ方式）。
 
 **署名検証に失敗した行を自動破棄しません。** 破棄すると、すでに反映済みの `UsageLedger` だけが残る可能性があります。会計済みかどうかを判断できない以上、**復旧エラーとして扱い**、新規書き出しをブロックしたうえで利用者へ提示します。ファイルも自動削除しません。
 
@@ -2840,7 +3094,7 @@ v1 の脅威モデルを明記します。
 - 該当の `ExportCommit`、出力ファイル、`OutputRecord` を削除する
 - 復旧エラーを解除し、新規書き出しを許可する
 
-払い戻さないため利用者に不利になりえますが、**破損した Room の情報を根拠に権利を増やす方が危険**です。改ざんによる枠の水増しに直結します。アプリが永久に使用不能になる状態も同時に避けられます。
+払い戻さないため利用者に不利になりえますが、**破損した DB の情報を根拠に権利を増やす方が危険**です。改ざんによる枠の水増しに直結します。アプリが永久に使用不能になる状態も同時に避けられます。
 
 ##### 起動時の順序
 
@@ -2862,12 +3116,20 @@ v1 の脅威モデルを明記します。
 | `FileVerified` | ファイルが健在なら**手順 3 からやり直す**（新しい `finalizedAt` を決める）。失われていればロールバック |
 | `Finalizing` | 暫定適用があれば冪等に取り消し、**手順 3 からやり直す**。経過時間の長短で分岐しない |
 | `AccountingCommitted` | **出力ファイルを再検証**する（下記）。正常なら暫定適用を取り消し、**手順 3 からやり直す** |
-| `ReadyToPublish` | 出力ファイルの**サイズ・SHA-256・デコード**を `verifiedOutput` と照合する。正常なら手順 8 のトランザクションを実行する。不一致ならロールバック |
+| `ReadyToPublish` | 出力ファイルを `verifiedOutput` と照合する。正常なら暫定適用を取り消し、**手順 3 からやり直す**。不一致ならロールバック |
 | 署名検証に失敗 | 復旧エラー。自動破棄しない |
 
-**`Finalizing` 以降からの復旧は、必ず手順 3 へ戻ります。** `finalizedAt` を決め直すためです。月をまたいだかどうかで分岐しません。2 時間の中断でも、grant の窓と出力の期限が 2 時間ずれるためです。
+**`Finalizing` 以降からの復旧は、`ReadyToPublish` を含めて必ず手順 3 へ戻ります。** `finalizedAt` を決め直すためです。月をまたいだかどうかで分岐しません。2 時間の中断でも、grant の窓と出力の期限が 2 時間ずれます。
 
-**`ReadyToPublish` だけは手順 3 へ戻らず、そのまま公開へ進みます。** この状態はファイル検証まで完了しており、`finalizedAt` と会計が整合しています。ここで時刻を決め直すと、検証済みの会計を無意味に取り消して再適用することになります。
+**`ReadyToPublish` を例外にできません。** この状態で異常終了し、数日後に再起動した場合を考えます。
+
+- `finalizedAt` は数日前
+- 実際に公開されるのは再起動時
+- `expiresAt = finalizedAt + 24h` は**すでに過ぎている**
+
+つまり、公開した瞬間に期限切れの出力ができます。利用者は成果物を受け取れないまま消費だけを負います。ファイル検証が済んでいることと、時刻が妥当であることは別の話です。
+
+再確定のコストは、暫定適用の取り消しと再適用だけです。どちらも `ownerExportID` を根拠とする冪等な操作であり（6.2）、失うものはありません。
 
 **`ReadyToPublish` を無条件に削除しません。** 手順 6 と 8 の間で落ちた可能性があり、**コミット行だけが復旧の手がかり**だからです。この時点では `OutputRecord` がまだ無いため、コミットを消すと出力が孤児ファイルになります。
 
@@ -2881,17 +3143,17 @@ v1 の脅威モデルを明記します。
 | 欠損・破損 | **このコミットが実際に追加した会計要素だけ**を取り消す（ロールバック手順） |
 | 取り消し不能 | 復旧エラーとして新規書き出しをブロックする。自動削除しない |
 
-**取り消しの判断材料は台帳側の `ownerExportId` です**（6.2）。`AccountingApplied` は Room へ書く前に落ちうるため、単独では根拠になりません。
+**取り消しの判断材料は台帳側の `ownerExportID` です**（6.2）。`AccountingApplied` は DB へ書く前に落ちうるため、単独では根拠になりません。
 
 ```
-consumedExportIds に対象 exportId があれば削除
-grants[sourceHash].ownerExportId == 対象 exportId なら削除
-trialEntries[sourceHash].ownerExportId == 対象 exportId なら削除
-trialReservations[sourceHash] == 対象 exportId なら削除
-別の exportId が作った要素は削除しない
+consumedExportIds に対象 exportID があれば削除
+grants[sourceHash].ownerExportID == 対象 exportID なら削除
+trialEntries[sourceHash].ownerExportID == 対象 exportID なら削除
+trialReservations[sourceHash] == 対象 exportID なら削除
+別の exportID が作った要素は削除しない
 ```
 
-これなら手順 3 と 4 の間で落ちても、**所有者から正しく判別できます**。既存の grant を再利用しただけの書き出しは `ownerExportId` が一致しないため、以前から存在した権利を巻き添えで消しません。
+これなら手順 3 と 4 の間で落ちても、**所有者から正しく判別できます**。既存の grant を再利用しただけの書き出しは `ownerExportID` が一致しないため、以前から存在した権利を巻き添えで消しません。
 
 ### 7.5 削除候補の選定
 
@@ -2982,7 +3244,7 @@ Standard および Pro で利用可能とします（仕様 12.4）。
 
 規則は以下とします。
 
-- プロジェクトがカスタムスタンプを使用した時点で、その画像を `StampAsset` として複製し、`EffectSetting.stampId` は `StampAsset` を指す
+- プロジェクトがカスタムスタンプを使用した時点で、その画像を `StampAsset` として複製し、`EffectSetting.stampID` は `StampAsset` を指す
 - `StampAsset` は**内容ハッシュで重複排除**する。同じ画像を複数プロジェクトで使っても実体は 1 つ
 - `CustomStamp` を削除すると、**新規編集では選択できなくなる**。`StampAsset` は削除しない
 - プロジェクトを削除したとき、参照カウントを減らす。**0 になった `StampAsset` を削除する**
@@ -2993,14 +3255,14 @@ Standard および Pro で利用可能とします（仕様 12.4）。
 
 アプリ提供の基本スタンプと追加スタンプは、5.1 のとおりベクターとしてコードに持つため実体の消失が起きません。`StampAsset` の対象はカスタムスタンプのみです。
 
-#### 8.4.1 Room とファイルの更新順序
+#### 8.4.1 DB とファイルの更新順序
 
-**`StampAsset` は Room の参照カウントとファイル実体にまたがります。** 「参照数が 0 なら削除」だけでは、どちらを先に更新するかが決まりません。
+**`StampAsset` は DB の参照カウントとファイル実体にまたがります。** 「参照数が 0 なら削除」だけでは、どちらを先に更新するかが決まりません。
 
-- ファイルを先に消すと、Room トランザクションが失敗したときに**参照中のスタンプを失います**（復旧不能）
-- Room を先に更新すると、ファイル削除に失敗したときに**孤児ファイルが残ります**（容量を食うだけ）
+- ファイルを先に消すと、DB トランザクションが失敗したときに**参照中のスタンプを失います**（復旧不能）
+- DB を先に更新すると、ファイル削除に失敗したときに**孤児ファイルが残ります**（容量を食うだけ）
 
-**失っても復旧できないほうを避けます。Room を先に更新します。**
+**失っても復旧できないほうを避けます。DB を先に更新します。**
 
 ###### 作成
 
@@ -3008,23 +3270,23 @@ Standard および Pro で利用可能とします（仕様 12.4）。
 | --- | --- |
 | 1 | 一時ファイルへ書く |
 | 2 | 完成ファイルへ **atomic rename** する |
-| 3 | Room トランザクションで `StampAsset` を upsert し、参照を追加する |
-| 4 | Room が失敗した場合、そのファイルを**孤児として削除対象へ入れる** |
+| 3 | DB トランザクションで `StampAsset` を upsert し、参照を追加する |
+| 4 | DB が失敗した場合、そのファイルを**孤児として削除対象へ入れる** |
 
 ###### 削除
 
 | 順 | 操作 |
 | --- | --- |
-| 1 | Room トランザクションで参照数を減らす |
+| 1 | DB トランザクションで参照数を減らす |
 | 2 | 0 になった `contentHash` を**削除候補として同じトランザクション内で記録する** |
-| 3 | Room のコミット後にファイルを削除する |
+| 3 | DB のコミット後にファイルを削除する |
 | 4 | 削除に失敗した場合、**次回起動時の GC で再試行する** |
 
-削除候補は `PendingFileDeletion` テーブルへ記録します。Room のトランザクションに含めることで、「参照は 0 になったが削除候補の記録が無い」という状態を作りません。
+削除候補は `PendingFileDeletion` テーブルへ記録します。データベースのトランザクションに含めることで、「参照は 0 になったが削除候補の記録が無い」という状態を作りません。
 
 ###### 孤児ファイルの GC
 
-`PendingFileDeletion` だけでは、作成の手順 3 で失敗したファイルを回収できません（記録する前に落ちるため）。起動時に、**専用ディレクトリの実体と Room 上の参照一覧を突き合わせ**、どちらにも属さないファイルを削除します。
+`PendingFileDeletion` だけでは、作成の手順 3 で失敗したファイルを回収できません（記録する前に落ちるため）。起動時に、**専用ディレクトリの実体と DB 上の参照一覧を突き合わせ**、どちらにも属さないファイルを削除します。
 
 対象は次のディレクトリです。
 
@@ -3227,11 +3489,11 @@ pub struct DiagnosticsContext {
 | 層 | 実行環境 | 対象 |
 | --- | --- | --- |
 | **domain unit test** | JVM（数秒） | クォータ、トリアージ、座標変換、`compileRenderDraft`、状態機械 |
-| **application saga test** | JVM（数十秒） | 偽 Room・偽 `ProtectedBlobStore`・偽ファイルによる**各中断点**の検証 |
-| **adapter integration test** | 実機 / エミュレータ | 実 Room、実 DataStore / 保護ファイル、実 HMAC 鍵、契約テスト |
+| **application saga test** | JVM（数十秒） | 偽 DB・偽 `ProtectedBlobStore`・偽ファイルによる**各中断点**の検証 |
+| **adapter integration test** | 実機 / エミュレータ | 実 GRDB、実 保護ファイル、実 Keychain 鍵 |
 | **process-death fault injection test** | 実機 / エミュレータ | **各手順の直後に強制終了**し、再起動後の状態を検証 |
 
-**コミットジャーナルは、両 OS の実ストレージを使った障害注入テストを必須とします。** 偽ストアの Saga テストは「順序どおりに書けば整合する」ことしか示しません。Room のトランザクションが実際に原子的か、DataStore の書き込みが電源断で切れないか、`fsync` のタイミングはどうか — これらは実装と OS の性質であり、偽物では検証できません。
+**コミットジャーナルは、両 OS の実ストレージを使った障害注入テストを必須とします。** 偽ストアの Saga テストは「順序どおりに書けば整合する」ことしか示しません。データベースのトランザクションが実際に原子的か、DataStore の書き込みが電源断で切れないか、`fsync` のタイミングはどうか — これらは実装と OS の性質であり、偽物では検証できません。
 
 各項目は、**検証が成立する最も低い層**へ置きます。以下 12.1.1〜12.1.4 で層ごとに列挙します。対象は仕様 30.1 の全項目に加え、本設計で追加した判定を含みます。
 
@@ -3244,11 +3506,11 @@ pub struct DiagnosticsContext {
 - `BatchTriagePolicy`（5 つの要確認理由の各単独・複合、空集合）
 - `triage` の入力が 5.7.1 の共通モデルだけであること。OS 固有の値に依存しないこと（6.5.2）
 - `ReviewIssue` が**発生単位**で列挙され、小さい顔が 3 人なら 3 件になること（6.5.2）
-- `issueId` が `detectionRevision` を含み、`OverlappingFaces` では顔 ID が辞書順に並ぶこと（6.5.2）
+- `issueID` が `detectionRevision` を含み、`OverlappingFaces` では顔 ID が辞書順に並ぶこと（6.5.2）
 - 再検出で `detectionRevision` が増え、その写真の `ReviewIssue` / `ReviewDecision` / `Reviewed` が破棄されること（6.5.2）
-- `ReviewDecision` が `issueId` ごとに記録され、全 `ReviewIssue` が埋まるまで `Reviewed` にならないこと（6.5.4）
-- 1 人分の `issueId` へ判断を記録しただけでは `Reviewed` にならないこと（6.5.4）
-- `ManualRegionAdded` が `regionId` を保持し、その領域の削除で判断が破棄されること（6.5.4）
+- `ReviewDecision` が `issueID` ごとに記録され、全 `ReviewIssue` が埋まるまで `Reviewed` にならないこと（6.5.4）
+- 1 人分の `issueID` へ判断を記録しただけでは `Reviewed` にならないこと（6.5.4）
+- `ManualRegionAdded` が `regionID` を保持し、その領域の削除で判断が破棄されること（6.5.4）
 - `ReviewRequired` かつ `Unreviewed` の写真が 1 枚でも残る間は一括書き出しを開始できないこと（6.5.4）
 - `Reviewed` がアプリの判断では立たないこと。検出ステータスが利用者操作で変わらないこと（6.5.3）
 - `NoFaceDetected` がグループ一括対応の対象外であること（6.5.4）
@@ -3328,7 +3590,7 @@ pub struct DiagnosticsContext {
 
 #### 12.1.2 application saga test（JVM、偽ストア）
 
-偽 Room・偽 `ProtectedBlobStore`・偽ファイルを注入し、**各中断点**での挙動を検証します。実ストレージの原子性は検証しません（12.1.3 の役割）。
+偽 DB・偽 `ProtectedBlobStore`・偽ファイルを注入し、**各中断点**での挙動を検証します。実ストレージの原子性は検証しません（12.1.3 の役割）。
 
 - `ExportCommit` が各段階で中断しても、起動時に整合が回復すること（7.4.3）
 - `Prepared` / `FileVerified` / `Finalizing` / `AccountingCommitted` / `ReadyToPublish` のいずれからもコミット行が最終的に消えること（7.4.3）
@@ -3343,7 +3605,7 @@ pub struct DiagnosticsContext {
 - 認可時の grant が会計時に期限切れでも、その 1 回は完了し、grant は再登録されないこと（7.4.3）
 - `AccountingCommitted` からの復旧でファイル欠損時、実際に追加した会計要素だけが取り消されること（7.4.3）
 - 既存 grant を再利用しただけのコミットのロールバックで、その grant が削除されないこと（7.4.3）
-- 手順 4 の直後（`applied` 未保存）に落ちても、`ownerExportId` から正しくロールバックできること（7.4.3）
+- 手順 4 の直後（`applied` 未保存）に落ちても、`ownerExportID` から正しくロールバックできること（7.4.3）
 - 書き出し開始前に `Blocked` なら `ExportCommit` を作らないこと（7.4.3）
 - 開始後に契約が失効しても、その書き出しは開始時の権限で完了すること（7.4.3）
 - 失効時、`Prepared` 以降の写真は完了し `waiting` の写真は開始しないこと（7.4.3）
@@ -3353,7 +3615,7 @@ pub struct DiagnosticsContext {
 - 同一 `sourceHash` の非終端コミットが同時に 1 件までに制限されること（7.4.3）
 - `sourceHash` のロックがコミット行削除まで保持されること（7.4.3）
 - 並列書き出し時も `UsageLedgerStore.transact` が直列化され、更新が失われないこと（7.4.3）
-- クォータ消費が `exportId`、トライアル消費が `sourceHash` で冪等であること（7.4.3）
+- クォータ消費が `exportID`、トライアル消費が `sourceHash` で冪等であること（7.4.3）
 - 検証済みファイルが手順 8 の完了まで UI・`MediaSaver`・`SharePresenter` へ公開されないこと（7.4.1）
 - `FileVerified` で落ちた場合、`verifiedOutput` と実体を突き合わせて復旧できること（7.4.3）
 - 手順 8 のサイズ・SHA-256 が `verifiedOutput` からのコピーであり、再計算でないこと（7.4.3）
@@ -3383,21 +3645,21 @@ pub struct DiagnosticsContext {
 - `CustomStamp` を削除しても、それを使用したプロジェクトが再書き出しできること（8.4）
 - `StampAsset` が内容ハッシュで重複排除され、参照カウントが 0 になったときのみ削除されること（8.4）
 - 一括削除が `CustomStamp` のみを対象とし、参照中の `StampAsset` を消さないこと（8.5.2）
-- 削除で Room が先に更新され、`PendingFileDeletion` が同じトランザクションへ記録されること（8.4.1）
+- 削除で DB が先に更新され、`PendingFileDeletion` が同じトランザクションへ記録されること（8.4.1）
 - Free が既存プロジェクトの編集画面を開けること。変更操作の時点で案内が出ること（6.7）
 
 #### 12.1.3 adapter integration test（実機 / エミュレータ）
 
-実 Room、実 DataStore / 保護ファイル、実 HMAC 鍵を使います。
+実 GRDB、実 保護ファイル、実 Keychain 鍵を使います。
 
 - **契約テスト** — `media` / `data` / `billing` / `ads` の各ポートに共通のテストスイートを 1 本書き、Android instrumented test と iOS の XCTest の**両方で同一スイート**を実行します。「片方の OS だけ挙動が違う」を構造的に防ぎます
-- 手順 8 の Room トランザクションが原子的であり、`OutputRecord` / `ExportRecord` / キュー状態 / `Project` の更新とコミット削除が同時に成立すること（7.4.3）
+- 手順 8 の DB トランザクションが原子的であり、`OutputRecord` / `ExportRecord` / キュー状態 / `Project` の更新とコミット削除が同時に成立すること（7.4.3）
 - 「コミットあり・`OutputRecord` なし」または「コミットなし・`OutputRecord` あり」以外の状態が観測されないこと（7.4.1）
 - `ExportCommit` が状態遷移のたびに再署名され、正規の更新で検証失敗しないこと（7.4.3）
 - `SignedPayload` の署名対象に `payloadType` が含まれ、種別間の付け替えが検出されること（7.4.3）
-- 実 Keychain / Keystore の鍵で署名・検証が往復すること。鍵の破棄が `IntegrityFailure` になること（6.2.5）
+- 実 Keychain の鍵で署名・検証が往復すること。鍵の破棄が `IntegrityFailure` になること（6.2.5）
 - `ProtectedBlobStore` のデータと HMAC 鍵がともにバックアップ対象外であり、再インストール後が `Missing` になること（6.2.5 / 7.3.1）
-- `OutputRecord` の実体解決が `outputFileId` 経由であり、パス文字列の改変で専用ディレクトリ外を削除できないこと（7.4.3）
+- `OutputRecord` の実体解決が `outputFileID` 経由であり、パス文字列の改変で専用ディレクトリ外を削除できないこと（7.4.3）
 - `StampAsset` の作成が atomic rename を経ること（8.4.1）
 - 写真ライブラリ登録日時の引き継ぎ（7.6）を、両 OS で保存後に読み戻して検証すること
 - `NormalizedRect` の `right` / `bottom` が排他的境界として両 OS で一致すること（5.2.1）
@@ -3407,9 +3669,9 @@ pub struct DiagnosticsContext {
 - 背景処理が顔エフェクトより先に適用されること（5.2.1）
 - 重なり時に後のエフェクトが加工済み画像へ作用すること（5.2.1）
 - Vision と ML Kit の座標系・角度の差がアダプタで吸収され、`DetectedFace` が一致すること（5.2.1）
-- `plan` が参照する `bitmapId` が `rasterAssets` に無い場合、描画を開始せずエラーになること（5.1.2）
+- `plan` が参照する `bitmapID` が `rasterAssets` に無い場合、描画を開始せずエラーになること（5.1.2）
 - 同一 `StampRasterKey` のラスタライズが 1 回で済み、複数領域から再利用されること（5.1.2）
-- `RasterizedStampAsset` の `bitmapId` スコープが `render` 呼び出し内に閉じ、並列レンダリングで衝突しないこと（5.1.2）
+- `RasterizedStampAsset` の `bitmapID` スコープが `render` 呼び出し内に閉じ、並列レンダリングで衝突しないこと（5.1.2）
 - ラスタ一時ファイルの解放が冪等であること。二重解放でエラーにならないこと（5.1.2）
 - `CrashReporter` が例外メッセージ・パス・URL を除去し、breadcrumbs を列挙済みイベントに限定すること（9.4.1）
 - `/v1/diagnostics` が未知フィールドを拒否すること（9.4.1 / 11.2）
@@ -3666,7 +3928,7 @@ Web モックである以上、以下は本書の記述どおりには再現で�
 | モジュール | 契約 |
 | --- | --- |
 | `shared/media` | `PhotoPicker` / `FilePicker` / `ImageLoader` / `FaceDetector` / `ImageEffectRenderer` / `ImageEncoder` / `MediaSaver` / `SharePresenter` |
-| `shared/data` | `ProtectedBlobStore`、Room、ファイル管理 |
+| `Persistence` | `ProtectedBlobStore`、GRDB、ファイル管理 |
 | `shared/data/security` | `CryptoKeyStore` |
 | `shared/ads` | `AdPresenter` |
 | `composeApp`（アプリシェル） | `PrivacyShield` |
