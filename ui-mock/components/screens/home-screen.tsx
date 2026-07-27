@@ -36,7 +36,7 @@ export function HomeScreen() {
       guardNewWork("まとめて加工", () => go("batch"))
       return
     }
-    requestUpgrade(plan === "standard" ? "batch-standard" : "batch-credit")
+    requestUpgrade("batch-credit")
   }
 
   return (

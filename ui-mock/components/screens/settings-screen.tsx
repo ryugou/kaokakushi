@@ -239,7 +239,7 @@ export function SettingsScreen() {
               onClick={() =>
                 canBatchFull || canBatchTrial
                   ? guardNewWork("まとめて加工", () => go("batch"))
-                  : requestUpgrade(plan === "standard" ? "batch-standard" : "batch-credit")
+                  : requestUpgrade("batch-credit")
               }
             />
             <LinkRow

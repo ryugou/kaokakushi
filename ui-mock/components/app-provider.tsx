@@ -38,9 +38,9 @@ export type UpgradeReason =
   | "export-limit"
   | "premium-stamp"
   | "custom-stamp"
-  | "batch-standard"
   | "batch-credit"
   | "batch-size"
+  | "batch-limit"
   | "edit-locked"
 
 export type UpgradeState = { reason: UpgradeReason; detail?: string } | null
@@ -765,13 +765,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           onSelectionRemoved()
           return prev.filter((x) => x !== id)
         }
-        // 条件1: 1バッチの総枚数
+        // 条件1: 総枚数。上限は現在の利用権限で変わる
         if (prev.length >= batchMaxSelectable) {
-          setUpgrade(
-            canBatchFull
-              ? { reason: "batch-size", detail: `1回の一括処理では最大${BATCH_MAX_ITEMS}枚まで選べます。` }
-              : { reason: "batch-size" },
-          )
+          setUpgrade({ reason: canBatchFull ? "batch-limit" : "batch-size" })
           return prev
         }
         // 条件2: 消費済み台帳にない写真の枚数が残クレジットを超えないこと

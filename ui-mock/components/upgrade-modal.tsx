@@ -19,6 +19,8 @@ type Copy = {
   body: string
   primary: string
   benefits: string[]
+  /** 課金訴求ではなく、仕様上の上限を伝えるだけの通知 */
+  notice?: boolean
 }
 
 function buildCopy(reason: UpgradeReason): Copy {
@@ -55,18 +57,6 @@ function buildCopy(reason: UpgradeReason): Copy {
         primary: "Standardを確認する",
         benefits: ["写真やPNGからスタンプを作成", "最大100個まで登録できます", "追加スタンプもすべて使えます"],
       }
-    case "batch-standard":
-      return {
-        target: "pro",
-        title: "まとめて加工できます",
-        body: "Proなら、旅行やイベントの写真をまとめて加工・保存できます。",
-        primary: "Proを確認する",
-        benefits: [
-          `1回の一括処理で最大${BATCH_MAX_ITEMS}枚`,
-          "一覧で仕上がりを見渡し、注意が必要な写真だけ直せます",
-          "失敗した写真だけあとから再試行できます",
-        ],
-      }
     // お試し枠で「新しい写真」を選べる数を超えた
     case "batch-credit":
       return {
@@ -80,13 +70,27 @@ function buildCopy(reason: UpgradeReason): Copy {
           "一括設定プリセットとバッチ履歴",
         ],
       }
-    // Pro が 1 バッチの上限を超えた。課金訴求ではなく仕様上の通知
+    // お試し枠の総枚数を超えた。すべて消費済みの写真でも発火する
     case "batch-size":
       return {
         target: "pro",
+        title: `お試しでは一度に${TRIAL_CREDITS}枚までです`,
+        body: `一度に選べるのは${TRIAL_CREDITS}枚までです。Proなら最大${BATCH_MAX_ITEMS}枚をまとめて処理できます。`,
+        primary: "Proを確認する",
+        benefits: [
+          `1回の一括処理で最大${BATCH_MAX_ITEMS}枚`,
+          "一覧で仕上がりを見渡し、注意が必要な写真だけ直せます",
+          "失敗した写真だけあとから再試行できます",
+        ],
+      }
+    // Pro が 1 バッチの上限を超えた。課金訴求ではなく仕様上の通知
+    case "batch-limit":
+      return {
+        target: "pro",
+        notice: true,
         title: "選べる枚数の上限です",
         body: `1回の一括処理では最大${BATCH_MAX_ITEMS}枚まで選べます。`,
-        primary: "とじる",
+        primary: "わかりました",
         benefits: [
           "残りの写真は次のバッチとして処理できます",
           "処理キューで進みぐあいを確認できます",
@@ -146,14 +150,17 @@ export function UpgradeModal() {
                 className="h-12 rounded-2xl text-sm font-bold"
                 onClick={() => {
                   closeUpgrade()
-                  go("pricing")
+                  if (!info.notice) go("pricing")
                 }}
               >
                 {info.primary}
               </Button>
-              <Button variant="ghost" size="lg" className="h-11 rounded-2xl" onClick={closeUpgrade}>
-                今はやめる
-              </Button>
+              {/* 上限の通知にはアップグレード誘導を付けない */}
+              {!info.notice ? (
+                <Button variant="ghost" size="lg" className="h-11 rounded-2xl" onClick={closeUpgrade}>
+                  今はやめる
+                </Button>
+              ) : null}
             </div>
           </>
         ) : null}
