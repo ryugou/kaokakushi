@@ -64,15 +64,18 @@ export type ExportSettings = {
   metadata: MetadataSettings
 }
 
-/** 履歴の保存期間 */
-export type Retention = "none" | "7d" | "30d" | "unlimited"
+/** 履歴の保存期間。容量上限は別にあるため「制限なし」とは呼ばない */
+export type Retention = "none" | "7d" | "30d" | "no-expiry"
 
 export const RETENTION_LABELS: Record<Retention, string> = {
   none: "履歴を保存しない",
   "7d": "7日間",
   "30d": "30日間",
-  unlimited: "制限なし",
+  "no-expiry": "保存期限なし",
 }
+
+/** いま書き出したときの無料枠の扱い */
+export type QuotaDecision = "unlimited" | "free-reexport" | "consume" | "blocked"
 
 /**
  * 生成が終わった加工済み写真。
@@ -227,6 +230,7 @@ type AppContextValue = {
   /** 顔検出なしで書き出しへ進む（顔0件のとき） */
   skipFaces: boolean
   canExportSingle: boolean
+  quotaDecision: QuotaDecision
   completeSingleExport: () => void
 
   /** 変更せず再書き出しするモード（降格後の既存作品） */
@@ -397,6 +401,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // 総枚数だけで絞ると、残0枚のとき消費済みの写真すら選べなくなる。
   const batchMaxSelectable = canBatchFull ? BATCH_MAX_ITEMS : TRIAL_CREDITS
   const canExportSingle = plan !== "free" || remainingFree > 0
+  /**
+   * いま書き出したときのクォータ判定。
+   * 24時間以内の同じ元写真は追加消費しないため、一律に「1枚使います」とは案内できない。
+   */
+  const quotaDecision: QuotaDecision =
+    plan !== "free"
+      ? "unlimited"
+      : media && chargedIds.includes(media.id)
+        ? "free-reexport"
+        : remainingFree <= 0
+          ? "blocked"
+          : "consume"
   // 有料スタンプで作った既存作品は、Freeでも閲覧と再書き出しはできるが変更はできない
   const lockedEdit = plan === "free" && reexportOf?.paidFeature !== undefined
   const freeSpaceMb = lowStorage ? DEVICE_FREE_MB.low : DEVICE_FREE_MB.normal
@@ -1049,6 +1065,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     addManualFace,
     skipFaces,
     canExportSingle,
+    quotaDecision,
     completeSingleExport,
     reexportOf,
     startReexport,

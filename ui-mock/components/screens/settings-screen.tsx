@@ -37,7 +37,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 
-const RETENTIONS: Retention[] = ["none", "7d", "30d", "unlimited"]
+const RETENTIONS: Retention[] = ["none", "7d", "30d", "no-expiry"]
 
 export function SettingsScreen() {
   const {
@@ -182,7 +182,7 @@ export function SettingsScreen() {
               ))}
             </div>
             <p className="text-[11px] leading-relaxed text-muted-foreground">
-              写真ライブラリへ保存した加工済み写真は、この設定にかかわらず削除されません。
+              写真ライブラリへ保存した加工済み写真は、この設定にかかわらず削除されません。保存期限なしを選んだ場合も、履歴の使用容量上限を超えると古い履歴から削除されます。
             </p>
             {retention === "none" ? (
               <p className="rounded-xl bg-secondary px-3 py-2 text-[11px] leading-relaxed text-secondary-foreground">
