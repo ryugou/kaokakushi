@@ -3,7 +3,7 @@
 | 項目 | 内容 |
 | --- | --- |
 | 文書名 | 顔かくし 技術スタックおよびアーキテクチャ設計 |
-| バージョン | 1.24 |
+| バージョン | 1.25 |
 | 作成日 | 2026-07-27 |
 | 対象 | 写真・動画向け顔匿名化アプリ（iOS / Android） |
 | 上位文書 | 写真・動画向け顔匿名化アプリ 仕様書 v0.1 |
@@ -60,7 +60,8 @@
 | エフェクト描画 | Core Image（`CIPixellate` / `CIGaussianBlur`） |
 | エンコード・メタデータ除去 | Image I/O |
 | 写真ライブラリ保存 | PhotoKit（`PHAssetCreationRequest`） |
-| セキュア保存 | Keychain |
+| 署名鍵の保管 | Keychain（**鍵のみ**。データ本体は置かない） |
+| 署名付きデータの保管 | アプリ専用ディレクトリ上のファイル（HMAC 付き） |
 | 動画（次リリース） | AVFoundation / AVAssetWriter |
 
 ### 2.3 Android メディア層
@@ -73,10 +74,13 @@
 | エフェクト描画 | OpenGL ES 2.0（フラグメントシェーダ） |
 | エンコード・メタデータ除去 | `Bitmap.compress` + ExifInterface |
 | 写真ライブラリ保存 | MediaStore |
-| セキュア保存 | Keystore |
+| 署名鍵の保管 | Android Keystore（**鍵のみ**。エクスポート不可の HMAC 鍵） |
+| 署名付きデータの保管 | Proto DataStore（HMAC 付き） |
 | 動画（次リリース） | Jetpack Media3 Transformer |
 
 Android の最低対応が API 29 のため、`RenderEffect`（API 31 以降）は使用できません。ぼかしとモザイクは OpenGL ES 2.0 のフラグメントシェーダで実装します。
+
+**鍵とデータ本体を分けます。** Android Keystore は任意長のデータを格納する場所ではなく、鍵の保管とその鍵による暗号処理を提供する仕組みです。`UsageLedger` や `SubscriptionState` の本体は DataStore 側に置き、Keystore の鍵で HMAC を付けます。iOS の Keychain も同じ扱いとし、両 OS で `CryptoKeyStore`（鍵）と `ProtectedBlobStore`（署名付きデータ）の 2 契約に分けます（4 章）。
 
 ---
 
@@ -151,10 +155,11 @@ kaokakushi/
 │
 ├── shared/
 │   ├── domain/              純粋 Kotlin。プラットフォーム依存ゼロ
-│   ├── data/                Room KMP、ファイル管理、設定永続化
-│   ├── media/               メディア境界の expect/actual
+│   ├── data/                Room KMP、ファイル管理、ProtectedBlobStore
+│   │   └── security/        CryptoKeyStore（HMAC 鍵のみ）
+│   ├── media/               画像選択・読み込み・検出・描画・エンコード・保存・共有
 │   ├── billing/             RevenueCat ラッパと権限解決
-│   ├── ads/                 広告の expect/actual
+│   ├── ads/                 AdPresenter
 │   └── analytics/           イベント定義と送信
 │
 ├── iosApp/                  Xcode プロジェクト
@@ -170,7 +175,7 @@ kaokakushi/
 
 依存は **UI → domain ← 各アダプタ** の一方向とします。`domain` がポート（インターフェース）を定義し、`data` / `media` / `billing` / `ads` / `analytics` がそれを実装します。
 
-`domain` は他のいかなるモジュールにも依存しません。Kotlin 標準ライブラリと `kotlinx-datetime` 以外の依存を持ちません。
+`domain` は他のいかなるモジュールにも依存しません。Kotlin 標準ライブラリと `kotlinx-datetime` 以外の依存を持ちません。**Compose の型（`IntSize`、`Color`、`Offset` 等）も使いません。** 必要な値型は `PixelSize` のようにドメイン側で定義します（5.2）。
 
 この制約により、仕様書 30.1 が要求する単体テスト項目がすべて `commonTest` に収まり、JVM 上でエミュレータなしに実行できます。
 
@@ -201,15 +206,20 @@ v1 では全画面を Compose で実装します。iOS の特定画面を SwiftU
             ①マスク内モザイク ②マスク内ぼかし ③単色塗り ④画像貼り付け
 ```
 
-座標はすべて 0〜1 の正規化値で扱います（仕様 19.3 と一致）。ドメインはピクセル解像度を知りません。これにより拡張率やマージンの計算がプラットフォーム間でずれません。
+顔領域の位置と大きさは、ドメイン内では 0〜1 の正規化座標で保持します（仕様 19.3 と一致）。ドメインは出力サイズを `RenderPlan` 生成時に受け取りますが、**顔領域を永続的なピクセル座標として保持しません**。これにより拡張率やマージンの計算がプラットフォーム間でずれず、同じ設定を解像度の異なる出力へ適用できます。
 
 スタンプをベクターで自作する方針により、ドメイン側が Compose Canvas でベクターを描いてビットマップ化できます。ネイティブ側は「画像を貼る」1 プリミティブで全スタンプを処理でき、スタンプの種類が増えてもネイティブコードは増えません。
 
 ### 5.2 RenderPlan
 
 ```kotlin
+data class PixelSize(                   // ドメイン独自型。Compose の IntSize を使わない
+    val width: Int,
+    val height: Int,
+)
+
 data class RenderPlan(
-    val canvasSize: IntSize,            // 出力先の実ピクセルサイズ
+    val canvasSize: PixelSize,          // 出力先の実ピクセルサイズ
     val regions: List<RenderRegion>,
 )
 
@@ -243,20 +253,24 @@ fun expand(face: NormalizedRect, effect: EffectSetting): NormalizedRect
 
 ### 5.4 ネイティブ契約（v1 = 写真のみ）
 
-| 契約 | 責務 | iOS | Android |
-| --- | --- | --- | --- |
-| `PhotoPicker` | OS 標準ピッカー。画像のみ | PhotosPicker | Photo Picker |
-| `FilePicker` | カスタムスタンプ用画像の取り込み。対応形式は 8.1 に従う | UIDocumentPicker | SAF |
-| `ImageLoader` | 読み込み、向き正規化、検出用縮小、HEIC 対応 | Image I/O | ImageDecoder |
-| `FaceDetector` | 顔検出。正規化座標で返す | Vision | ML Kit |
-| `ImageEffectRenderer` | RenderPlan の 4 プリミティブ実行 | Core Image | OpenGL ES 2.0 |
-| `ImageEncoder` | JPEG / PNG エンコード、メタデータ除去 | Image I/O | Bitmap.compress + ExifInterface |
-| `MediaSaver` | 写真ライブラリ保存、登録日時の指定 | PhotoKit | MediaStore |
-| `SharePresenter` | OS 共有シートの提示と結果の返却 | UIActivityViewController | `Intent.ACTION_SEND` |
-| `CryptoKeyStore` | HMAC 鍵の生成と保持 | Keychain | Android Keystore |
-| `ProtectedBlobStore` | 署名済み状態の原子的な読み書き | Keychain または保護ファイル | Proto DataStore または原子的置換ファイル |
-| `AdPresenter` | バナー・全画面広告 | GADBannerView | AdView |
-| `PrivacyShield` | 画面スナップショット対策（7.7） | `sceneWillResignActive` | `onPause` |
+**12 のプラットフォーム契約がありますが、すべてが「メディア」ではありません。** 実装先モジュールを契約ごとに指定します。
+
+| 契約 | 責務 | 実装モジュール | iOS | Android |
+| --- | --- | --- | --- | --- |
+| `PhotoPicker` | OS 標準ピッカー。画像のみ | `shared/media` | PhotosPicker | Photo Picker |
+| `FilePicker` | カスタムスタンプ用画像の取り込み。対応形式は 8.1 に従う | `shared/media` | UIDocumentPicker | SAF |
+| `ImageLoader` | 読み込み、向き正規化、検出用縮小、HEIC 対応 | `shared/media` | Image I/O | ImageDecoder |
+| `FaceDetector` | 顔検出。正規化座標で返す | `shared/media` | Vision | ML Kit |
+| `ImageEffectRenderer` | RenderPlan の 4 プリミティブ実行 | `shared/media` | Core Image | OpenGL ES 2.0 |
+| `ImageEncoder` | JPEG / PNG エンコード、メタデータ除去 | `shared/media` | Image I/O | Bitmap.compress + ExifInterface |
+| `MediaSaver` | 写真ライブラリ保存、登録日時の指定 | `shared/media` | PhotoKit | MediaStore |
+| `SharePresenter` | OS 共有シートの提示と結果の返却 | `shared/media` | UIActivityViewController | `Intent.ACTION_SEND` |
+| `CryptoKeyStore` | HMAC 鍵の生成と保持。**鍵のみ扱う** | `shared/data`（`security` パッケージ） | Keychain | Android Keystore |
+| `ProtectedBlobStore` | 署名済み状態の原子的な読み書き | `shared/data` | 保護ファイル（原子的置換） | Proto DataStore |
+| `AdPresenter` | バナー・全画面広告 | `shared/ads` | GADBannerView | AdView |
+| `PrivacyShield` | 画面スナップショット対策（7.7） | `composeApp`（アプリシェル） | `sceneWillResignActive` | `onPause` |
+
+`CryptoKeyStore` と `ProtectedBlobStore` を `shared/media` へ置きません。`shared/media` は画像の入出力に閉じた責務であり、ここへ鍵と台帳の保管を混ぜると、写真処理のテストダブルが鍵ストアまで抱えることになります。`PrivacyShield` はライフサイクルに紐づくため、アプリシェル側の責務です。
 
 ### 5.5 動画対応で追加する契約（v2）
 
@@ -300,7 +314,7 @@ fun expand(face: NormalizedRect, effect: EffectSetting): NormalizedRect
 2. 検出用に長辺 1,920 ピクセル程度へ縮小する
 3. 顔検出を実行する
 4. **ネイティブ側で正規化座標へ変換して返す**
-5. 以降、ドメインはピクセル座標を扱わない
+5. 以降、ドメインは顔領域をピクセル座標として保持しない（出力サイズは `RenderPlan` 生成時にのみ受け取る。5.1）
 
 検出用画像上で顔の短辺が 24 ピクセル未満の検出結果には、顔単位のフラグ `isSmallFace` を立てます（仕様 8.5）。
 
@@ -361,7 +375,8 @@ iOS の `confidence` はこのモデルに含めません。Android に対応す
 | `Consume` | 顔は検出されませんでした。このまま保存すると、今月の無料枠を 1 枚使用します。 |
 | `FreeReexport` | 顔は検出されませんでした。24 時間以内の再書き出しのため、無料枠は使用しません。 |
 | `Unlimited` | 顔は検出されませんでした。（無料枠についての記述は出さない） |
-| `Blocked` | 今月の無料保存を使い切りました。Standard なら 1 枚ずつ無制限で保存できます。 |
+| `Blocked(MonthlyLimitReached)` | 今月の無料保存を使い切りました。Standard なら 1 枚ずつ無制限で保存できます。 |
+| `Blocked(LedgerIntegrityFailure)` | 保存回数の記録を確認できないため、今月は無料での保存を利用できません。来月から再開します。Standard なら今すぐ 1 枚ずつ無制限で保存できます。 |
 
 ### 6.2 無料枠の消費判定（QuotaPolicy）
 
@@ -407,7 +422,12 @@ sealed interface QuotaDecision {
     object Unlimited : QuotaDecision        // Standard / Pro
     object FreeReexport : QuotaDecision     // 24 時間以内の再書き出し。消費しない
     object Consume : QuotaDecision          // 1 消費する
-    data class Blocked(val limit: Int) : QuotaDecision
+    data class Blocked(val reason: QuotaBlockReason, val limit: Int?) : QuotaDecision
+}
+
+enum class QuotaBlockReason {
+    MonthlyLimitReached,      // 通常の月間上限
+    LedgerIntegrityFailure,   // 台帳破損による当月封鎖（6.2.5）
 }
 
 data class QuotaEvaluation(
@@ -431,9 +451,14 @@ fun evaluate(
 1. `lastObservedAt` を `effectiveNow` へ前進させる
 2. 期間更新と期限切れ `grant` の整理を適用する（6.2.3）
 3. `plan != Free` なら `Unlimited`
-4. `grants[sourceHash]` があり `effectiveNow - it.firstSuccessAt < 24h` なら `FreeReexport`
-5. `consumed >= limit` なら `Blocked`
-6. それ以外は `Consume`
+4. **`monthlyBlockedPeriod == period` なら `Blocked(LedgerIntegrityFailure)`**（6.2.5）
+5. `grants[sourceHash]` があり `effectiveNow - it.firstSuccessAt < 24h` なら `FreeReexport`
+6. `consumed >= limit` なら `Blocked(MonthlyLimitReached, limit)`
+7. それ以外は `Consume`
+
+**手順 4 を月間上限の判定より前に置きます。** 破損修復後は `consumedExportIds` が空なので、上限判定だけでは通過してしまいます。
+
+**理由を型で分けるのは、文言が異なるためです。** 破損時に「今月の無料保存を使い切りました」と表示するのは事実に反します。
 
 **有料プランで `Unlimited` を返す場合も、手順 1 と 2 は必ず実施してから返します。** 有料期間中に時刻更新と grant 整理を止めると、降格した瞬間に古い状態から判定が始まります。
 
@@ -456,6 +481,8 @@ fun evaluate(
 grant がなければ `FreeReexport` にならず枠を 1 枚消費します。これは 6.7 の「降格した事実はクォータ判定に影響しない。判定に使うのは `sourceHash` と経過時間だけ」と矛盾します。
 
 `firstSuccessAt` を更新しないのは、再書き出しのたびに窓が延びると 24 時間の上限が意味を失うためです。
+
+**この規則は「認可時に有効な grant があったか」ではなく「会計時に有効な grant があるか」で判断すると破れます。** 認可から会計までの間に窓が切れると、grant が存在しない状態として新規作成されるためです。`FreeMonthlyReexport` は認可時の `firstSuccessAt` を保存して維持します（7.4.3 の preserve）。
 
 #### 6.2.1 消費の確定タイミング
 
@@ -682,16 +709,38 @@ fun rollPeriod(ledger: UsageLedger, effectiveNow: Instant, zone: TimeZone): Usag
 
 折衷案として、Keychain / Keystore の鍵で `UsageLedger` に HMAC 署名を付与します。サーバー照合も端末識別子の収集も行いません。
 
-##### 検証失敗時の扱い
+##### 読み込み結果の分類
 
-読み込み結果を明示的な状態として持ちます。
+読み込みが失敗する理由は 1 つではありません。初回起動・改ざん・ストレージの一時障害・スキーマ更新を同じ結果にまとめると、**初回起動の利用者が最初から Free 枠とトライアルを封じられ**、逆に**一時障害のたびに正常な台帳を保守状態で上書きします**。
+
+`ProtectedBlobStore` の読み込み結果を、原因ごとに分けた型で返します。
 
 ```kotlin
-sealed interface UsageLedgerLoadResult {
-    data class Valid(val ledger: UsageLedger) : UsageLedgerLoadResult
-    data object IntegrityFailure : UsageLedgerLoadResult
+sealed interface ProtectedLoadResult<out T> {
+    data class Valid<T>(val value: T) : ProtectedLoadResult<T>
+    data object Missing : ProtectedLoadResult<Nothing>                    // まだ存在しない
+    data object IntegrityFailure : ProtectedLoadResult<Nothing>           // HMAC 不一致
+    data object TemporarilyUnavailable : ProtectedLoadResult<Nothing>     // Keychain/Keystore/ファイルの一時障害
+    data class UnsupportedSchema(val version: Int) : ProtectedLoadResult<Nothing>
 }
 ```
+
+| 結果 | 扱い |
+| --- | --- |
+| `Valid` | そのまま使う |
+| `Missing` | **新規利用者用の通常台帳を作る**（`monthlyBlockedPeriod = null`、`trialIntegrityLocked = false`） |
+| `IntegrityFailure` | 後述の保守的台帳へ修復する |
+| `TemporarilyUnavailable` | **上書きしない。** 再試行し、書き出しの開始を一時停止する（`ExportStartGate` を通さない）。利用者には再試行可能なエラーを提示する |
+| `UnsupportedSchema` | 定義済みの移行処理を実行する。移行後に再検証する |
+| 移行不能 | 復旧エラー（7.4.3）として扱う。**自動初期化しない** |
+
+**`TemporarilyUnavailable` と `IntegrityFailure` を混同しないことが要点です。** 鍵ストアが一時的に利用できないだけの状態を改ざんとして修復すると、正常な利用者の枠を消します。両者は「署名検証まで到達したか」で区別できます。データを読めて HMAC が一致しない場合のみ `IntegrityFailure` です。読み込み自体が失敗した場合、鍵を取得できなかった場合は `TemporarilyUnavailable` です。
+
+HMAC 鍵そのものが失われた、または無効化された場合（生体認証の登録変更等で Keystore の鍵が破棄された場合を含む）は、データを検証できないため `IntegrityFailure` として扱います。鍵の喪失と改ざんは端末側から区別できないためです。
+
+##### 検証失敗時の扱い
+
+以下は `IntegrityFailure` に対する規則です。
 
 **空の `UsageLedger` を作り直しません。** 台帳は消費件数だけでなく、どの `sourceHash` が grant を持ちトライアルを消費したかを保持しています。空にすると**無料枠もトライアルも全回復**し、改ざんの動機になります。
 
@@ -721,6 +770,17 @@ sealed interface UsageLedgerLoadResult {
 
 **改ざんされた値を根拠に枠やクレジットを付与しません。** 空の台帳をそのまま作ると無料枠もトライアルも全回復するため、封じるフラグを同時に立てます。
 
+##### 封鎖フラグを実際に効かせる箇所
+
+フラグを立てるだけでは効果がありません。次の 2 箇所で参照します。
+
+| フラグ | 参照箇所 | 効果 |
+| --- | --- | --- |
+| `monthlyBlockedPeriod` | `QuotaPolicy.evaluate` の手順 4（6.2 判定順） | 月間上限の判定より前に `Blocked(LedgerIntegrityFailure)` を返す |
+| `trialIntegrityLocked` | `remainingCredits` の導出（6.5.6.1） | 残数を 0 とし、一括トライアル画面への進入・写真選択・認可をすべて禁止する |
+
+`monthlyBlockedPeriod` を上限判定より前に置く理由は、修復後の `consumedExportIds` が空だからです。上限判定だけでは `consumed(0) >= limit` が成立せず、そのまま通過します。
+
 再インストールで枠が戻ることは仕様 14.5 が明示的に許容しているため、追跡しません。
 
 ### 6.3 権限解決（EntitlementResolver）
@@ -743,6 +803,26 @@ data class Entitlement(
 - **`pending`（支払い保留）では有料機能を付与しません**（仕様 5.4）。個々の権限フラグ（追加スタンプ、カスタムスタンプ、一括処理、広告非表示）はすべて `Entitlement` から導出し、`plan` から直接導出しません
 - **オフライン耐性**（仕様 25.3 / 27.3）。最後に検証成功した `Entitlement` を `lastVerifiedAt` とともに ProtectedBlobStore へ保存します。ネットワーク不通時はこのキャッシュで有料機能を維持し、復元失敗を理由に Free へ強制降格させません。失効が明示的に確認された場合のみ剥奪します
 - **バックエンド障害で編集を止めません**（仕様 21.6）。リモート設定が取得できない場合はアプリ内の安全な既定値を使用します
+
+##### 購入状態キャッシュの読み込み失敗
+
+`SubscriptionState` も `ProtectedBlobStore` 上の署名付きデータであり、6.2.5 と同じ `ProtectedLoadResult` を返します。有効なキャッシュがある場合のオフライン動作だけでは不足です。
+
+| 結果 | 扱い |
+| --- | --- |
+| `Valid` | オフラインでもこのキャッシュで有料機能を維持する |
+| `Missing` | Free として扱い、RevenueCat から取得する。初回起動はこの経路 |
+| `IntegrityFailure` / `UnsupportedSchema`（移行不能） | キャッシュを信頼しない。RevenueCat から**再取得する** |
+| `TemporarilyUnavailable` | 上書きせず再試行する。判定は保留し、既存のメモリ上の `Entitlement` を維持する |
+
+再取得を要する場合の規則は次のとおりです。
+
+- 取得に成功すればキャッシュを置き換える
+- **オフラインで再取得できない場合、有料権限を新規に付与しません**。改ざんによる権限詐取を防ぐためです
+- **カスタムスタンプ、履歴、プリセットなどのデータは削除しません**（6.7 と同じ扱い）
+- 利用者へは「購入状態を確認できません」と提示し、**再試行**と**購入の復元**への導線を出します
+
+**Free へ降格したと表示しません。** 検証できない状態と失効した状態は異なります。前者で「無料プランになりました」と表示すると、支払い済みの利用者に対する誤った通知になります。
 
 Pro は月単位で契約と解約を繰り返す利用者が一定数いると想定します。継続率の中心は Standard です。この前提から、**解約や降格によってカスタムスタンプと一括設定プリセットを失わせません**（仕様 12.6 をプリセットへ拡張）。再契約時にそのまま再利用できます。
 
@@ -1070,8 +1150,15 @@ Free および Standard の利用者は、Pro の中核である一括処理を�
 **残クレジット数は保存しません。消費済み台帳から導出します。**
 
 ```kotlin
-val remainingCredits = maxOf(0, configuredCreditCount - usageLedger.trialEntries.size)
+val remainingCredits =
+    if (usageLedger.trialIntegrityLocked) {
+        0
+    } else {
+        maxOf(0, configuredCreditCount - usageLedger.trialEntries.size)
+    }
 ```
+
+**`trialIntegrityLocked` を導出に含めます。** 台帳を修復すると `trialEntries` が空になるため、フラグを見なければ表示上 5 枚すべてが復活します。残数 0 のときは、一括トライアル画面への進入・写真選択・認可のすべてを禁止します（6.2.5）。
 
 残数と台帳の両方を保存すると、更新途中の異常終了で不一致が起こりえます。「残 3 枚なのに台帳は 4 件」という状態からは、どちらが正しいか判断できません。導出にすれば正が 1 つになります。
 
@@ -1284,17 +1371,26 @@ Pro を必要とするのは、バッチという単位に対する操作だけ�
 | `CustomStamp` | 仕様 19.6。スタンプ一覧の項目（8.4） |
 | `StampAsset` | 新規。プロジェクトが参照する不変の画像実体。内容ハッシュを主キーとし参照カウントを持つ（8.4） |
 | `ExportRecord` | 仕様 19.7。`batchId` を追加 |
-| `OutputRecord` | 新規。写真ごとの出力状態。`exportId` でコミットと対応づける（7.4.3） |
+| `OutputRecord` | 新規。写真ごとの出力状態。`exportId` でコミットと対応づける。実体はパスではなく `outputFileId` で参照し、`outputDigest` を持つ（7.4.3） |
 | `ExportCommit` | 新規。書き出しのコミットジャーナル。行に HMAC を付ける（7.4.3） |
 | `Batch` | 新規。バッチ単位の履歴（7.2.6） |
 | `BatchPreset` | 新規。一括設定プリセット（6.5.8） |
 
 以下は DB ではなく **`ProtectedBlobStore`** へ保存します。改ざんで権限や枠を書き換えられないようにするためです（6.2.5 の HMAC 署名つき）。
 
-**鍵の保管とデータの保管を分けます。** Android Keystore が保持できるのは暗号鍵であり、任意のデータを置くストレージではありません。鍵は `CryptoKeyStore`（Android Keystore / Keychain）、署名済みデータ本体は `ProtectedBlobStore`（Proto DataStore などトランザクション型の更新手段を持つもの / Keychain または保護ファイル）とします。
+**鍵の保管とデータの保管を分けます。** Android Keystore が保持できるのは暗号鍵であり、任意のデータを置くストレージではありません。iOS の Keychain も、台帳のような可変データを繰り返し置き換える用途には向きません。
 
-- `SubscriptionState`（6.3 の `Entitlement` キャッシュ）
+| 役割 | 契約 | iOS | Android |
+| --- | --- | --- | --- |
+| 鍵 | `CryptoKeyStore` | Keychain | Android Keystore（エクスポート不可） |
+| 署名済みデータ本体 | `ProtectedBlobStore` | アプリ専用ディレクトリ上のファイル（原子的置換） | Proto DataStore |
+
+いずれも原子的な置き換えができることを要件とします。台帳は 1 つのオブジェクトとして丸ごと差し替えるため、部分更新の途中状態が観測されてはいけません（6.2）。
+
+- `SubscriptionState`（6.3 の `Entitlement` キャッシュ）。読み込み失敗時の扱いは 6.3 に定義する
 - `UsageLedger`（6.2）。通常クォータ・grant・トライアル台帳・基準時刻を1つの署名済みオブジェクトとして原子的に置き換える。残クレジットは保存せず台帳から導出する
+
+いずれも読み込み結果は `ProtectedLoadResult`（6.2.5）で返し、**未存在・改ざん・一時障害・スキーマ不一致を区別します。** これらを 1 つの失敗にまとめると、初回起動の利用者を封鎖したり、一時障害のたびに正常な状態を上書きしたりします。
 
 ### 7.2 履歴とプライバシー
 
@@ -1466,7 +1562,7 @@ data class ExportCommit(
     val projectId: String,
     val batchId: String?,
     val sourceHash: String,
-    val outputPath: String,
+    val outputFileId: String,                 // パスではなく ID。専用ディレクトリ配下で解決する
     val authorization: ExportAuthorization,   // 開始前に固定する
     val accountingAt: Instant?,               // 会計内容を確定した時刻
     val accountingPeriod: YearMonth?,         // 計上先の年月
@@ -1504,10 +1600,16 @@ enum class ExportCommitState { Prepared, FileVerified, AccountingCommitted, Comp
 **`Blocked` になりうる評価を、生成が終わったあとに行いません。**
 
 ```kotlin
+data class AuthorizedGrant(
+    val sourceHash: String,
+    val firstSuccessAt: Instant,        // 認可時に有効だった grant の開始時刻
+)
+
 data class ExportAuthorization(
     val entitlementSnapshot: Entitlement,
     val accountingMode: ExportAccountingMode,
     val authorizedAt: Instant,
+    val authorizedGrant: AuthorizedGrant?,   // FreeMonthlyReexport のとき必須
 )
 
 /** どの勘定を使う書き出しか。Blocked は含めない */
@@ -1527,17 +1629,37 @@ sealed interface ExportAccountingMode {
 | --- | --- | --- | --- |
 | `PaidUnlimited` | 使わない | 使わない | ensure |
 | `FreeMonthlyConsume` | **1 消費** | 使わない | ensure |
-| `FreeMonthlyReexport` | 使わない | 使わない | ensure |
+| `FreeMonthlyReexport` | 使わない | 使わない | **preserve** |
 | `BatchTrial(true)` | **使わない** | **1 消費** | ensure |
 | `BatchTrial(false)` | 使わない | 使わない | ensure |
 
 **月間クォータを使うのは Free の単体処理だけです。** Free / Standard の一括トライアルは月間枠を参照しません。したがって **Free 利用者が月 5 枚を使い切っていても、クレジットが残っていれば一括トライアルを実行できます。**
 
-**grant の規則はすべての勘定で同じ「ensure」です。**
+###### ensure — 新しい窓を作ってよい勘定
+
+`PaidUnlimited` / `FreeMonthlyConsume` / `BatchTrial(true)` / `BatchTrial(false)` に適用します。
 
 > 正常生成時に有効な grant が存在すれば、既存の `firstSuccessAt` を維持する。存在しなければ、`accountingAt` を `firstSuccessAt` とする新しい grant を作る。
 
 `BatchTrial(false)` が意味するのは「その写真のトライアルクレジットを**過去に**消費済み」であって、「いま有効な 24 時間 grant が存在する」ではありません。1 週間前にトライアルした写真を再処理する場合、クレジットは消費しませんが、**新しい正常生成として grant は作る必要があります**。両者を混同すると、再処理直後の再書き出しが有料になります。
+
+###### preserve — 窓を延長してはならない勘定
+
+`FreeMonthlyReexport` に適用します。**この勘定に ensure を適用してはいけません。** 認可と会計の間に時間差があるため、次が成立してしまいます。
+
+1. 初回成功から 23 時間 59 分の時点で再書き出しを開始する
+2. 認可時点では有効な grant があるので `FreeMonthlyReexport`
+3. 生成中に 24 時間を超える
+4. 会計時点では旧 grant が期限切れ
+5. ensure により `accountingAt` を起点とする**新しい grant** ができる
+
+これは「再書き出しのたびに窓を延ばさない」という 6.2.0 の規則に反します。無料の再書き出しを繰り返すだけで、窓を無期限に更新できてしまいます。
+
+規則は次のとおりです。
+
+> 認可時に保存した `authorizedGrant.firstSuccessAt` をそのまま維持する。会計時点で新しい `firstSuccessAt` を作らない。
+
+会計時点で認可時の grant が既に期限切れになっていた場合は、**再登録せずそのまま落とします。** 無料で開始したその 1 回は完了させますが、次回の再書き出し権は与えません。認可を握っている以上、生成済みファイルを破棄する必要はありません。
 
 開始後に次が起きても、その書き出しは開始時の権限で完了させます。
 
@@ -1554,7 +1676,7 @@ sealed interface ExportAccountingMode {
 
 処理中の 1 枚は最後まで終わり、残りは停止します。
 
-**Free でクォータを消費する書き出しは同時に 1 件までとします。** 並列に走らせると、開始時の判定が両方 `Consume` になり上限を超えます。
+**Free の単体書き出しは同時に 1 件までとします。** 「クォータを消費する書き出し」を条件にできない理由は開始ゲートの項で述べます。消費するかどうかは認可の結果であり、ゲートを取る時点では未確定です。並列に走らせると、開始時の判定が両方 `Consume` になり上限を超えます。
 
 ##### 会計内容はファイル検証後に確定する
 
@@ -1625,20 +1747,35 @@ interface UsageLedgerStore {
 interface ExportStartGate {
     suspend fun <R> withPermit(
         sourceHash: String,
-        requiresFreeMonthlySlot: Boolean,
+        isFreeSingleExport: Boolean,
         block: suspend () -> R,
     ): R
 }
 ```
 
+**ゲートの引数を「月間枠を消費するか」にはできません。** その書き出しが `FreeMonthlyConsume` / `FreeMonthlyReexport` / `Blocked` のどれになるかは、後続の `UsageLedgerStore.transact` で初めて決まります。認可の前にゲートを取る以上、その時点で判明していない値を引数にはできません。
+
+代わりに、**Free の単体書き出しであること**を条件にゲートを取ります。これはプランと処理種別だけで決まるため、認可前に判定できます。
+
+| 条件 | ゲート |
+| --- | --- |
+| `sourceHash` 単位 | 常に取得する |
+| `isFreeSingleExport == true` | 月間認可ゲートも取得する |
+| 一括トライアル、Standard / Pro | 月間認可ゲートは取得しない |
+
 開始の順序は次のとおりです。
 
 1. 復旧完了ゲートを確認する（7.4.3 の起動順序）
 2. `sourceHash` 単位のゲートを取得する
-3. Free の月間枠を消費するなら、月間消費ゲートも取得する
-4. `UsageLedgerStore.transact` で認可する
-5. `ExportCommit(Prepared)` を保存する
-6. 処理を開始する
+3. `isFreeSingleExport` なら月間認可ゲートも取得する
+4. **その内側で** `UsageLedgerStore.transact` を実行し、`Consume` / `Reexport` / `Blocked` を決める
+5. `Blocked` なら生成せずに終える。ゲートは解放する
+6. `ExportCommit(Prepared)` を保存する
+7. 処理を開始する
+
+**ゲートは認可の完了では解放しません。コミット行の削除またはロールバックの完了まで保持します。** Free の単体書き出しが失敗した場合も、その処理が完全に終わるまで次を開始しません。ロールバックの途中で次の認可が走ると、戻す前の台帳を根拠に判定してしまいます。
+
+これにより、2 件が同じ未更新の台帳を見て両方 `Consume` として認可される経路がなくなります。
 
 `OutputRecord` にも `exportId` を持たせ、どのコミットに対応するかを一意にします。
 
@@ -1647,12 +1784,15 @@ data class OutputRecord(
     val exportId: String,
     val projectId: String,
     val batchId: String?,
-    val outputPath: String,
+    val outputFileId: String,     // パスではなく ID。専用ディレクトリ配下で解決する
+    val outputDigest: ByteArray,  // 生成時に確定した内容ダイジェスト
     val state: OutputState,
     val generatedAt: Instant,
-    val expiresAt: Instant,     // generatedAt + 24.hours
+    val expiresAt: Instant,       // generatedAt + 24.hours
 )
 ```
+
+**パスを DB へ直接持ちません。** `outputFileId` から専用ディレクトリ配下のパスを解決します。パス文字列を保存すると、DB を書き換えるだけで `../` を含む値を注入でき、期限切れ削除の処理に別のアプリ内部ファイルを消させる経路ができます。ID からの解決なら、削除対象が構造的に専用ディレクトリの外へ出ません。
 
 **期限を `OutputRecord` 自身が持ちます。** 判定は `effectiveNow >= expiresAt` です（6.2.2.5）。`ExportCommit` は完了後に削除するため、**コミットが消えたあとも単独で期限を判定できる**必要があります。
 
@@ -1670,10 +1810,39 @@ data class OutputRecord(
 | 4 | `applied` を埋めて `ExportCommit(AccountingCommitted)` を保存 | Room |
 | 5 | `OutputRecord(Generated)` を `exportId` を主キーに upsert | Room |
 | 6 | `ExportCommit(Completed)` を保存 | Room |
-| 7 | `OutputRecord` の存在を確認する | Room |
+| 7 | `OutputRecord` と出力ファイルの**健全性**を確認する（下記） | Room / ファイルシステム |
 | 8 | `Completed` の `ExportCommit` を削除する | Room |
 
 **手順 8 を省くと、書き出しのたびにコミット行が永久に蓄積します。** ジャーナルは中断からの復旧のためだけに存在するので、役目を終えたら消します。
+
+###### 手順 7 の確認内容
+
+**存在確認だけでは不足です。** 0 バイトのファイル、途中まで書かれたファイル、デコードできないファイルも「存在する」ため、その状態でコミット行を削除できてしまいます。削除後は会計を戻すためのジャーナルが失われ、消費だけが残ります。
+
+次のすべてを確認してから削除します。
+
+| 確認項目 | 目的 |
+| --- | --- |
+| `OutputRecord` が存在する | 手順 5 が反映されている |
+| `outputFileId` から解決したファイルが存在する | 実体がある |
+| ファイルサイズが 0 でなく、記録値と一致する | 途中書き込みでない |
+| 内容ダイジェストが `outputDigest` と一致する | 内容が入れ替わっていない |
+| 簡易デコードが成功する | 画像として開ける |
+
+いずれかが不成立なら削除せず、そのコミットをロールバック対象として扱います。この時点ではジャーナルが残っているため、会計を正しく戻せます。
+
+###### コミット削除後にファイルが失われた場合
+
+ジャーナルを消したあとで `OutputRecord` と実体が食い違うことは、外部要因（OS によるキャッシュ削除、ストレージ障害）で起こりえます。この経路の規則を定めます。
+
+| 状況 | 扱い |
+| --- | --- |
+| 元素材と設定から再生成できる | **追加消費なしで再生成する。** 消費は既に済んでいる |
+| 再生成できない（元素材が削除された等） | 利用者へ通知し、**該当 `exportId` の月間消費のみ**を可能なら取り消す |
+| grant / トライアル台帳の取り消し | **`ownerExportId` が該当 `exportId` と一致する場合だけ**行う |
+| 整合性を判断できない | 復旧エラーとして扱う（自動では戻さない） |
+
+`ownerExportId` の一致を条件にする理由は、6.2 の所有者方式と同じです。他の成功した書き出しが使っている grant を、この 1 件の欠損で消してはいけません。
 
 **手順 3 と 4 を逆にしてはいけません。** 先に `AccountingCommitted` を書くと、台帳が未反映のまま「反映済み」として復旧されます。この順なら 3 と 4 の間で落ちても状態は `FileVerified` のままなので、台帳更新を冪等に再適用できます。
 
@@ -2028,7 +2197,7 @@ Rust + Axum。`/v1/config` は静的 JSON と ETag による配信とします�
 - 手順3の直後（`applied` 未保存）に落ちても、`ownerExportId` から正しくロールバックできること（7.4.3）
 - 書き出し開始前に `Blocked` なら `ExportCommit` を作らないこと（7.4.3）
 - 開始後に契約が失効しても、その書き出しは開始時の権限で完了すること（7.4.3）
-- Free でクォータを消費する書き出しが同時に1件までに制限されること（7.4.3）
+- Free の単体書き出しが同時に1件までに制限されること（7.4.3）
 - 復旧エラーを「破棄して続ける」で解除でき、台帳が変更されないこと（7.4.3）
 - Free が月間枠を使い切っていても、クレジットが残っていれば一括トライアルを開始できること（7.4.3）
 - `BatchTrial` が月間枠を消費しないこと（7.4.3）
@@ -2038,6 +2207,16 @@ Rust + Axum。`/v1/config` は静的 JSON と ETag による配信とします�
 - `UsageLedger` の署名検証失敗時、修復済み台帳が作られ、翌月に月間枠が再開しトライアルは封じられたままであること（6.2.5）
 - `ExportCommit` が状態遷移のたびに再署名され、正規の更新で検証失敗しないこと（7.4.3）
 - `BatchTrial(false)` でも grant が ensure されること（7.4.3）
+- **`FreeMonthlyReexport` の生成中に 24 時間を超えても、新しい grant が作られず窓が延びないこと**（7.4.3 preserve）
+- **認可時の grant が会計時に期限切れでも、その 1 回は完了し、grant は再登録されないこと**（7.4.3 preserve）
+- **`monthlyBlockedPeriod == period` のとき、`consumedExportIds` が空でも `Blocked(LedgerIntegrityFailure)` になること**（6.2）
+- **`trialIntegrityLocked` のとき `remainingCredits` が 0 になり、トライアル画面へ進入できないこと**（6.5.6.1）
+- **`Missing` で通常台帳が作られ、初回起動の利用者が封鎖されないこと**（6.2.5）
+- **`TemporarilyUnavailable` で台帳が上書きされず、書き出し開始が保留されること**（6.2.5）
+- **`SubscriptionState` の署名不正時、オフラインで有料権限が新規付与されず、カスタムスタンプと履歴が削除されないこと**（6.3）
+- **0 バイト・破損・ダイジェスト不一致の出力ファイルで、`Completed` のコミット行が削除されないこと**（7.4.3 手順 7）
+- **`OutputRecord` の実体解決が `outputFileId` 経由であり、パス文字列の改変で専用ディレクトリ外を削除できないこと**（7.4.3）
+- 開始ゲートが `isFreeSingleExport` で取得され、認可前に決定できること（7.4.3）
 - 開始ゲートにより、認可から `Prepared` までの間に同一 `sourceHash` の別書き出しが割り込めないこと（7.4.3）
 - `sourceHash` のロックがコミット行削除まで保持されること（7.4.3）
 - Pro 失効時、`Prepared` 以降の写真は完了し `waiting` の写真は開始しないこと（7.4.3）
@@ -2208,7 +2387,8 @@ Pro の説明は、機能の列挙ではなく体験として記述します。
 
 | 分類 | 発火条件 | 誘導先 |
 | --- | --- | --- |
-| `export-limit` | Free の月間枠を使い切った | Standard |
+| `export-limit` | Free の月間枠を使い切った（`Blocked(MonthlyLimitReached)`） | Standard |
+| `ledger-blocked` | 台帳の整合性検証に失敗し、当月の Free 枠が封じられている（`Blocked(LedgerIntegrityFailure)`） | Standard |
 | `premium-stamp` | 追加スタンプを選ぼうとした | Standard |
 | `custom-stamp` | カスタムスタンプを使おうとした | Standard |
 | `edit-locked` | **有料スタンプを含む**既存作品を編集しようとした（6.7） | Standard |
@@ -2313,13 +2493,23 @@ Web モックである以上、以下は本書の記述どおりには再現で�
 
 1. プロジェクト基盤（KMP + CMP の骨格、CI、lint、テスト実行基盤）
 2. ドメイン層（`QuotaPolicy`、`EntitlementResolver`、`BatchTriagePolicy`、`RenderPlan` 生成、キーフレーム補間、`ExportQueue`）
-3. メディア境界（12 契約の両 OS 実装と契約テスト）。`SharePresenter` は OS ごとの結果写像を先に定義してから実装する（7.4.2）
+3. プラットフォーム契約（12 契約の両 OS 実装と契約テスト）。**モジュールは責務ごとに分ける**（下表）。`SharePresenter` は OS ごとの結果写像を先に定義してから実装する（7.4.2）
 4. 編集フロー UI（detect / effect / export / processing / done）
-5. 課金と権限（RevenueCat、Paywall、復元）
+5. 課金と権限（RevenueCat、Paywall、復元、`SubscriptionState` の読み込み失敗経路）
 6. 広告
 7. 一括処理とトリアージ
 8. 履歴・カスタムスタンプ・設定
 9. バックエンド（Rust + Axum）
 10. リリース準備（アクセシビリティ、プライバシー受入テスト、実機マトリクス、ストア申請物）
+
+サブプロジェクト 3 の内訳は次のとおりです。**12 契約をすべて `shared/media` へ実装しません**（5.4）。
+
+| モジュール | 契約 |
+| --- | --- |
+| `shared/media` | `PhotoPicker` / `FilePicker` / `ImageLoader` / `FaceDetector` / `ImageEffectRenderer` / `ImageEncoder` / `MediaSaver` / `SharePresenter` |
+| `shared/data` | `ProtectedBlobStore`、Room、ファイル管理 |
+| `shared/data/security` | `CryptoKeyStore` |
+| `shared/ads` | `AdPresenter` |
+| `composeApp`（アプリシェル） | `PrivacyShield` |
 
 各サブプロジェクトは個別に spec → plan → 実装のサイクルを回します。
