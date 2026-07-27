@@ -783,7 +783,7 @@ struct DetectedFace: Sendable, Equatable {
 
 ##### `confidence` を含める（v1.x からの変更）
 
-**v1.x では `confidence` を除外していました。** ML Kit の `Face` に検出信頼度のアクセサが無く、片方の OS だけで判定すると警告の量が非対称になるためです。その代替として頭部回転角（`extremePose`）をトリアージ理由に据えていました。
+**v1.x では `confidence` を除外していました。** Android の ML Kit に検出信頼度のアクセサが無く、片方の OS だけで判定すると警告の量が非対称になるためです。その代替として頭部回転角（`extremePose`）をトリアージ理由に据えていました。
 
 **iOS 単独になったため、この制約は消えます。** `FaceObservation.confidence` を使えるので、仕様 8.1 が求める「検出信頼度を保持する」をそのまま実装します。逸脱 1 件が解消します（15 節）。
 
@@ -1216,7 +1216,7 @@ func observeTime(now: Date, anchor: TimeAnchor) -> ObservedTime {
 
 これをしないと、クォータだけでなく**未保存出力の削除期限まで端末時刻の変更で延長されます**。
 
-**`domain` の時間判定は `now` を引数に取りません。`effectiveNow` だけを受け取ります。** 端末時刻に触れてよいのは `observeTime` の呼び出し口 1 か所だけとし、それ以外へ `Instant.now()` 相当を渡さないことを規約とします。
+**`Domain` の時間判定は `now` を引数に取りません。`effectiveNow` だけを受け取ります。** 端末時刻に触れてよいのは `observeTime` の呼び出し口 1 か所だけとし、それ以外へ `Date()` を渡さないことを規約とします。SwiftLint のカスタムルールで `Domain` ターゲット内の `Date()` を禁止します。
 
 #### 6.2.3 月初リセットと時刻巻き戻し
 
@@ -1566,7 +1566,7 @@ Pro は月単位で契約と解約を繰り返す利用者が一定数いると�
 - 同一セッションで連続表示しない
 - 広告取得失敗でアプリ処理を止めない
 
-判定を純粋関数に閉じることで `commonTest` で網羅できます。
+判定を純粋関数に閉じることで domain unit test で網羅できます（12.1.1）。
 
 ### 6.5 一括処理とトリアージ
 
@@ -1810,7 +1810,7 @@ struct BatchReviewState: Sendable { let overviewConfirmed: Bool }
 
 検出ステータスは検出をやり直したときにのみ再計算します。`ReviewResolution`（6.5.4）は `Unreviewed` へ戻した時点で破棄します。
 
-おまかせ一括の末尾到達判定は、スクロールだけでなく VoiceOver や TalkBack による走査でも成立させます。支援技術の利用者が確認操作へ到達できない実装は、仕様 29 章に反します。
+おまかせ一括の末尾到達判定は、スクロールだけでなく VoiceOver による走査でも成立させます。支援技術の利用者が確認操作へ到達できない実装は、仕様 29 章に反します。
 
 なお **末尾までの到達も `Reviewed` も、安全の保証ではありません。** 見落としを減らすための手順として扱い、6.5.2 のとおり「確認済みだから安全」とは表現しません。いかなる場合も「安全」という語を状態表示に用いません（仕様 34.5）。
 
@@ -2055,7 +2055,7 @@ Pro の説明文でこれを誤解させないことを、文言作成時の制�
 
 #### 6.5.8 キューと付随機能
 
-キューの進行状態は仕様 16.6 の 8 種（`waiting` / `analyzing` / `review_required` / `exporting` / `completed` / `failed` / `canceled` / `paused`）とし、状態機械を `domain` に置きます。
+キューの進行状態は仕様 16.6 の 8 種（`waiting` / `analyzing` / `review_required` / `exporting` / `completed` / `failed` / `canceled` / `paused`）とし、状態機械を `Domain` に置きます。
 
 **キューの進行状態と、6.5.3 の 2 軸は別物です。** 混同しないよう関係を定義します。
 
@@ -2116,11 +2116,11 @@ Pro の価値を具体化するため、以下を含めます。
 
 > 4 枚に個別設定があります。これらも新しい設定で上書きしますか？
 
-`hasOverride` は写真単位のフラグとし、`domain` が管理します。上書きの可否判定を `commonTest` で網羅します。
+`hasOverride` は写真単位のフラグとし、`Domain` が管理します。上書きの可否判定を domain unit test で網羅します（12.1.1）。
 
 ### 6.6 手動領域とキーフレーム
 
-仕様 8.7 および 10 章の手動修正は、すべて `domain` 側で扱います。ネイティブは手動領域を認識しません。
+仕様 8.7 および 10 章の手動修正は、すべて `Domain` 側で扱います。`MediaKit` は手動領域を認識せず、`RenderPlan` の `RenderRegion` として渡されたものを描画するだけです。
 
 - 写真では、手動指定領域をそのまま加工対象の `FaceTrack`（`createdManually = true`）として扱います
 - 誤検出の削除、領域の移動・拡大縮小、エフェクトの個別変更は、`FaceTrack` と `EffectSetting` の編集に還元されます
@@ -2514,7 +2514,7 @@ enum ShareResult: Sendable { case completed, canceled, unknown, failed }
 | iOS | `UIActivityViewController.completionWithItemsHandler` の `completed` / `activityError` / 選択された `activityType` を、4 つの結果へどう写像するか |
 | Android | `Intent.ACTION_SEND` の結果（`RESULT_OK` / `RESULT_CANCELED` / 結果を返さない共有先）を、4 つの結果へどう写像するか |
 
-そのうえで契約テストが、定義どおりに写像されることを両 OS で検証します。
+そのうえで適合テストが、定義どおりに写像されることを検証します。
 
 #### 7.4.3 コミットジャーナル
 
@@ -3448,7 +3448,7 @@ Sentry へ送信するのは **クラッシュと未分類例外（`UNKNOWN_ERRO
 
 スパイク保護とサンプリングを有効化し、不良リリース時の突発的な消費を抑えます。
 
-Sentry KMP SDK はメジャーバージョン前のため、`domain` が定義する `CrashReporter` ポートの背後に配置し、将来の差し替えコストを小さく保ちます。
+Sentry Cocoa SDK は `Domain` が定義する `CrashReporter` プロトコルの背後に配置します。9.4.1 の送信前フィルタをこの実装へ集約するためであり、差し替え可能性のためだけではありません。
 
 #### 9.4.1 型付き Logger では防げない経路
 
@@ -3618,22 +3618,36 @@ struct RemoteConfigEnvelope: Sendable, Decodable {
 
 ### 12.1 テストの層
 
-**以前の版は三層構成とし、`commonTest` に Room・`ProtectedBlobStore`・ファイル破損・プロセス再起動・HMAC・排他・各書き込み位置での異常終了まで含めていました。これは成立しません。** 純粋な状態機械と、偽ストアを使った Saga テストは `commonTest` で書けますが、**実ストレージの原子性や OS のプロセス強制終了は JVM 上で検証できません。**
+**「純粋な判定」と「実ストレージの原子性」と「プロセス強制終了後の状態」は、同じ層では検証できません。** 前 2 者を混ぜると、判定のテストにシミュレータが要るようになり、実行が遅くなって回されなくなります。
 
-四層へ分けます。
+四層へ分けます。フレームワークは **Swift Testing**（`@Test`）を使い、UI テストのみ XCTest とします。
 
 | 層 | 実行環境 | 対象 |
 | --- | --- | --- |
-| **domain unit test** | JVM（数秒） | クォータ、トリアージ、座標変換、`compileRenderDraft`、状態機械 |
-| **application saga test** | JVM（数十秒） | 偽 DB・偽 `ProtectedBlobStore`・偽ファイルによる**各中断点**の検証 |
-| **adapter integration test** | 実機 / エミュレータ | 実 GRDB、実 保護ファイル、実 Keychain 鍵 |
-| **process-death fault injection test** | 実機 / エミュレータ | **各手順の直後に強制終了**し、再起動後の状態を検証 |
+| **domain unit test** | **`swift test`**（数秒。シミュレータ不要） | クォータ、トリアージ、座標変換、`compileRenderDraft`、状態機械 |
+| **application saga test** | **`swift test`**（数十秒） | 偽 DB・偽 `ProtectedBlobStore`・偽ファイルによる**各中断点**の検証 |
+| **adapter integration test** | シミュレータ / 実機 | 実 GRDB、実 保護ファイル、実 Keychain 鍵、Vision、Core Image |
+| **process-death fault injection test** | **実機** | **各手順の直後に強制終了**し、再起動後の状態を検証 |
 
-**コミットジャーナルは、両 OS の実ストレージを使った障害注入テストを必須とします。** 偽ストアの Saga テストは「順序どおりに書けば整合する」ことしか示しません。データベースのトランザクションが実際に原子的か、DataStore の書き込みが電源断で切れないか、`fsync` のタイミングはどうか — これらは実装と OS の性質であり、偽物では検証できません。
+**`Domain` と `Persistence` の一部を SwiftPM の独立ターゲットにする理由がここにあります**（4 章）。`swift test` で走る層は Xcode プロジェクトのビルドを経由せず、シミュレータも起動しません。
+
+##### 障害注入テストは実機で行う
+
+**コミットジャーナルは、実ストレージを使った障害注入テストを必須とします。** 偽ストアの saga テストは「順序どおりに書けば整合する」ことしか示しません。GRDB のトランザクションが実際に原子的か、`FileManager.replaceItemAt` が中断で切れないか、`fsync` のタイミングはどうか — これらは実装と OS の性質であり、偽物では検証できません。
+
+**シミュレータではなく実機を使います。** シミュレータのファイルシステムは macOS のものであり、iOS のストレージスタック（データ保護クラス、ジャーナリングの挙動）と一致しません。強制終了の再現も、シミュレータではプロセスの kill にしかならず、OS によるジェッツァム（メモリ逼迫時の強制終了）の挙動と異なります。
+
+強制終了の手段は次とします。
+
+| 手段 | 用途 |
+| --- | --- |
+| テスト用フックによる `exit(0)` | 各手順の直後で決定的に落とす |
+| デバッガからの kill -9 | シグナルハンドラを経由しない終了 |
+| メモリ圧迫によるジェッツァム | 実運用に最も近い経路。一括処理 50 枚で再現する |
 
 各項目は、**検証が成立する最も低い層**へ置きます。以下 12.1.1〜12.1.4 で層ごとに列挙します。対象は仕様 30.1 の全項目に加え、本設計で追加した判定を含みます。
 
-#### 12.1.1 domain unit test（JVM、数秒）
+#### 12.1.1 domain unit test（`swift test`、数秒）
 
 純粋関数と状態機械のみ。ストレージもプロセスも関与しません。
 
@@ -3674,7 +3688,7 @@ struct RemoteConfigEnvelope: Sendable, Decodable {
 - `ExportGrant` が能力を問わず作成されること（6.2.0）
 - 同一素材 の再書き出しで `firstSuccessAt` が更新されないこと（6.2.0）
 - 端末時刻を過去へ戻しても 24 時間の窓が延びないこと。`effectiveNow` が後退しないこと（6.2.2.5）
-- `domain` の時間判定が `now` ではなく `effectiveNow` だけを受け取ること（6.2.2.5）
+- `Domain` の時間判定が `now` ではなく `effectiveNow` だけを受け取ること（6.2.2.5）
 - 未受け渡し出力の削除期限が端末時刻の変更で延びないこと（6.2.2.5）
 - `monthlyBlockedPeriod == period` のとき、`consumedExportIds` が空でも `Blocked(LedgerIntegrityFailure)` になること（6.2）
 - `trialIntegrityLocked` のとき `remainingCredits` が 0 になり、トライアル画面へ進入できないこと（6.5.6.1）
@@ -3724,7 +3738,7 @@ struct RemoteConfigEnvelope: Sendable, Decodable {
 - 履歴の保存期間と容量判定。7.2.4 の保持保証が容量超過時にも守られること
 - リモート設定のフォールバック
 
-#### 12.1.2 application saga test（JVM、偽ストア）
+#### 12.1.2 application saga test（`swift test`、偽ストア）
 
 偽 DB・偽 `ProtectedBlobStore`・偽ファイルを注入し、**各中断点**での挙動を検証します。実ストレージの原子性は検証しません（12.1.3 の役割）。
 
@@ -3784,11 +3798,11 @@ struct RemoteConfigEnvelope: Sendable, Decodable {
 - 削除で DB が先に更新され、`PendingFileDeletion` が同じトランザクションへ記録されること（8.4.1）
 - Free が既存プロジェクトの編集画面を開けること。変更操作の時点で案内が出ること（6.7）
 
-#### 12.1.3 adapter integration test（実機 / エミュレータ）
+#### 12.1.3 adapter integration test（シミュレータ / 実機）
 
 実 GRDB、実 保護ファイル、実 Keychain 鍵を使います。
 
-- **契約テスト** — `media` / `data` / `billing` / `ads` の各ポートに共通のテストスイートを 1 本書き、Android instrumented test と iOS の XCTest の**両方で同一スイート**を実行します。「片方の OS だけ挙動が違う」を構造的に防ぎます
+- **プロトコル適合テスト** — `MediaKit` / `Persistence` / `Billing` / `Ads` の各プロトコルに対し、実装と偽実装の**両方へ同じスイート**を実行します。偽実装が本物と違う挙動をすると 12.1.2 の saga テストが無意味になるため、この一致を検証します
 - 手順 8 の DB トランザクションが原子的であり、`OutputRecord` / `ExportRecord` / キュー状態 / `Project` の更新とコミット削除が同時に成立すること（7.4.3）
 - 「コミットあり・`OutputRecord` なし」または「コミットなし・`OutputRecord` あり」以外の状態が観測されないこと（7.4.1）
 - `ExportCommit` が状態遷移のたびに再署名され、正規の更新で検証失敗しないこと（7.4.3）
@@ -3797,14 +3811,14 @@ struct RemoteConfigEnvelope: Sendable, Decodable {
 - `ProtectedBlobStore` のデータと HMAC 鍵がともにバックアップ対象外であり、再インストール後が `Missing` になること（6.2.5 / 7.3.1）
 - `OutputRecord` の実体解決が `outputFileID` 経由であり、パス文字列の改変で専用ディレクトリ外を削除できないこと（7.4.3）
 - `StampAsset` の作成が atomic rename を経ること（8.4.1）
-- 写真ライブラリ登録日時の引き継ぎ（7.6）を、両 OS で保存後に読み戻して検証すること
-- `NormalizedRect` の `right` / `bottom` が排他的境界として両 OS で一致すること（5.2.1）
-- `rotationDegrees` が時計回り正・領域中心基準として両 OS で一致すること（5.2.1）
+- 写真ライブラリ登録日時の引き継ぎ（7.6）を、保存後に読み戻して検証すること
+- `NormalizedRect` の `right` / `bottom` が排他的境界として扱われること（5.2.1）
+- `rotationDegrees` が時計回り正・領域中心基準で描画されること（5.2.1）
 - `opacity` がレンダラーで 1 回だけ乗算され、ドメイン側で色へ焼き込まれないこと（5.2.1）
 - クリップが回転の後に行われ、キャンバス端の回転領域が露出しないこと（5.2.1）
 - 背景処理が顔エフェクトより先に適用されること（5.2.1）
 - 重なり時に後のエフェクトが加工済み画像へ作用すること（5.2.1）
-- Vision と ML Kit の座標系・角度の差がアダプタで吸収され、`DetectedFace` が一致すること（5.2.1）
+- Vision の左下原点座標が左上原点へ変換され、角度の nil が保持されること（5.2.1 / 5.7.1）
 - `plan` が参照する `bitmapID` が `rasterAssets` に無い場合、描画を開始せずエラーになること（5.1.2）
 - 同一 `StampRasterKey` のラスタライズが 1 回で済み、複数領域から再利用されること（5.1.2）
 - `RasterizedStampAsset` の `bitmapID` スコープが `render` 呼び出し内に閉じ、並列レンダリングで衝突しないこと（5.1.2）
@@ -3813,7 +3827,7 @@ struct RemoteConfigEnvelope: Sendable, Decodable {
 - `/v1/diagnostics` が未知フィールドを拒否すること（9.4.1 / 11.2）
 - **ゴールデン画像テスト** — 同じ `RenderSpec` から生成したプレビュー用と原寸用の出力が一致すること。`sourceCrop` / `scaleMode` / `background` を適用した結果が設定と一致すること。仕様 30.4 の条件（強度の最小・最大、顔の回転、領域が画面端、領域の重なり、透明度、4 形状）を素材として固定化します
 
-#### 12.1.4 process-death fault injection test（実機 / エミュレータ）
+#### 12.1.4 process-death fault injection test（実機）
 
 **各手順の直後にプロセスを強制終了し、再起動後の状態を検証します。** 偽ストアでは検証できない、実ストレージと OS の性質を対象とします。
 
@@ -3832,7 +3846,7 @@ struct RemoteConfigEnvelope: Sendable, Decodable {
 
 同じ素材セットで `BatchTriagePolicy` の要確認率も計測します。要確認率が高すぎると Pro の価値が失われ、低すぎると見落としが増えるためです。`ExtremePose` の角度閾値（16 節）はこの計測から決めます。
 
-**両 OS で同じ素材セットを流し、検出率と要確認率の差を監視します。** 5.7.1 の共通モデルにより理論上は同じ判定になるはずですが、検出エンジンが異なる以上、境界付近では差が出ます。差が一定以上に開いた場合は閾値か共通モデルを見直します。
+**固定の素材セットを流し、検出率と要確認率をリリース間で監視します。** iOS のバージョン更新で Vision の検出特性が変わることがあり、閾値の妥当性が崩れます。前リリースとの差が一定以上に開いた場合は閾値を見直します。
 
 iOS の `VNFaceObservation.confidence` は、この回帰監視でのみ参考値として記録します。トリアージには使いません（6.5.2）。
 
@@ -3996,10 +4010,10 @@ Web モックである以上、以下は本書の記述どおりには再現で�
 | 台帳の永続化と署名 | React の状態として保持。HMAC も改ざん検知もない | `UsageLedger` を `ProtectedBlobStore` へ署名付きで保存（6.2 / 6.2.5） |
 | 書き出しの耐久性 | 中断・復旧の概念がない | `ExportCommit` によるコミットジャーナルと起動時の復旧（7.4.3） |
 | 排他制御 | なし | `ExportStartGate` と `UsageLedgerStore.transact` による直列化（7.4.3） |
-| 共有結果の写像 | デモ用のトグルで切り替える | `SharePresenter` が OS の結果を 4 種へ写像する（7.4.2） |
+| 共有結果の写像 | デモ用のトグルで切り替える | `SharePresenter` が `UIActivityViewController` の結果を 4 種へ写像する（7.4.2） |
 | `StampAsset` の寿命 | 履歴からの参照有無で判定する簡易版 | 内容ハッシュを主キーとする参照カウント（8.4） |
 | 一覧の拡大操作 | タップで全画面プレビューのみ | ピンチ拡大も要件（6.5.3） |
-| 支援技術での末尾到達 | スクロール検知のみ | VoiceOver / TalkBack の走査でも成立させる（6.5.3） |
+| 支援技術での末尾到達 | スクロール検知のみ | VoiceOver の走査でも成立させる（6.5.3） |
 
 ### 14.2 モックから引き継ぐもの
 
@@ -4014,8 +4028,8 @@ Web モックである以上、以下は本書の記述どおりには再現で�
 
 | 仕様書 | 仕様書の内容 | 本設計 | 理由 |
 | --- | --- | --- | --- |
-| 4.2 | フルネイティブ二本立て | KMP + CMP | 3 節。単独実装でのドメイン二重化を避ける |
-| 8.1 | 検出結果として「検出信頼度」を保持する | 顔単位の共通モデルに含めない。iOS のみの参考値として検出品質の回帰監視で記録する | 5.7.1 / 6.5.2。ML Kit の `Face` に検出信頼度のアクセサがなく、両 OS で対称に扱えない。代替として頭部回転角（`ExtremePose`）を用いる |
+| 4.2 / 32.1 | **iOS / Android の二本立てでリリースする** | **v1 は iOS 単独。** 技術スタックは Swift + SwiftUI | 1.2 / 3 節。v1 の検証を優先する。Android は再実装が必要になることを受け入れる |
+| 4.1 | 対応 OS の下限を明示していない | **iOS 26 以降** | 3.2。回避策のコストを負わず、SwiftUI と Swift 6 の機能を前提にする |
 | 12.7 | カスタムスタンプ上限 Standard 30 / Pro 100 | 両プラン 100 | 8.2。差別化として機能せず、Pro の焦点をぼかす |
 | 13.8 | 撮影日時を削除対象に含む | EXIF 日時は既定で保持。ライブラリ登録日時は常に元画像から引き継ぐ | 7.6。日時削除は写真アプリの並び順を壊す |
 | 14.2 | 消費条件の解釈 | 「利用可能な加工済み出力の生成が完了した時点」で確定。写真ライブラリ保存時点ではない | 6.2.1。保存せず OS 共有だけで無料枠を回避できる経路を塞ぐ。仕様の「共有可能な状態になった」に忠実 |
@@ -4032,11 +4046,12 @@ Web モックである以上、以下は本書の記述どおりには再現で�
 | 項目 | 内容 | 決定時期 |
 | --- | --- | --- |
 | 商品 ID | 仕様 27.1 の商品 ID は暫定。ストア登録時に確定 | ストア登録時 |
-| カスタムスタンプのバックアップ方針 | 仕様 20.4 が初期リリース前の決定としている | v1 実装中 |
+| **`user-data.db` と `stamps/` のバックアップ方針** | 仕様 20.4 が初期リリース前の決定としている。**2 つをまとめて決める**（7.3.1）。片方だけ復元されると参照と実体が食い違う | v1 実装中 |
+| **`lowConfidence` の閾値** | `FaceObservation.confidence` の下限。実素材の分布を見て決定（5.7.1 / 6.5.2） | v1 実機検証時 |
 | プライバシーポリシーの記載 | トライアル台帳（`SourceIdentity`）を期限なく端末内へ保持することを記載し、7.2.3 の例外と整合させる | ストア申請前 |
 | 共有結果 `Unknown` 後の利用者操作 | `Generated` を維持するため、共有後に画面を離れると「保存していない写真があります」が出る。「共有できましたか？」と明示確認して `Delivered` にするか、`Generated` のまま保存・再共有・破棄を選ばせるか。OS 結果の写像だけでなく、その後の操作まで定義が必要（7.4.2） | 実装計画で確定 |
 | 基本スタンプの意匠 | ベクターで自作する 12〜20 種の具体的な図案 | v1 実装中 |
-| `ExtremePose` の角度閾値 | yaw / pitch の絶対値が何度を超えたら警告するか。検出品質テストの結果から決定（6.5.2） | v1 実装中 |
+| `extremePose` の角度閾値 | yaw / pitch の絶対値が何度を超えたら警告するか。検出品質テストの結果から決定（6.5.2） | v1 実機検証時 |
 | 履歴の使用容量上限 | 初期値 200MB は暫定。加工後サムネイルの実サイズを計測して確定 | v1 実装中 |
 | カスタムスタンプの保存解像度 | 長辺 1,024px は暫定。顔が大きく写る素材での見え方を実機で確認して確定（8.5） | v1 実機検証時 |
 | トライアルのクレジット数 | 5 枚は暫定。転換率を見て調整可能な設定値とする | リリース後 |
@@ -4048,25 +4063,29 @@ Web モックである以上、以下は本書の記述どおりには再現で�
 
 本設計の承認後、`superpowers:writing-plans` により実装計画を作成します。サブプロジェクトへの分解単位は以下を想定します。
 
-1. プロジェクト基盤（KMP + CMP の骨格、CI、lint、テスト実行基盤）
-2. ドメイン層（`QuotaPolicy`、`EntitlementResolver`、`BatchTriagePolicy`、`RenderPlan` 生成、キーフレーム補間、`ExportQueue`）
-3. プラットフォーム契約（12 契約の両 OS 実装と契約テスト）。**モジュールは責務ごとに分ける**（下表）。`SharePresenter` は OS ごとの結果写像を先に定義してから実装する（7.4.2）
-4. 編集フロー UI（detect / effect / export / processing / done）
-5. 課金と権限（RevenueCat、Paywall、復元、`SubscriptionState` の読み込み失敗経路）
-6. 広告
-7. 一括処理とトリアージ
-8. 履歴・カスタムスタンプ・設定
-9. バックエンド（Rust + Axum）
-10. リリース準備（アクセシビリティ、プライバシー受入テスト、実機マトリクス、ストア申請物）
+1. プロジェクト基盤（Xcode プロジェクトと SwiftPM ローカルパッケージの骨格、CI、SwiftLint、`swift test` の実行基盤）
+2. ドメイン層（`QuotaPolicy`、`EntitlementResolver`、`BatchTriagePolicy`、`compileRenderDraft`、キーフレーム補間、`ExportQueue`）
+3. プラットフォーム層（12 プロトコルの実装と適合テスト）。**モジュールは責務ごとに分ける**（下表）。`SharePresenter` は結果写像を先に定義してから実装する（7.4.2）
+4. 永続化とコミットジャーナル（GRDB、2 DB 構成と `ATTACH`、`ProtectedBlobStore`、`CryptoKeyStore`、障害注入テスト基盤）
+5. 編集フロー UI（detect / effect / export / processing / done）
+6. 課金と権限（RevenueCat、Paywall、復元、`SubscriptionState` の読み込み失敗経路）
+7. 広告
+8. 一括処理とトリアージ
+9. 履歴・カスタムスタンプ・設定
+10. バックエンド（Rust + Axum。リモート設定の検証規則を含む。11.3）
+11. リリース準備（アクセシビリティ、プライバシー受入テスト、実機マトリクス、ストア申請物）
 
-サブプロジェクト 3 の内訳は次のとおりです。**12 契約をすべて `shared/media` へ実装しません**（5.4）。
+**サブプロジェクト 4 を独立させます。** コミットジャーナルは本設計で最も密度が高く、実機の障害注入テストを伴います。UI と並行して進めると、どちらの不具合か切り分けられません。
 
-| モジュール | 契約 |
+サブプロジェクト 3 の内訳は次のとおりです。**12 プロトコルをすべて `MediaKit` へ実装しません**（5.4）。
+
+| モジュール | プロトコル |
 | --- | --- |
-| `shared/media` | `PhotoPicker` / `FilePicker` / `ImageLoader` / `FaceDetector` / `ImageEffectRenderer` / `ImageEncoder` / `MediaSaver` / `SharePresenter` |
+| `MediaKit` | `PhotoPicker` / `FilePicker` / `ImageLoader` / `FaceDetector` / `ImageEffectRenderer` / `ImageEncoder` / `MediaSaver` / `SharePresenter` |
+| `Rendering` | `StampRasterizer` |
 | `Persistence` | `ProtectedBlobStore`、GRDB、ファイル管理 |
-| `shared/data/security` | `CryptoKeyStore` |
-| `shared/ads` | `AdPresenter` |
-| `composeApp`（アプリシェル） | `PrivacyShield` |
+| `Persistence/Security` | `CryptoKeyStore` |
+| `Ads` | `AdPresenter` |
+| `App` | `PrivacyShield` |
 
 各サブプロジェクトは個別に spec → plan → 実装のサイクルを回します。
