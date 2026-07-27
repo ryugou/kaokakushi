@@ -287,7 +287,23 @@ fun expand(face: NormalizedRect, effect: EffectSetting): NormalizedRect
 
 検出用画像上で顔の短辺が 24 ピクセル未満の検出結果には、顔単位のフラグ `isSmallFace` を立てます（仕様 8.5）。
 
-顔単位のフラグ（`isSmallFace` / 信頼度 / 端接触 / 重なり）は、6.5.2 の `triage` が写真単位の検出ステータスを導く入力です。写真単位の `ReviewRequired` と名前が重ならないよう、顔単位では `requiresReview` という名称を使いません。
+#### 5.7.1 顔単位の共通モデル
+
+`FaceDetector` が返す顔は、**両 OS が等しく提供できる値だけ**で構成します。片方にしかない値をドメインへ流すと、OS ごとに挙動が変わります（6.5.2 参照）。
+
+```kotlin
+data class DetectedFace(
+    val bounds: NormalizedRect,   // Vision: boundingBox / ML Kit: getBoundingBox
+    val yawDegrees: Float,        // Vision: yaw        / ML Kit: getHeadEulerAngleY
+    val pitchDegrees: Float,      // Vision: pitch      / ML Kit: getHeadEulerAngleX
+    val rollDegrees: Float,       // Vision: roll       / ML Kit: getHeadEulerAngleZ
+    val isSmallFace: Boolean,     // 検出用画像上の短辺で判定
+)
+```
+
+これらの顔単位の値と、ドメイン側で計算する端接触・重なりが、6.5.2 の `triage` の入力になります。写真単位の `ReviewRequired` と名前が重ならないよう、顔単位では `requiresReview` という名称を使いません。
+
+iOS の `confidence` はこのモデルに含めません。Android に対応する値がないためです（6.5.2）。
 
 ---
 
@@ -599,13 +615,31 @@ v1 では写真のみを対象とします。
 sealed interface ReviewReason {
     object NoFaceDetected      // 顔を 1 つも検出できなかった
     object SmallFace           // 検出用画像上で短辺 24px 未満の顔がある
-    object LowConfidence       // 信頼度が閾値未満の顔がある
+    object ExtremePose         // 横や上下を大きく向いた顔がある
     object FaceAtEdge          // 拡張後の領域が画像境界に接する顔がある
     object OverlappingFaces    // 領域同士が重なる顔がある
 }
 
 fun triage(result: DetectionResult): Set<ReviewReason>
 ```
+
+**判定に使えるのは、両 OS が等しく提供する値だけです。**
+
+当初は「検出信頼度が閾値未満」を理由の 1 つに置いていましたが、これは実現できません。iOS の `VNFaceObservation` は `confidence`（0〜1）を持つ一方、**ML Kit の `Face` には検出信頼度のアクセサが存在しない**ためです（`getBoundingBox` / `getHeadEulerAngleX・Y・Z` / `getLandmark` / `getSmilingProbability` / `getLeftEyeOpenProbability` / `getTrackingId` のみ）。
+
+片方だけで判定すると、同じ写真で Android だけ警告が出ない非対称が生じます。警告の量が OS で変わることは、安全性の非対称そのものです。12.1 の契約テスト（両 OS で同一スイート）とも矛盾します。
+
+そこで **頭部回転角** に置き換えました。両 OS が対称に提供します。
+
+| 値 | iOS | Android |
+| --- | --- | --- |
+| yaw（左右の向き） | `VNFaceObservation.yaw` | `getHeadEulerAngleY()` |
+| pitch（上下の向き） | `VNFaceObservation.pitch` | `getHeadEulerAngleX()` |
+| roll（傾き） | `VNFaceObservation.roll` | `getHeadEulerAngleZ()` |
+
+横や上下を大きく向いた顔は検出枠が実際の顔を覆いきれないことがあり、警告する価値は信頼度と同等です。`ExtremePose` は yaw または pitch の絶対値が閾値を超えたときに立てます。
+
+`confidence` は iOS でのみ取得できるため、**トリアージには使いません**。12.2 の検出品質の回帰監視でのみ、iOS 側の参考値として記録します。
 
 `triage` の結果が写真の **検出ステータス**（6.5.3）を決めます。空集合なら `Normal`、空でなければ `ReviewRequired` です。閾値はリモート設定で調整可能とします。
 
@@ -1233,6 +1267,7 @@ Rust + Axum。`/v1/config` は静的 JSON と ETag による配信とします�
 - `QuotaPolicy`（月跨ぎ、TZ 変更、時刻巻き戻し、うるう年、月末 23:59:59 → 00:00:00、24 時間境界）
 - `EntitlementResolver`（仕様 27.4 の全購入状態）
 - `BatchTriagePolicy`（5 つの要確認理由の各単独・複合、空集合）
+- `triage` の入力が 5.7.1 の共通モデルだけであること。OS 固有の値に依存しないこと（6.5.2）
 - `ReviewRequired` かつ `Unreviewed` の写真が 1 枚でも残る間は一括書き出しを開始できないこと（6.5.4）
 - `Reviewed` がアプリの判断では立たないこと。検出ステータスが利用者操作で変わらないこと（6.5.3）
 - `NoFaceDetected` がグループ一括解消の対象外であること（6.5.4）
@@ -1280,7 +1315,11 @@ Rust + Axum。`/v1/config` は静的 JSON と ETag による配信とします�
 
 仕様 34.5 が「完全自動を約束しない」と定めている以上、閾値でビルドを落とすのは不適切です。リリース間で検出率が有意に低下した場合のみ調査対象とします。
 
-同じ素材セットで `BatchTriagePolicy` の要確認率も計測します。要確認率が高すぎると Pro の価値が失われ、低すぎると見落としが増えるためです。
+同じ素材セットで `BatchTriagePolicy` の要確認率も計測します。要確認率が高すぎると Pro の価値が失われ、低すぎると見落としが増えるためです。`ExtremePose` の角度閾値（16 節）はこの計測から決めます。
+
+**両 OS で同じ素材セットを流し、検出率と要確認率の差を監視します。** 5.7.1 の共通モデルにより理論上は同じ判定になるはずですが、検出エンジンが異なる以上、境界付近では差が出ます。差が一定以上に開いた場合は閾値か共通モデルを見直します。
+
+iOS の `VNFaceObservation.confidence` は、この回帰監視でのみ参考値として記録します。トリアージには使いません（6.5.2）。
 
 ### 12.3 プライバシーの受入テスト
 
@@ -1471,7 +1510,7 @@ Web モックである以上、以下は本書の記述どおりには再現で�
 | カスタムスタンプのバックアップ方針 | 仕様 20.4 が初期リリース前の決定としている | v1 実装中 |
 | プライバシーポリシーの記載 | トライアル台帳（`sourceHash`）を期限なく端末内へ保持することを記載し、7.2.3 の例外と整合させる | ストア申請前 |
 | 基本スタンプの意匠 | ベクターで自作する 12〜20 種の具体的な図案 | v1 実装中 |
-| トリアージの信頼度閾値 | `LowConfidence` の判定閾値。検出品質テストの結果から決定 | v1 実装中 |
+| `ExtremePose` の角度閾値 | yaw / pitch の絶対値が何度を超えたら警告するか。検出品質テストの結果から決定（6.5.2） | v1 実装中 |
 | 履歴の使用容量上限 | 初期値 200MB は暫定。加工後サムネイルの実サイズを計測して確定 | v1 実装中 |
 | カスタムスタンプの保存解像度 | 長辺 1,024px は暫定。顔が大きく写る素材での見え方を実機で確認して確定（8.5） | v1 実機検証時 |
 | トライアルのクレジット数 | 5 枚は暫定。転換率を見て調整可能な設定値とする | リリース後 |

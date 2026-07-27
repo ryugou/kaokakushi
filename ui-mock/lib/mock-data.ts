@@ -18,8 +18,14 @@ export type FaceBox = {
   h: number
   /** 手動で追加した範囲かどうか */
   manual?: boolean
-  /** 検出の信頼度（0〜1）。低いと要確認になる */
-  confidence?: number
+  /**
+   * 顔の向き（度）。左右の向き。
+   * iOS は VNFaceObservation.yaw、Android は Face.getHeadEulerAngleY から取る。
+   * 検出の信頼度は ML Kit が提供しないため、トリアージには使わない。
+   */
+  yawDegrees?: number
+  /** 顔の向き（度）。上下の向き */
+  pitchDegrees?: number
   /** 検出用の画像上で小さすぎる顔 */
   small?: boolean
   /** 画像の端に接している顔 */
@@ -46,8 +52,8 @@ export const MEDIA_LIBRARY: MediaItem[] = [
     takenAt: "7月21日",
     sizeMb: 4.2,
     faces: [
-      { id: "f1", x: 40.5, y: 28.5, w: 13, h: 11, confidence: 0.96 },
-      { id: "f2", x: 55, y: 46, w: 11, h: 9.5, confidence: 0.94 },
+      { id: "f1", x: 40.5, y: 28.5, w: 13, h: 11 },
+      { id: "f2", x: 55, y: 46, w: 11, h: 9.5 },
     ],
   },
   {
@@ -57,9 +63,9 @@ export const MEDIA_LIBRARY: MediaItem[] = [
     takenAt: "7月19日",
     sizeMb: 3.8,
     faces: [
-      { id: "f1", x: 21.5, y: 27, w: 12.5, h: 10.5, confidence: 0.95 },
-      { id: "f2", x: 45, y: 28, w: 12.5, h: 10.5, confidence: 0.52, overlap: true },
-      { id: "f3", x: 52, y: 29, w: 12, h: 10.5, confidence: 0.61, overlap: true },
+      { id: "f1", x: 21.5, y: 27, w: 12.5, h: 10.5 },
+      { id: "f2", x: 45, y: 28, w: 12.5, h: 10.5, overlap: true },
+      { id: "f3", x: 52, y: 29, w: 12, h: 10.5, overlap: true },
     ],
   },
   {
@@ -69,11 +75,11 @@ export const MEDIA_LIBRARY: MediaItem[] = [
     takenAt: "7月15日",
     sizeMb: 5.1,
     faces: [
-      { id: "f1", x: 41, y: 28.5, w: 10, h: 9.5, confidence: 0.93 },
-      { id: "f2", x: 49, y: 22.5, w: 10, h: 9.5, confidence: 0.91 },
-      { id: "f3", x: 17, y: 39, w: 5.5, h: 5, confidence: 0.7, small: true },
-      { id: "f4", x: 71, y: 37, w: 5.5, h: 5, confidence: 0.66, small: true },
-      { id: "f5", x: 93, y: 35.5, w: 5.5, h: 5, confidence: 0.63, small: true, atEdge: true },
+      { id: "f1", x: 41, y: 28.5, w: 10, h: 9.5 },
+      { id: "f2", x: 49, y: 22.5, w: 10, h: 9.5 },
+      { id: "f3", x: 17, y: 39, w: 5.5, h: 5, small: true },
+      { id: "f4", x: 71, y: 37, w: 5.5, h: 5, small: true },
+      { id: "f5", x: 93, y: 35.5, w: 5.5, h: 5, small: true, atEdge: true },
     ],
   },
   {
@@ -83,9 +89,9 @@ export const MEDIA_LIBRARY: MediaItem[] = [
     takenAt: "7月12日",
     sizeMb: 4.6,
     faces: [
-      { id: "f1", x: 18.5, y: 36, w: 10, h: 11.5, confidence: 0.92 },
-      { id: "f2", x: 44, y: 35, w: 10.5, h: 11.5, confidence: 0.9 },
-      { id: "f3", x: 70.5, y: 36, w: 10.5, h: 11.5, confidence: 0.89 },
+      { id: "f1", x: 18.5, y: 36, w: 10, h: 11.5 },
+      { id: "f2", x: 44, y: 35, w: 10.5, h: 11.5 },
+      { id: "f3", x: 70.5, y: 36, w: 10.5, h: 11.5 },
     ],
   },
   {
@@ -94,7 +100,7 @@ export const MEDIA_LIBRARY: MediaItem[] = [
     title: "自撮り",
     takenAt: "7月10日",
     sizeMb: 3.2,
-    faces: [{ id: "f1", x: 38, y: 24, w: 22, h: 20, confidence: 0.98 }],
+    faces: [{ id: "f1", x: 38, y: 24, w: 22, h: 20 }],
   },
   {
     id: "m6",
@@ -103,10 +109,10 @@ export const MEDIA_LIBRARY: MediaItem[] = [
     takenAt: "7月6日",
     sizeMb: 4.9,
     faces: [
-      { id: "f1", x: 15, y: 30, w: 12, h: 11, confidence: 0.94 },
-      { id: "f2", x: 36, y: 26, w: 12, h: 11, confidence: 0.93 },
-      { id: "f3", x: 55, y: 27, w: 12, h: 11, confidence: 0.91 },
-      { id: "f4", x: 74, y: 31, w: 12, h: 11, confidence: 0.9 },
+      { id: "f1", x: 15, y: 30, w: 12, h: 11 },
+      { id: "f2", x: 36, y: 26, w: 12, h: 11 },
+      { id: "f3", x: 55, y: 27, w: 12, h: 11 },
+      { id: "f4", x: 74, y: 31, w: 12, h: 11 },
     ],
   },
   {
@@ -116,9 +122,9 @@ export const MEDIA_LIBRARY: MediaItem[] = [
     takenAt: "7月4日",
     sizeMb: 5.4,
     faces: [
-      { id: "f1", x: 24, y: 30, w: 12, h: 11, confidence: 0.95 },
-      { id: "f2", x: 45, y: 25, w: 12, h: 11, confidence: 0.93 },
-      { id: "f3", x: 66, y: 31, w: 12, h: 11, confidence: 0.92 },
+      { id: "f1", x: 24, y: 30, w: 12, h: 11 },
+      { id: "f2", x: 45, y: 25, w: 12, h: 11 },
+      { id: "f3", x: 66, y: 31, w: 12, h: 11 },
     ],
   },
   {
@@ -137,8 +143,8 @@ export const MEDIA_LIBRARY: MediaItem[] = [
     takenAt: "6月22日",
     sizeMb: 4.3,
     faces: [
-      { id: "f1", x: 40.5, y: 28.5, w: 13, h: 11, confidence: 0.94 },
-      { id: "f2", x: 55, y: 46, w: 11, h: 9.5, confidence: 0.58 },
+      { id: "f1", x: 40.5, y: 28.5, w: 13, h: 11 },
+      { id: "f2", x: 55, y: 46, w: 11, h: 9.5, yawDegrees: 58 },
     ],
   },
   {
@@ -148,8 +154,8 @@ export const MEDIA_LIBRARY: MediaItem[] = [
     takenAt: "6月18日",
     sizeMb: 4.7,
     faces: [
-      { id: "f1", x: 18.5, y: 36, w: 10, h: 11.5, confidence: 0.91 },
-      { id: "f2", x: 92, y: 35, w: 8, h: 11.5, confidence: 0.86, atEdge: true },
+      { id: "f1", x: 18.5, y: 36, w: 10, h: 11.5 },
+      { id: "f2", x: 92, y: 35, w: 8, h: 11.5, atEdge: true },
     ],
   },
   {
@@ -159,8 +165,8 @@ export const MEDIA_LIBRARY: MediaItem[] = [
     takenAt: "6月11日",
     sizeMb: 5.2,
     faces: [
-      { id: "f1", x: 24, y: 30, w: 12, h: 11, confidence: 0.93 },
-      { id: "f2", x: 45, y: 25, w: 12, h: 11, confidence: 0.92 },
+      { id: "f1", x: 24, y: 30, w: 12, h: 11 },
+      { id: "f2", x: 45, y: 25, w: 12, h: 11 },
     ],
   },
   {
@@ -170,8 +176,8 @@ export const MEDIA_LIBRARY: MediaItem[] = [
     takenAt: "6月2日",
     sizeMb: 3.6,
     faces: [
-      { id: "f1", x: 21.5, y: 27, w: 12.5, h: 10.5, confidence: 0.96 },
-      { id: "f2", x: 66.5, y: 27.5, w: 12, h: 10.5, confidence: 0.95 },
+      { id: "f1", x: 21.5, y: 27, w: 12.5, h: 10.5 },
+      { id: "f2", x: 66.5, y: 27.5, w: 12, h: 10.5 },
     ],
   },
 ]
@@ -185,20 +191,28 @@ export function findMedia(id: string) {
 /* ------------------------------------------------------------------ */
 
 /** 写真1枚を「要確認」にする理由 */
-export type ReviewReason = "no-face" | "small-face" | "low-confidence" | "edge-face" | "overlap"
+export type ReviewReason = "no-face" | "small-face" | "extreme-pose" | "edge-face" | "overlap"
 
 export const REVIEW_REASON_LABELS: Record<ReviewReason, string> = {
   "no-face": "顔が検出されませんでした",
   "small-face": "小さい顔があります",
-  "low-confidence": "はっきり写っていない顔があります",
+  "extreme-pose": "大きく横や上下を向いた顔があります",
   "edge-face": "画像の端に顔があります",
   overlap: "顔が重なっています",
 }
 
-const LOW_CONFIDENCE = 0.75
+/** yaw / pitch の絶対値がこれを超えたら要確認にする（度） */
+const POSE_THRESHOLD = 40
+
+function hasExtremePose(face: FaceBox) {
+  return Math.abs(face.yawDegrees ?? 0) > POSE_THRESHOLD || Math.abs(face.pitchDegrees ?? 0) > POSE_THRESHOLD
+}
 
 /**
  * 検出結果から要確認の理由を求める。
+ *
+ * 判定に使うのは、iOS と Android の両方が返せる値だけにする。
+ * 検出の信頼度は ML Kit が提供しないため使わない。
  *
  * 注意：判定できるのは「検出された顔の状態」だけで、
  * 検出できなかった顔の存在は判定できない。
@@ -209,7 +223,7 @@ export function triage(media: MediaItem): ReviewReason[] {
 
   const reasons: ReviewReason[] = []
   if (media.faces.some((f) => f.small)) reasons.push("small-face")
-  if (media.faces.some((f) => (f.confidence ?? 1) < LOW_CONFIDENCE)) reasons.push("low-confidence")
+  if (media.faces.some(hasExtremePose)) reasons.push("extreme-pose")
   if (media.faces.some((f) => f.atEdge)) reasons.push("edge-face")
   if (media.faces.some((f) => f.overlap)) reasons.push("overlap")
   return reasons
@@ -217,7 +231,7 @@ export function triage(media: MediaItem): ReviewReason[] {
 
 /** 顔ひとつが要確認かどうか（検出画面の警告表示に使う） */
 export function faceNeedsReview(face: FaceBox) {
-  return Boolean(face.small || face.atEdge || face.overlap || (face.confidence ?? 1) < LOW_CONFIDENCE)
+  return Boolean(face.small || face.atEdge || face.overlap || hasExtremePose(face))
 }
 
 /* ------------------------------------------------------------------ */
