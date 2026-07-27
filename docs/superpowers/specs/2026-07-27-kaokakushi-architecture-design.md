@@ -3,7 +3,7 @@
 | 項目 | 内容 |
 | --- | --- |
 | 文書名 | 顔かくし 技術スタックおよびアーキテクチャ設計 |
-| バージョン | 2.1 |
+| バージョン | 2.2 |
 | 作成日 | 2026-07-27 |
 | 対象 | 写真向け顔匿名化アプリ（**iOS 単独**） |
 | 上位文書 | 写真・動画向け顔匿名化アプリ 仕様書 v0.1 |
@@ -110,7 +110,7 @@ v1.x で KMP + CMP を選んだ根拠は「ドメイン層とUI を二重実装�
 | ピンチ・ドラッグによる領域編集 | SwiftUI ジェスチャ |
 | 原寸書き出しの描画 | Core Image（UI を経由しない。5.1） |
 
-**`UIViewRepresentable` を使うのは広告バナーだけ**とします。Google Mobile Ads の `BannerView` に SwiftUI 版が無いためです。
+**`UIViewRepresentable` / `UIViewControllerRepresentable` を使うのは広告バナーと共有シートだけ**とします。Google Mobile Ads の `BannerView` に SwiftUI 版が無いこと、`ShareLink` が共有結果を返せないこと（7.4.2）が理由です。
 
 ### 3.3 GRDB を採る理由
 
@@ -136,7 +136,9 @@ SwiftData の `ModelContext` は保存タイミングが暗黙的で、上記の
 
 ### 3.4 選定時に確認した外部事実
 
-- iOS 26 は 2025 年秋のメジャーリリース。最低対応を 26 とすることで、`Observation`、Swift 6 の strict concurrency、Vision の Swift 専用 API がすべて前提にできる
+- iOS 26 は 2025 年秋のメジャーリリース
+- **iOS 26 は技術的な必須条件ではありません。** Swift 専用の Vision API（`DetectFaceRectanglesRequest`）は iOS 18 から、`Observation` は iOS 17 から利用できます。したがって「新 API を使うために 26 が必要」という説明は誤りです
+- 26 を下限とするのは、**古い OS への対応コストを負わず、最新の UI と API だけを対象にするという商品・開発上の判断**です。分岐と回避策を書かない分、実装量とテスト対象が減ります
 - Vision の `DetectFaceRectanglesRequest` は Swift Concurrency に対応した新 API。`VNDetectFaceRectanglesRequest`（旧 API）と併存する
 - RevenueCat iOS SDK は StoreKit 2 に対応済み
 - Sentry Cocoa SDK はメジャーバージョン到達済み。v1.x で懸念していた「KMP SDK がメジャー前」という問題は消える
@@ -176,6 +178,7 @@ kaokakushi/
 │
 ├── Packages/
 │   ├── Domain/              純粋 Swift。Foundation 以外に依存しない
+│   ├── Application/         書き出し Saga、起動時復旧、ロールバック（4.4）
 │   ├── Rendering/           StampRasterizer 実装（Core Graphics）
 │   ├── Persistence/         GRDB、ファイル管理、ProtectedBlobStore
 │   │   └── Security/        CryptoKeyStore（Keychain。HMAC 鍵のみ）
@@ -191,7 +194,20 @@ kaokakushi/
 
 ### 4.1 依存の向き
 
-依存は **App → Domain ← 各アダプタ** の一方向とします。`Domain` がプロトコルを定義し、`Persistence` / `MediaKit` / `Rendering` / `Billing` / `Ads` / `Analytics` がそれを実装します。
+依存は次の一方向とします。
+
+```
+App
+ ↓
+Application
+ ↓
+Domain
+ ↑
+Persistence / MediaKit / Rendering / Billing / Ads / Analytics
+（Domain のプロトコルを実装する）
+```
+
+`Domain` がプロトコルを定義し、各アダプタがそれを実装します。`Application` は `Domain` のプロトコルだけを通してアダプタを操作します。
 
 **`Domain` は `Foundation` 以外に依存しません。**
 
@@ -203,7 +219,18 @@ kaokakushi/
 
 **`CGSize` や `CGRect` も使いません。** 必要な値型は `PixelSize` / `PixelRect` / `NormalizedRect` としてドメイン側で定義します（5.2）。`CoreGraphics` の型を持ち込むと、暗黙に「原点は左下か左上か」といった描画系の前提が混入します。ドメインは 5.2.1 の規約だけに従います。
 
-**`Package.swift` の依存関係でこれを強制します。** `Domain` ターゲットの `dependencies` を空にすれば、規約違反はコンパイルエラーになります。
+**`Package.swift` の依存関係では強制できません。** Apple SDK のシステムモジュール（`SwiftUI`、`UIKit`、`CoreGraphics`、`CoreImage`）は、ターゲットの `dependencies` に列挙しなくても `import` できます。`dependencies` が空でもコンパイルは通ります。
+
+**CI で禁止します。**
+
+| 手段 | 内容 |
+| --- | --- |
+| SwiftLint の `forbidden_imports` | `Domain/Sources/**` に対し `SwiftUI` / `UIKit` / `CoreGraphics` / `CoreImage` / `GRDB` / `Vision` / `Photos` を禁止 |
+| CI のチェック | `Domain/Sources` 配下の `import` 行を走査し、許可リスト（`Foundation` のみ）以外を検出したら失敗させる |
+
+補助として SwiftSyntax ベースの Build Tool Plugin も選べますが、v1 では lint と CI の 2 段で足ります。**「規約なので守る」ではなく、機械的に落ちる形にすることが要件です。**
+
+`Application` にも同じ制約を課します。**`Application` は `SwiftUI` / `GRDB` / `Vision` / `CoreImage` / `Security`（Keychain）を直接 `import` しません**（4.4）。
 
 この制約により、仕様書 30.1 が要求する単体テスト項目がすべてシミュレータなしで実行できます（12.1.1）。
 
@@ -220,12 +247,47 @@ Swift 6 の strict concurrency を有効にします。
 | 対象 | 隔離 |
 | --- | --- |
 | `Domain` の値型 | `Sendable`。判定関数はすべて純粋関数 |
-| `UsageLedgerStore` | **`actor`**。台帳の読み取り・変更・署名・保存を直列化する（7.4.3） |
-| `ExportStartGate` | **`actor`**。素材単位と月間認可のゲートを保持する（7.4.3） |
+| `UsageLedgerStore` | `Domain` は**プロトコル**。実装は待機キューを持つ `actor`（7.4.3） |
+| `ExportStartGate` | 同上 |
+| `Application` の Coordinator | `actor` |
 | UI の状態オブジェクト | `@MainActor` |
 | `MediaKit` の重い処理 | `nonisolated` な `async` 関数。呼び出し側が並行度を制御する |
 
-**v1.x で Mutex を想定していた箇所は `actor` に置き換わります。** 排他の必要性と理由は変わりません（7.4.3 の「台帳更新は直列化する」）。
+**`actor` にするだけでは排他区間を保持できません。** Swift の actor は再入可能で、`await` の中断点で別の呼び出しが入れます。本設計が要求するのは「読み取りから保存完了まで他を進めない」ことなので、実装 actor の内部に**明示的な待機キュー**を持たせます。詳細と規則は 7.4.3 に定義します。
+
+### 4.4 Application 層
+
+**書き出し Saga を所有する層を独立させます。**
+
+次の処理は `Domain`（純粋 Swift）にも `App`（SwiftUI）にも置けません。
+
+- 書き出しの手順 −2〜8（7.4.3）
+- 補償トランザクション
+- 起動時復旧
+- ロールバック
+- DB・台帳・ファイルの協調
+- ゲートの取得と解放
+- 出力の受け渡し（保存・共有）
+
+`App` の `View` や状態オブジェクトへ置くと、**UI 状態と永続化 Saga が結合します。** 画面を離れたら復旧処理が止まる、といった経路ができます。`Domain` へ置くと、副作用と `await` が入って純粋 Swift の制約が壊れます。
+
+```swift
+// Application — Domain のプロトコルだけを使う
+actor ExportCoordinator { }           // 手順 −2〜8、ロールバック
+actor StartupRecoveryCoordinator { }  // 起動時復旧（7.4.3 の起動順序）
+actor OutputDeliveryCoordinator { }   // MediaSaver / SharePresenter の呼び出しと状態遷移
+```
+
+**`Application` が直接 `import` してはいけないもの**を明示します。
+
+| 禁止 | 代わりに使う |
+| --- | --- |
+| `SwiftUI` / `UIKit` | 何も使わない（UI を知らない） |
+| `GRDB` | `Domain` の永続化プロトコル |
+| `Vision` / `CoreImage` / `Photos` | `Domain` の `FaceDetector` / `ImageEffectRenderer` / `MediaSaver` |
+| `Security`（Keychain） | `Domain` の `CryptoKeyStore` |
+
+この制約により、**12.1.2 の saga テストが偽実装だけで完結します。** `Application` が具象を知らないため、各中断点の検証にシミュレータが不要になります。
 
 ---
 
@@ -701,7 +763,7 @@ iOS 単独になっても、これらをプロトコルとして切る理由は�
 | `ImageEffectRenderer` | `RenderPlan` の 4 プリミティブ実行 | `MediaKit` | Core Image |
 | `ImageEncoder` | JPEG / HEIC エンコード、メタデータ除去 | `MediaKit` | Image I/O |
 | `MediaSaver` | 写真ライブラリ保存、登録日時の指定 | `MediaKit` | PhotoKit |
-| `SharePresenter` | 共有シートの提示と結果の返却 | `MediaKit` | `ShareLink` / `UIActivityViewController` |
+| `SharePresenter` | 共有シートの提示と結果の返却 | `MediaKit` | `UIActivityViewController`（`ShareLink` は結果を返せない。7.4.2） |
 | `StampRasterizer` | スタンプのラスタライズ（5.1.1） | `Rendering` | Core Graphics |
 | `CryptoKeyStore` | HMAC 鍵の生成と保持。**鍵のみ扱う** | `Persistence/Security` | Keychain |
 | `ProtectedBlobStore` | 署名済み状態の原子的な読み書き | `Persistence` | 保護ファイル（原子的置換） |
@@ -774,12 +836,34 @@ struct DetectedFace: Sendable, Equatable {
     let faceTrackID: String
     let bounds: NormalizedRect    // 左上原点へ変換済み（5.2.1）
     let confidence: Double        // 0.0〜1.0
-    let yawDegrees: Double?       // 推定できなかった場合は nil
-    let pitchDegrees: Double?
-    let rollDegrees: Double?
+    let yawDegrees: Double
+    let pitchDegrees: Double
+    let rollDegrees: Double
     let isSmallFace: Bool         // 検出用画像上の短辺で判定
 }
 ```
+
+`MediaKit` での変換は次のとおりです。
+
+```swift
+DetectedFace(
+    faceTrackID: observation.uuid.uuidString,
+    bounds: convertBounds(observation.boundingBox),   // Y 軸反転（5.2.1）
+    confidence: Double(observation.confidence),
+    yawDegrees: observation.yaw.converted(to: .degrees).value,
+    pitchDegrees: observation.pitch.converted(to: .degrees).value,
+    rollDegrees: observation.roll.converted(to: .degrees).value,
+    isSmallFace: isSmallFace
+)
+```
+
+##### 新旧 Vision API を混在させない
+
+**角度は非 Optional です。** 新しい `FaceObservation` の `yaw` / `pitch` / `roll` は `Measurement<UnitAngle>` であり、旧 `VNFaceObservation` の `NSNumber?` とは別物です。
+
+以前の版は `DetectFaceRectanglesRequest` / `FaceObservation` を採用しながら、角度だけ旧 API の `NSNumber?` を前提に「`nil` の場合の扱い」を定義していました。**これは実装できません。** 新 API へ統一し、`nil` に関する規則をすべて削除します。
+
+**Optional な角度が必要になった場合は、全体を旧 API（`VNDetectFaceRectanglesRequest` / `VNFaceObservation`）へ戻します。** 片方の API から片方の型だけを借りることはしません。
 
 ##### `confidence` を含める（v1.x からの変更）
 
@@ -794,17 +878,19 @@ struct DetectedFace: Sendable, Equatable {
 | `lowConfidence` | 検出器自身が確信を持てていない。誤検出または見落としの近傍 |
 | `extremePose` | 検出はできているが、横向き・上向きで**拡張率の既定値では隠しきれない**可能性がある |
 
-##### 角度が `nil` になる場合
+##### `confidence` の意味を実素材で確認する
 
-`VNFaceObservation` の `yaw` / `pitch` / `roll` は `NSNumber?` であり、**推定できないことがあります。** `0` として扱うと「正面を向いている」と誤認します。
+**Vision の `confidence` は、常に意味のある値とは限りません。** Apple は、`1.0` が「最高信頼度」を表す場合と、**その観測が `confidence` に意味を割り当てていない**場合の両方がありうると説明しています。常に `1.0` が返るリビジョンでは、閾値判定が無意味になります。
 
-| 状況 | 扱い |
-| --- | --- |
-| 角度が得られた | 度へ変換して保持する |
-| 角度が `nil` | **`nil` のまま保持する。`0` で埋めない** |
-| `extremePose` の判定 | 角度が `nil` の顔は**この理由では警告しない**（判定材料が無いため） |
+`lowConfidence` を有効にする前に、採用する `DetectFaceRectanglesRequest.Revision` について実素材で分布を確認します。**次を受入条件とします。**
 
-角度が `nil` の顔を安全側へ倒す必要はありません。`lowConfidence` と `isSmallFace` が別途判定するためです。ここで一律に警告すると、警告が多すぎて利用者が読まなくなります。
+- 値が実際に変動する（常に同一値ではない）
+- 検出品質と一定の相関がある（目視で怪しい検出が低い値に偏る）
+- 常に `1.0` ではない
+
+**この条件を満たさない場合、`lowConfidence` をトリアージから外します。** 意味のない値で警告を出すと、警告の総量だけが増えて利用者が読まなくなり、本当に見るべき `smallFace` や `extremePose` まで流し読みされます。
+
+確認は 12.2 の検出品質テストで行い、閾値は 16 節の未決事項として実素材の分布から決めます。
 
 これらの顔単位の値と、`Domain` 側で計算する端接触・重なりが、6.5.2 の `triage` の入力になります。写真単位の `reviewRequired` と名前が重ならないよう、顔単位では `requiresReview` という名称を使いません。
 
@@ -867,6 +953,7 @@ struct YearMonth: Sendable, Hashable, Comparable {
 struct UsageLedger: Sendable, Equatable {
     let period: YearMonth                        // 消費を計上している年月
     let consumedExportIDs: Set<String>           // 計上済みの書き出し
+    let sourceRecords: [SourceRecord]            // 素材の正規 ID と alias（6.2.4）
     let grants: [GrantEntry]                     // 権利（6.2.4）
     let trialEntries: [TrialEntry]               // トライアル消費
     let trialReservations: [TrialReservation]    // 認可時の予約（6.5.6.1）
@@ -878,13 +965,13 @@ struct UsageLedger: Sendable, Equatable {
 extension UsageLedger {
     var consumed: Int { consumedExportIDs.count }
 
-    func grant(for source: SourceIdentity) -> GrantEntry? {
-        grants.first { isSameSource($0.source, source) }
+    func grant(forSourceID id: UUID) -> GrantEntry? {
+        grants.first { $0.sourceID == id }
     }
 }
 ```
 
-`GrantEntry` / `TrialEntry` / `TrialReservation` の定義と、`Dictionary` ではなく配列にした理由は 6.2.4 に示します。
+`SourceRecord` / `GrantEntry` / `TrialEntry` / `TrialReservation` の定義と、素材を `sourceID` で管理する理由は 6.2.4 に示します。
 
 **各要素に `ownerExportID` を持たせます。** 7.4.3 のロールバックで「この書き出しが追加したもの」と「以前から存在したもの」を、**台帳そのものから**判別するためです。DB 側の記録だけに頼ると、台帳を書いた直後に落ちた場合に判別できません。
 
@@ -917,7 +1004,7 @@ struct QuotaEvaluation: Sendable {
 func evaluate(
     ledger: UsageLedger,
     access: SingleExportAccess,      // Plan ではない。6.3 が解決した能力を受け取る
-    source: SourceIdentity,          // 6.2.4
+    sourceID: UUID,                  // 6.2.4 で解決済み
     effectiveNow: Date,              // 6.2.2.5 で正規化済み。端末時刻を直接渡さない
     timeZone: TimeZone
 ) -> QuotaEvaluation
@@ -1233,7 +1320,7 @@ func rollPeriod(
     let current = YearMonth(from: effectiveNow, in: timeZone)
     // 24時間を過ぎた権利だけを落とす。月の境界とは無関係
     let activeGrants = ledger.grants.filter {
-        effectiveNow.timeIntervalSince(-e.firstSuccessAt) < 24 * 3600
+        effectiveNow.timeIntervalSince($0.firstSuccessAt) < 24 * 3600
     }
 
     if current > ledger.period {
@@ -1286,46 +1373,115 @@ func isSameSource(_ a: SourceIdentity, _ b: SourceIdentity) -> Bool {
 }
 ```
 
-| 状況 | 同一判定 |
-| --- | --- |
-| asset 識別値が取得でき、一致する | **同一。** OS がトランスコードしても判定できる |
-| asset 識別値が取得できないが、内容が一致する | **同一。** ファイル取り込みや再インストール後もこの経路で拾える |
-| asset 識別値が取得できず、表現も変わった | 同一と判定できない（保証の限界） |
+##### この OR 判定は同値関係ではない
 
-**`PHAsset.localIdentifier` を平文で保存しません。** 仕様 14.5 は不正利用防止のための識別子収集を制限しています。端末内でソルト付きハッシュへ変換し、元の値を復元できない形で持ちます。ソルトは `CryptoKeyStore` の鍵から導出します。
+**上の `isSameSource` を直接使ってはいけません。推移律が成立しません。**
+
+```
+A = (provider: P1, fingerprint: F1)
+B = (provider: P1, fingerprint: F2)
+C = (provider: nil, fingerprint: F2)
+
+isSameSource(A, B) == true    // provider が一致
+isSameSource(B, C) == true    // fingerprint が一致
+isSameSource(A, C) == false   // どちらも一致しない
+```
+
+同値関係でない述語を同一性判定に使うと、次が起こります。
+
+- 同じ素材の grant が複数作られる
+- トライアルを二重消費する
+- 配列内に「実質同じ素材」が複数残る
+- `SourceIdentity: Hashable` の等価性と `isSameSource` が食い違う
+- **`ExportStartGate` が同じ素材を別キーとして扱い、同時実行を許す**
+
+最後の項目が最も深刻です。ゲートが `SourceIdentity` を直接キーにしている限り、7.4.3 の「同一素材は直列化する」を保証できません。
+
+##### 正規 ID と alias で解決する
+
+**素材へ正規 ID（`sourceID`）を割り当て、識別情報を alias として管理します。**
+
+```swift
+enum SourceAlias: Sendable, Hashable {
+    case provider(String)   // providerAssetKeyHash
+    case content(String)    // contentFingerprint
+}
+
+struct SourceRecord: Sendable, Equatable {
+    let sourceID: UUID
+    var aliases: Set<SourceAlias>
+}
+```
+
+素材を解決する手順です。
+
+1. `provider` alias に一致する `SourceRecord` を探す
+2. `content` alias に一致する `SourceRecord` を探す
+3. 両方が見つかり、**別レコードを指していたら 1 件へ統合する**
+4. 片方だけ見つかれば、そのレコードへ不足している alias を追加する
+5. どちらも見つからなければ新しい `sourceID` を発行する
+
+**以後、grant・トライアル台帳・予約・ゲートはすべて `sourceID` で管理します。** `sourceID` は `UUID` であり、等価性は通常の `==` です。推移律は自明に成立します。
+
+##### 統合時の規則
+
+**統合は安全側へ固定します。** 遭遇する頻度は低いものの、規則が無いと実装のたびに判断が変わります。
+
+| 対象 | 統合結果 |
+| --- | --- |
+| `aliases` | 両者の和集合 |
+| grant | **最も古い `firstSuccessAt` を維持する**（窓を延長しない。6.2.0） |
+| トライアル台帳 | **どちらかが消費済みなら消費済み**（払い戻さない。6.5.6.1） |
+| 予約 | 両方を統合する。**実行中の export が競合するなら、新規開始を止める** |
+| `ownerExportID` | 維持したほうの値を残す |
+
+**v1 では、書き出し開始ゲートを素材単位ではなく全体で 1 件にしても構いません。** 同時並列数の初期値が 1 である以上（16 節）、素材ごとの粒度は実質使われません。統合が競合と重なる経路そのものを消せます。並列数を 2 へ上げる時点で `sourceID` 単位のゲートへ移行します。
+
+##### `PHAsset.localIdentifier` の扱い
+
+**平文で保存しません。** 仕様 14.5 は不正利用防止のための識別子収集を制限しています。端末内でソルト付きハッシュへ変換し、元の値を復元できない形で持ちます。**ソルトは台帳署名とは別の鍵から派生させます**（7.4.3 の鍵の用途分離）。
 
 ##### 台帳の保持形式
 
-**OR 条件を `Dictionary` のキーで表せません。** 台帳の各集合を配列とし、要素が `SourceIdentity` 全体を持ちます。
+各集合は `sourceID` をキーにします。
 
 ```swift
 struct GrantEntry: Sendable, Equatable {
-    let source: SourceIdentity
+    let sourceID: UUID
     let firstSuccessAt: Date
     let ownerExportID: String
 }
 
 struct TrialEntry: Sendable, Equatable {
-    let source: SourceIdentity
+    let sourceID: UUID
     let ownerExportID: String
 }
 
 struct TrialReservation: Sendable, Equatable {
-    let source: SourceIdentity
+    let sourceID: UUID
     let exportID: String
 }
 ```
+
+`SourceRecord` の集合も `UsageLedger` に持ちます。alias の追加と統合が台帳更新と同一トランザクションで行われる必要があるためです。別の場所に置くと、統合の途中で落ちたときに alias と grant が食い違います。
 
 **線形探索で構いません。** 各集合の要素数には上限があります。
 
 | 集合 | 上限 |
 | --- | --- |
+| `sourceRecords` | `grants` と `trialEntries` が参照する素材数。数十件 |
 | `grants` | 24 時間以内に成功した書き出しの素材数。実用上は数件〜数十件 |
 | `trialEntries` | `configuredCreditCount`（既定 5） |
 | `trialReservations` | 同時実行数。v1 は 1、将来 2（6.5.8） |
 | `consumedExportIDs` | 月間上限（既定 5） |
 
-**不変条件: `isSameSource` が真になる要素を、同じ集合内に 2 件持ちません。** 追加時は必ず既存要素を `isSameSource` で検索し、見つかれば置き換えではなく既存を維持します（`grants` の `firstSuccessAt` を延長しないため。6.2.0）。
+**不変条件です。**
+
+- 同じ `SourceAlias` を 2 つの `SourceRecord` が持たない
+- 同じ `sourceID` の要素を、同じ集合内に 2 件持たない
+- `grants` / `trialEntries` / `trialReservations` の `sourceID` は、必ず `sourceRecords` に存在する
+
+追加時は既存要素を `sourceID` で検索し、見つかれば置き換えではなく既存を維持します（`grants` の `firstSuccessAt` を延長しないため。6.2.0）。
 
 ##### `contentFingerprint` の構成
 
@@ -1509,9 +1665,11 @@ v1 では次を規則とします。
 | --- | --- |
 | `ProtectedBlobStore` のファイル | **クラウドバックアップ対象外**（`isExcludedFromBackup`。7.3.1） |
 | HMAC 鍵 | **端末外へ移行しない**（Keychain へ `ThisDeviceOnly` 系のアクセシビリティを指定。7.3.1） |
-| 再インストール・端末移行後 | 両方とも消えるため `Missing` となり、**新規台帳を作る**（6.2.5 の読み込み結果の分類） |
+| 再インストール・端末移行後 | データが消えるため `Missing` となり、**新規台帳を作る** |
 
-鍵とデータの**どちらか一方だけが残る状態を作らない**ことが要点です。両方消えれば `Missing`、両方残れば `Valid` となり、`IntegrityFailure` は実際の改ざんか鍵の破棄に限定されます。
+**「鍵とデータの両方が消える」とは仮定しません。** `ThisDeviceOnly` が保証するのは別端末へ移行しないことであり、アンインストール時の削除ではありません。**鍵だけが残る状態は正常な状態として扱います**（7.3.2 に規則を定義）。
+
+いずれの場合も、データが `Missing` なら新規台帳を作ります。鍵の有無で分岐しません。
 
 ### 6.3 権限解決（EntitlementResolver）
 
@@ -1656,11 +1814,11 @@ func triage(_ result: DetectionResult, detectionRevision: Int64) -> [ReviewIssue
 
 | 理由 | 発生単位 |
 | --- | --- |
-| `SmallFace` | **顔ごと**に 1 件 |
-| `ExtremePose` | **顔ごと**に 1 件 |
-| `FaceAtEdge` | **顔ごと**に 1 件 |
-| `OverlappingFaces` | **重なる顔の組み合わせごと**に 1 件 |
-| `NoFaceDetected` | **写真ごと**に 1 件（対象の顔が存在しないため `affectedFaceTrackIds` は空） |
+| `smallFace` | **顔ごと**に 1 件 |
+| `extremePose` | **顔ごと**に 1 件 |
+| `faceAtEdge` | **顔ごと**に 1 件 |
+| `overlappingFaces` | **重なる顔の組み合わせごと**に 1 件 |
+| `noFaceDetected` | **写真ごと**に 1 件（対象の顔が存在しないため `affectedFaceTrackIDs` は空） |
 
 ##### 再検出時は対応づけを試みない
 
@@ -1674,13 +1832,13 @@ v1 では対応づけを試みません。
 
 利用者はやり直しになりますが、対応づけを誤って安全側を崩すよりも確実です。再検出は利用者が明示的に行う操作であり、頻度も高くありません。
 
-`affectedFaceTrackIds` の生成規則を固定します。
+`affectedFaceTrackIDs` の生成規則を固定します。
 
 | 理由 | `affectedFaceTrackIds` |
 | --- | --- |
-| `SmallFace` / `ExtremePose` / `FaceAtEdge` | 対象の `faceTrackID` 1 件 |
-| `OverlappingFaces` | 重なる 2 件を**辞書順に並べる**（順序で別 ID にならないように） |
-| `NoFaceDetected` | 空。ID は写真 ID と `detectionRevision` から生成する |
+| `lowConfidence` / `smallFace` / `extremePose` / `faceAtEdge` | 対象の `faceTrackID` 1 件 |
+| `overlappingFaces` | 重なる 2 件を**辞書順に並べる**（順序で別 ID にならないように） |
+| `noFaceDetected` | 空。ID は写真 ID と `detectionRevision` から生成する |
 
 ##### 判定に使う値（v1.x からの変更）
 
@@ -1694,8 +1852,6 @@ v1 では対応づけを試みません。
 | `extremePose` | `yawDegrees` または `pitchDegrees` の絶対値が閾値超過 | 検出はできているが、**拡張率の既定値では隠しきれない**可能性がある |
 
 **両方を残すのは、捉える失敗が違うからです。** 正面を向いた顔を低い信頼度で検出することもあれば、高い信頼度で真横の顔を検出することもあります。片方だけでは、もう一方の状況を見逃します。
-
-`extremePose` は、**角度が `nil` の顔には立てません**（5.7.1）。判定材料が無いためです。その顔は `lowConfidence` と `isSmallFace` が別途評価します。
 
 閾値（`confidence` の下限、yaw / pitch の上限）はリモート設定で調整可能とします（11.1）。実素材での分布を見てから決めるため、初期値は 16 節の未決事項です。
 
@@ -1860,7 +2016,7 @@ ReviewDecision(resolutions: [
 ])
 ```
 
-`ReviewRequired` の写真が `Reviewed` になる条件は、**その写真の `List<ReviewIssue>` すべてに対して `ReviewResolution` が記録されていること**です。1 件でも未記録なら `Unreviewed` のままです。
+`ReviewRequired` の写真が `Reviewed` になる条件は、**その写真の `[ReviewIssue]` すべてに対して `ReviewResolution` が記録されていること**です。1 件でも未記録なら `Unreviewed` のままです。
 
 理由単位ではなく発生単位にすることで、「3 人の小さい顔のうち 1 人だけ対応して先へ進む」経路がなくなります。
 
@@ -1955,7 +2111,7 @@ Free および Standard の利用者は、Pro の中核である一括処理を�
 
 #### 6.5.6.1 同一写真の再書き出し
 
-**クレジットの消費判定は、6.2.4 の `isSameSource` に従います。** 加工内容が異なっても、同じ元写真であれば追加消費しません。
+**クレジットの消費判定は、6.2.4 で解決した `sourceID` に従います。** 加工内容が異なっても、同じ元写真であれば追加消費しません。
 
 これがないと、モザイクで書き出して結果を見てから強度を調整して再書き出しするだけで 2 クレジット消費し、通常の無料枠（24 時間以内の再書き出しは追加消費なし）より厳しい扱いになります。試用のための枠がやり直しで目減りする設計は、トライアルの目的に反します。
 
@@ -2320,9 +2476,9 @@ func evaluateUpdate(
 
 | 順 | 操作 |
 | --- | --- |
-| 1〜6 | 7.4.3 の復旧手順（台帳検証、コミット復旧、孤児回収、未受け渡し出力の復元） |
-| **7** | **`evaluateUpdate` を実行する** |
-| 8 | `.required` なら更新画面（6.8.4 の分岐を含む）、それ以外は通常画面 |
+| 0〜7 | 7.4.3 の復旧手順（journal_mode 検証、台帳検証、コミット復旧、参照整合、孤児回収、未受け渡し出力の復元） |
+| **8** | **`evaluateUpdate` を実行する** |
+| 9 | `.required` なら更新画面（6.8.4 の分岐を含む）、それ以外は通常画面 |
 
 #### 6.8.6 任意更新の提示条件
 
@@ -2404,9 +2560,57 @@ GRDB（SQLite）を使います。採用理由は 3.3 に示します。
 
 **この分割は制約を生みます。** 手順 8 の単一トランザクション（7.4.3）は `OutputRecord`・`ExportRecord`・キュー状態・`Project` を同時に更新しますが、このうち `ExportRecord` と `Project` は `user-data.db` 側です。
 
-**SQLite の `ATTACH DATABASE` を使い、1 つの接続から両ファイルを扱います。** GRDB は `DatabaseQueue` の設定で `ATTACH` を実行でき、**アタッチされた DB をまたぐトランザクションは原子的です**（SQLite が 2 相コミットを行います）。手順 8 の原子性はこれで保たれます。
+**SQLite の `ATTACH DATABASE` を使い、1 つの接続から両ファイルを扱います。** SQLite は複数 DB にまたがるトランザクションで 2 相コミットを行います。
 
 `ATTACH` を使わず 2 つの接続に分けると、手順 8 が 2 つのトランザクションに割れ、その間で落ちた場合に「出力は公開済みだがキューは `exporting`」という状態が残ります。7.4.3 が排除しようとした不整合そのものです。
+
+##### 原子性が成立する条件
+
+**「`ATTACH` すれば原子的」ではありません。** SQLite の複数 DB トランザクションがクラッシュをまたいで原子的になるのは、条件を満たす場合だけです。**特に WAL では、DB ごとの原子性は保たれても、複数 DB の一部だけがコミットされることがあります。**
+
+次を必須の構成とします。
+
+| 項目 | 規約 |
+| --- | --- |
+| 接続 | **`DatabaseQueue` を 1 つだけ**使う |
+| main database | **`runtime.db`**（`:memory:` にしない） |
+| attach | 接続確立のたびに `user-data.db` を `ATTACH` する |
+| `journal_mode` | **`DELETE` / `TRUNCATE` / `PERSIST` のいずれか** |
+| WAL | **使用しない** |
+| `DatabasePool` | **使用しない**（複数接続になり、`ATTACH` の前提が崩れる） |
+| 配置 | 両ファイルを**同一ファイルシステム・同一 VFS 上**に置く |
+| 起動時検査 | **手順 8 の実行前に `PRAGMA journal_mode` を検証する**。WAL なら復旧エラーとして書き出しを開始しない |
+
+**WAL を捨てる代償は受け入れます。** WAL は並行読み書きの性能で有利ですが、本アプリの DB アクセスは書き出しの前後に集中し、同時読み書きの負荷が高くありません。**手順 8 の原子性のほうが優先度が高い**と判断します。
+
+`journal_mode` を起動時に検証するのは、マイグレーションツールや将来の GRDB のバージョンが既定で WAL へ切り替える可能性があるためです。設定したつもりが変わっていた、を検出できる形にします。
+
+##### 外部キーはスキーマ境界をまたげない
+
+**SQLite の外部キー制約は `ATTACH` した別 DB を参照できません。** `runtime.db` の `OutputRecord.projectID` から `user-data.db` の `Project` への外部キーは作れません。
+
+したがって、この整合性は**アプリ側が保証します。**
+
+| 保証する場所 | 内容 |
+| --- | --- |
+| 手順 8（7.4.3） | 同一トランザクション内で両 DB を更新し、参照先が存在する状態でのみコミットする |
+| 起動時検査（7.4.3 の起動順序） | 下記の不一致を検出する |
+
+起動時に次を検査します。
+
+- `OutputRecord.projectID` に対応する `Project` が存在する
+- `ExportQueueItem.batchID` に対応する `Batch` が存在する
+- `ExportCommit.projectID` に対応する `Project` が存在する
+
+**不一致の扱いを分けます。**
+
+| 状況 | 扱い |
+| --- | --- |
+| `OutputRecord` の参照先が無い | **孤児として削除する**（7.5.1 の経路。ファイルも削除） |
+| `ExportCommit` の参照先が無い | **復旧エラー**。会計済みか判断できないため自動削除しない |
+| `ExportQueueItem` の参照先が無い | 孤児として削除する |
+
+`ExportCommit` だけ扱いが違うのは、それが会計の根拠だからです（7.4.3 の「コミット行の改ざん対策」と同じ理由）。
 
 ##### 保護ストア
 
@@ -2470,8 +2674,8 @@ GRDB（SQLite）を使います。採用理由は 3.3 に示します。
 例外は 4 つです。
 
 - **未受け渡しの出力ファイル**（6.2.2）。利用者がまだ受け取っていない成果物であり、履歴とは性質が異なります。保存・共有・破棄のいずれかで解消します
-- **`UsageLedger` の `SourceIdentity` と初回成功時刻**（6.2）。無料枠の判定に必要な最小限であり、ProtectedBlobStore 側に保持します。画像の内容を復元できる情報を含みません
-- **一括処理トライアルの消費済み素材識別値**（6.5.6.1）。5 枚分のトライアル対象を判定するために、`SourceIdentity` を ProtectedBlobStore へ **期限なく** 保持します。こちらも画像の内容を復元できる情報を含みません
+**`UsageLedger` の `SourceRecord` と初回成功時刻**（6.2）。無料枠の判定に必要な最小限であり、ProtectedBlobStore 側に保持します。画像の内容を復元できる情報を含みません
+- **一括処理トライアルの消費済み素材識別値**（6.5.6.1）。5 枚分のトライアル対象を判定するために、`SourceRecord`（alias のハッシュ）を ProtectedBlobStore へ **期限なく** 保持します。こちらも画像の内容を復元できる情報を含みません
 - **未完了の `ExportCommit` と、それが参照する検証済み出力ファイル**（7.4.3）。書き出しの整合性を回復するための運用データであり、コミット完了またはロールバック後に削除します
 
 3 つ目は保持期間が無期限である点が他と異なります。設定画面での個別説明までは要しませんが、**プライバシーポリシーの記載と整合させる必要があります**（16 節の未決事項）。
@@ -2559,6 +2763,45 @@ GRDB（SQLite）を使います。採用理由は 3.3 に示します。
 
 なお、**再インストールで無料枠が戻ることは仕様 14.5 が許容しています**（6.2.5）。鍵が残っていても台帳が無ければ新規台帳になるため、この挙動は変わりません。
 
+#### 7.3.3 データ保護クラス
+
+**バックアップ除外とは別に、端末ロック時の保護レベルを指定します。** バックアップ対象外にしても、端末が盗まれてロック画面の状態で解析されれば、保護クラスが低いファイルは読めます。
+
+本アプリが端末へ置くものには、**未加工の顔画像、未受け渡しの加工済み出力、顔領域を含む履歴**が含まれます。プライバシー保護を目的とする以上、ここを既定任せにしません。
+
+| 対象 | 保護クラス |
+| --- | --- |
+| 処理中の元画像コピー（`tmp/processing/`） | **`.complete`** |
+| 未受け渡し出力（`outputs/`） | **`.complete`** |
+| ラスタ一時ファイル（`tmp/raster/`） | **`.complete`** |
+| カスタムスタンプ実体（`stamps/`） | **`.complete`** |
+| `runtime.db` / `user-data.db` | `.completeUntilFirstUserAuthentication` |
+| `ProtectedBlobStore` | `.completeUntilFirstUserAuthentication` |
+
+指定は `FileProtectionType` を `FileManager` の属性として設定します。**ディレクトリ単位で設定し、配下に作るファイルへ個別指定を要しない構成**にします（7.3.1 のバックアップ除外と同じ理由）。
+
+##### なぜ DB を `.complete` にしないか
+
+`.complete` はロック中に読み書きできません。**DB をこのクラスにすると、ロック中に起動時復旧を実行できません。**
+
+起動時復旧（7.4.3）は、`UsageLedger` の検証とコミットジャーナルの読み取りを行います。これがロック解除まで待たされると、復旧の完了が不定になり、その間の新規書き出しをブロックし続けることになります。
+
+`.completeUntilFirstUserAuthentication` なら、再起動後に一度ロックを解除すればアクセスできます。**画像そのものを含まない**（履歴のサムネイルは別ファイル）ため、この差を許容します。
+
+##### `.complete` へロック中にアクセスした場合
+
+**破損や欠損として扱いません。** ファイルは存在しており、読めないだけです。
+
+| 誤った扱い | 正しい扱い |
+| --- | --- |
+| ファイル欠損としてロールバック | **「保護データ利用不可」として処理を一時停止する** |
+| 復旧エラーにする | ロック解除後に再試行する |
+| `verifiedOutput` との不一致として扱う | 照合を行わず、判断を保留する |
+
+`.complete` のファイルを欠損と誤認すると、**7.4.3 のロールバックが走って会計を戻します。** 実際には出力は無事なので、消費だけが取り消されて出力が残る、あるいは無事な出力が削除されます。
+
+`NSFileReadNoPermissionError` / `EPERM` を保護データ利用不可として識別し、`AppError` に専用のコードを設けます（9.1）。
+
 ### 7.4 原子的書き出しと受け渡し
 
 書き出しを **出力の生成** と **利用者への受け渡し** の 2 段階に分けます。
@@ -2587,7 +2830,7 @@ GRDB（SQLite）を使います。採用理由は 3.3 に示します。
 
 > **検証済みファイルは、コミット手順 8 が完了するまで UI・`MediaSaver`・`SharePresenter` へ公開しません。**
 >
-> 手順 3 で台帳へ会計を暫定適用し、**手順 8 のコミット行削除で最終確定します。**
+> 手順 4 で台帳へ会計を暫定適用し、**手順 8 のコミット行削除で最終確定します。**
 >
 > 本書における「利用可能な出力の生成が正常に完了した時点」とは、**コミット手順 8 まで完了した時点**を指します。
 
@@ -2600,7 +2843,7 @@ GRDB（SQLite）を使います。採用理由は 3.3 に示します。
 
 ##### 非公開を構造で保証する
 
-**「公開しない」と文章で書くだけでは防げません。** `OutputRecord` を手順 5 で作ると、GRDB の ValueObservationはその直後から `Generated` を観測できます。UI の購読先が `OutputRecord` である以上、手順 5〜7 の間に画面へ現れます。
+**「公開しない」と文章で書くだけでは防げません。** `OutputRecord` を会計直後に作ると、GRDB の `ValueObservation` はその時点から `Generated` を観測できます。UI の購読先が `OutputRecord` である以上、最終確定より前に画面へ現れます。
 
 `OutputRecord` の作成を**手順 8 へ移し、コミット行の削除と同一の DB トランザクションで実行します。**
 
@@ -2645,23 +2888,33 @@ enum ShareResult: Sendable { case completed, canceled, unknown, failed }
 
 | 結果 | 出力状態 | 扱い |
 | --- | --- | --- |
-| `Completed` | `Generated` → **`Delivered`** | 受け渡し成功 |
-| `Canceled` | `Generated` を維持 | 利用者が取りやめた |
-| `Failed` | `Generated` を維持 | 再試行できる |
-| `Unknown` | **`Generated` を維持** | 安全側へ倒す |
+| `.completed` | `Generated` → **`Delivered`** | 受け渡し成功 |
+| `.canceled` | `Generated` を維持 | 利用者が取りやめた |
+| `.failed` | `Generated` を維持 | 再試行できる |
+| `.unknown` | **`Generated` を維持** | 安全側へ倒す |
 
-`Unknown` は、共有先アプリが完了を返さない場合に生じます。ここで `Delivered` にすると、実際には渡っていない写真を「保存済み」として一時ファイルを消しかねません。**受け取れていない可能性がある側へ倒します。**
+`.unknown` は、共有先アプリが完了を返さない場合に生じます。ここで `Delivered` にすると、実際には渡っていない写真を「保存済み」として一時ファイルを消しかねません。**受け取れていない可能性がある側へ倒します。**
 
-**何を `completed` とするかは、実装前に先に定義します。** テストは決定手段ではなく、決めた契約を検証する手段です。テストで挙動を突き合わせてから決めると、そのときの実装が仕様になってしまいます。
+##### `ShareLink` では実装できない
 
-実装計画で定義する内容は次のとおりです。
+**`SharePresenter` は `UIActivityViewController` だけで実装します。**
 
-| OS | 定義すべきこと |
+`ShareLink` は共有 UI を提示する `View` であり、**完了結果を返す API を持ちません。** 上の 4 値を返せない以上、`ShareLink` では `Delivered` への遷移条件を判定できません。SwiftUI 標準であることより、結果を取得できることを優先します。
+
+`UIActivityViewController` の `completionWithItemsHandler` は、選択された `activityType`、完了フラグ、エラーを返します。写像は次とします。
+
+| 条件 | 結果 |
 | --- | --- |
-| iOS | `UIActivityViewController.completionWithItemsHandler` の `completed` / `activityError` / 選択された `activityType` を、4 つの結果へどう写像するか |
-| Android | `Intent.ACTION_SEND` の結果（`RESULT_OK` / `RESULT_CANCELED` / 結果を返さない共有先）を、4 つの結果へどう写像するか |
+| `activityError != nil` | **`.failed`** |
+| `completed == true` | **`.completed`** |
+| `completed == false` かつ `activityType == nil` | **`.canceled`**（シートを閉じた） |
+| それ以外 | **`.unknown`** |
 
-そのうえで適合テストが、定義どおりに写像されることを検証します。
+最後の行が要点です。`completed == false` でも `activityType` が入っている場合は、**共有先アプリが結果を返さなかった**ことを意味します。取りやめとは区別できないため `.unknown` とし、`Generated` を維持します。
+
+`UIViewControllerRepresentable` で包み、`CheckedContinuation` で `async` 関数として公開します。3.2 で「`UIViewRepresentable` を使うのは広告バナーだけ」としましたが、**`SharePresenter` も例外に加えます**（`View` ではなくコントローラの提示であり、UI 階層への埋め込みではありません）。
+
+適合テストが、この写像どおりに動くことを検証します（12.1.3）。
 
 #### 7.4.3 コミットジャーナル
 
@@ -2689,7 +2942,7 @@ struct ExportCommit: Sendable {
     let exportID: String
     let projectID: String
     let batchID: String?
-    let source: SourceIdentity              // 6.2.4
+    let sourceID: UUID                      // 6.2.4 で解決済み
     let outputFileID: String                // パスではなく ID。専用ディレクトリ配下で解決する
     let authorization: ExportAuthorization  // 開始前に固定する
     let verifiedOutput: VerifiedOutput?     // Prepared では nil。FileVerified 以降は必須
@@ -2710,17 +2963,17 @@ struct VerifiedOutput: Sendable {
 /// grant の操作。ensure と preserve を型で分ける
 enum GrantAction: Sendable {
     /// 有効な grant がなければ firstSuccessAt で新規作成してよい
-    case ensure(source: SourceIdentity, firstSuccessAt: Date)
+    case ensure(sourceID: UUID, firstSuccessAt: Date)
 
     /// 認可時の grant を維持するだけ。新規作成は禁止
-    case preserveAuthorized(source: SourceIdentity, firstSuccessAt: Date)
+    case preserveAuthorized(sourceID: UUID, firstSuccessAt: Date)
 }
 
 /// 台帳へ適用しようとする内容。時刻は finalizedAt から導出する
 struct AccountingIntent: Sendable {
     let consumeExportID: String?
     let grantAction: GrantAction
-    let trialSourceToEnsure: SourceIdentity?
+    let trialSourceIDToEnsure: UUID?
 }
 
 /// 台帳へ実際に適用された結果。AccountingCommitted で確定する
@@ -2753,8 +3006,8 @@ enum ExportCommitState: Sendable {
 
 | 勘定 | `grantAction` |
 | --- | --- |
-| `paidUnlimited` / `freeMonthlyConsume` / `batchTrial(true)` / `batchTrial(false)` | `.ensure(source:firstSuccessAt: finalizedAt)` |
-| `freeMonthlyReexport` | `.preserveAuthorized(source:firstSuccessAt: authorization.authorizedGrant.firstSuccessAt)` |
+| `paidUnlimited` / `freeMonthlyConsume` / `batchTrial(true)` / `batchTrial(false)` | `.ensure(sourceID:firstSuccessAt: finalizedAt)` |
+| `freeMonthlyReexport` | `.preserveAuthorized(sourceID:firstSuccessAt: ...)` |
 
 `PreserveAuthorized` の適用規則です。
 
@@ -2763,7 +3016,7 @@ enum ExportCommitState: Sendable {
 - 別の `firstSuccessAt` へ差し替えない
 - `finalizedAt` を使った新規作成を**禁止する**
 
-型で分けたことにより、通常処理と起動時復旧が同じコードパスを通っても 24 時間窓を延長できません。文章上の特例ではなく、`when` の網羅で強制されます。
+型で分けたことにより、通常処理と起動時復旧が同じコードパスを通っても 24 時間窓を延長できません。文章上の特例ではなく、`switch` の網羅で強制されます。
 
 ###### 検証結果をジャーナルへ持つ
 
@@ -2837,7 +3090,7 @@ struct ExportCommit {
 
 ```swift
 struct AuthorizedGrant: Sendable {
-    let source: SourceIdentity
+    let sourceID: UUID
     let firstSuccessAt: Date       // 認可時に有効だった grant の開始時刻
 }
 
@@ -2938,15 +3191,52 @@ struct LedgerTransaction<R: Sendable>: Sendable {
     let result: R
 }
 
-/// actor にすることで、読み取り・変更・署名・保存が直列化される（4.3）
-actor UsageLedgerStore {
+// Domain はプロトコルだけを定義する（4.1）
+protocol UsageLedgerStore: Sendable {
     func transact<R: Sendable>(
-        _ transform:  (UsageLedger) throws -> LedgerTransaction<R>
+        _ transform: @Sendable (UsageLedger) throws -> LedgerTransaction<R>
     ) async throws -> R
 }
 ```
 
-オブジェクトの置換が原子的でも、**並列処理が同じ旧台帳を読んで別々に書き戻せば、一方の更新が失われます。** 読み取り・変更・署名・保存を単一の更新口へ通し、Mutex または単一 actor で排他します。
+オブジェクトの置換が原子的でも、**並列処理が同じ旧台帳を読んで別々に書き戻せば、一方の更新が失われます。** 読み取り・変更・署名・保存を単一の更新口へ通します。
+
+##### `actor` にするだけでは排他区間を保持できない
+
+**Swift の `actor` は再入可能です。** `await` で中断すると、その隙に別の呼び出しが同じ actor のメソッドへ入れます。Swift は actor reentrancy を明示しており、厳密な FIFO も保証しません。
+
+したがって、次はいずれも成立しません。
+
+- `actor UsageLedgerStore` にすれば `transact` 全体が直列化される
+- `actor ExportStartGate` にすれば `withPermit` の `operation` 全体がロックされる
+
+`transact` は「台帳を読む → 変換する → **署名してファイルへ保存する**」であり、保存が `await` を含みます。その中断点で次の `transact` が入れば、更新が失われます。**`actor` は本設計が要求する排他をそのままでは満たしません。**
+
+##### 実装規則
+
+`Domain` はプロトコルだけを定義し、実装は `Persistence` へ置きます（4.1 の依存の向き）。実装 actor には**明示的な待機キュー**を持たせます。
+
+```swift
+// Persistence — 実装
+actor FileUsageLedgerStore: UsageLedgerStore {
+    private var isBusy = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []   // FIFO
+}
+```
+
+| 規則 | 内容 |
+| --- | --- |
+| 待機キュー | actor 内部に保持する（`isBusy` と `[CheckedContinuation]`） |
+| 取得 | `isBusy` なら `withCheckedContinuation` で待機する |
+| 保持 | **`await` を含む処理の全体で保持し続ける**（ファイル保存中も解放しない） |
+| 解放 | `defer` で必ず行う。`throw` しても解放される |
+| 順序 | 待機キューを**明示的に FIFO** とする。actor の暗黙の順序に依存しない |
+
+**`transact` は、読み込みから書き込み完了まで、別の `transact` を進めません。** ファイル保存中の `await` をまたいでも次の台帳処理を開始しません。
+
+`ExportStartGate` も同じ構造です。permit を `held` 集合へ登録し、**`await operation()` の間も維持します。** `withPermit` から復帰するまで、同じ `sourceID` の要求は待機します。
+
+**「`actor` にしたから安全」という記述は、本設計では誤りです。** actor が保証するのは actor 内部の可変状態への同時アクセスが無いことだけであり、複数の `await` をまたぐ論理的なクリティカルセクションではありません。
 
 **更新後の台帳だけを返す API では足りません。** 同じ排他区間の中で次も取り出す必要があります。台帳を外側で読んで結果を計算してから `update` すると、競合が再発します。
 
@@ -2983,11 +3273,12 @@ actor UsageLedgerStore {
 **「同時 1 件」という規則だけでは競合を防げません。** 認可を通ってから `Prepared` を書くまでの間に、別の書き出しが同じ認可を通過できます。認可の**前**にゲートを取ります。
 
 ```swift
-actor ExportStartGate {
+// Domain — プロトコル。実装は Application 側の actor（6.2 の実装規則に従う）
+protocol ExportStartGate: Sendable {
     func withPermit<R: Sendable>(
-        source: SourceIdentity,
+        sourceID: UUID,
         requiresMeteredSingleExportGate: Bool,
-        _ body:  () async throws -> R
+        operation: @Sendable () async throws -> R
     ) async throws -> R
 }
 ```
@@ -3053,19 +3344,35 @@ struct OutputRecord: Sendable {
 
 保存先が DB と ProtectedBlobStore にまたがるため、**書き込み順を固定します。**
 
-| 順 | 操作 | 保存先 |
-| --- | --- | --- |
-| −2 | `transact` 内で時刻正規化・月次更新・期限切れ grant の整理を**永続化**する。`BatchTrial(true)` なら**同じトランザクション内で**トライアル予約を作る | ProtectedBlobStore |
-| −1 | `transact` の結果として `ExportAuthorization` を得る。`Blocked` なら以降へ進まない | — |
-| 0 | `ExportCommit(Prepared)` を保存（`intent` / `finalizedAt` は `null`）。**保存に失敗したら補償トランザクションで予約を削除する** | DB |
-| 1 | 一時ファイルを生成し、サイズ・SHA-256・デコードを検証して `VerifiedOutput` を得る | ファイルシステム |
-| 2 | `verifiedOutput` を確定し `ExportCommit(FileVerified)` を保存（`finalizedAt` はまだ `null`） | DB |
-| 3 | `finalizedAt` を決め、`intent` を確定して `ExportCommit(Finalizing)` を保存 | DB |
-| 4 | `UsageLedger` を冪等に適用する。**予約を削除して `trialEntries` へ移すのも同じ台帳トランザクション内** | ProtectedBlobStore |
-| 5 | `applied` を埋めて `ExportCommit(AccountingCommitted)` を保存 | DB |
-| 6 | `verifiedOutput` と出力ファイルの**健全性**を確認し、`ExportCommit(ReadyToPublish)` を保存 | ファイルシステム / DB |
-| 7 | （欠番。以前の版で `OutputRecord` を作っていた位置） | — |
-| 8 | **単一トランザクション**（下記）。**ここが会計の最終確定境界** | DB |
+**この表が唯一の正です。** 他の節が手順番号や状態遷移に言及する場合は、必ずこの表を参照します。以前の版では複数の節が別々に順序を述べ、互いに食い違っていました。
+
+| 順 | 操作 | 保存先 | 遷移後の状態 |
+| --- | --- | --- | --- |
+| −2 | `transact` 内で時刻正規化・月次更新・期限切れ grant の整理を**永続化**する。`batchTrial(true)` なら**同じトランザクション内で**トライアル予約を作る | ProtectedBlobStore | — |
+| −1 | `transact` の結果として `ExportAuthorization` を得る。`Blocked` なら以降へ進まない | — | — |
+| 0 | `ExportCommit` を保存（`verifiedOutput` / `intent` / `finalizedAt` はすべて `nil`）。**保存に失敗したら補償トランザクションで予約を削除する** | DB | **`Prepared`** |
+| 1 | 一時ファイルを生成し、サイズ・SHA-256・デコードを検証して `VerifiedOutput` を得る | ファイルシステム | — |
+| 2 | `verifiedOutput` を確定して保存（`finalizedAt` はまだ `nil`） | DB | **`FileVerified`** |
+| 3 | **`finalizedAt` を決め、`intent` を確定して**保存 | DB | **`Finalizing`** |
+| 4 | `UsageLedger` を冪等に**暫定適用**する。**予約を削除して `trialEntries` へ移すのも同じ台帳トランザクション内** | ProtectedBlobStore | — |
+| 5 | `applied` を埋めて保存 | DB | **`AccountingCommitted`** |
+| 6 | `verifiedOutput` と出力ファイルの**健全性**を確認して保存 | ファイルシステム / DB | **`ReadyToPublish`** |
+| 7 | （欠番。以前の版で `OutputRecord` を作っていた位置） | — | — |
+| 8 | **単一トランザクション**（下記）でコミット行を削除する。**ここが会計の最終確定境界** | DB | （行が消える） |
+
+状態遷移をまとめると次の 1 本です。
+
+```
+Prepared → FileVerified → Finalizing → AccountingCommitted → ReadyToPublish
+                                                                   ↓
+                                              手順 8 の単一トランザクションで削除
+```
+
+**復旧はすべて次へ統一します。**
+
+> `Finalizing` 以降で中断した場合、**暫定会計を取り消し、新しい `finalizedAt` で手順 3 から再開する。**
+
+例外はありません。`ReadyToPublish` も同様です（理由は「復旧の内容は状態で決まります」の項）。
 
 **手順 8 を省くと、書き出しのたびにコミット行が永久に蓄積します。** ジャーナルは中断からの復旧のためだけに存在するので、役目を終えたら消します。
 
@@ -3188,7 +3495,7 @@ struct OutputRecord: Sendable {
 
 > この加工済み写真のデータが失われました。元の写真が残っていれば、同じ設定でもう一度作成できます（無料枠は消費しません）。
 
-**手順 3 と 4 を逆にしてはいけません。** 先に `AccountingCommitted` を書くと、台帳が未反映のまま「反映済み」として復旧されます。この順なら 3 と 4 の間で落ちても状態は `FileVerified` のままなので、台帳更新を冪等に再適用できます。
+**手順 4 と 5 を逆にしてはいけません。** 先に `AccountingCommitted` を書くと、台帳が未反映のまま「反映済み」として復旧されます。この順なら 4 と 5 の間で落ちても状態は `Finalizing` のままなので、台帳更新を冪等に再適用できます。
 
 手順 0 で `Prepared` を先に書くのは、**生成中に落ちたときに孤児となる一時ファイルを起動時に特定するため**です。ジャーナルに記録のない一時ファイルは掃除対象になります。
 
@@ -3214,7 +3521,7 @@ struct SignedPayload: Sendable {
 ```
 
 - HMAC の対象は **`signature` 自身を除く全永続フィールド**
-- シリアライズ順序を固定する（正準形）
+- **専用のバイナリエンコーダで正準形を作る**（下記）
 - **スキーマバージョンを署名対象へ含める**
 - **`payloadType` を署名対象へ含める**（下記）
 - `ExportCommit` の insert / update の**たびに再署名する**
@@ -3222,7 +3529,51 @@ struct SignedPayload: Sendable {
 - 検証はバイト列の**定数時間比較**で行う
 - マイグレーション時は旧形式で検証してから新形式で再署名する
 
-**`payloadType` を含めないと、種別をまたいだ付け替えを検出できません。** 3 種のデータが同じ鍵で署名されているため、署名だけを見れば有効な `SubscriptionState` の blob を `UsageLedger` の保存先へ置いても検証を通ります。復号ではなく検証しかしていないため、内容の構造が偶然パースできれば通過します。`payloadType` を署名対象に含めるか、用途別に鍵を派生させます（`HKDF` で `payloadType` を info とする等）。v1 は前者を採ります。実装が単純で、鍵の数が増えないためです。
+**`payloadType` を含めないと、種別をまたいだ付け替えを検出できません。** 3 種のデータが同じ鍵で署名されているため、署名だけを見れば有効な `SubscriptionState` の blob を `UsageLedger` の保存先へ置いても検証を通ります。復号ではなく検証しかしていないため、内容の構造が偶然パースできれば通過します。
+
+##### 正準形は専用エンコーダで作る
+
+**「シリアライズ順序を固定する」だけでは実装が定まりません。** `UsageLedger` には次が含まれます。
+
+- `Set<String>`（`consumedExportIDs`）
+- `[SourceRecord]` / `[GrantEntry]` / `[TrialEntry]` / `[TrialReservation]`
+- `Set<SourceAlias>`
+- `Date`
+- `UUID`
+
+**`JSONEncoder` や binary plist を正準形として使いません。** 集合と配列の順序、`Date` の表現（秒か ミリ秒か、浮動小数の丸め）、辞書のキー順が実装とバージョンに依存します。**同じ意味の台帳から別の署名が出れば、正規の起動が `IntegrityFailure` になります。**
+
+HMAC 専用のバイナリエンコーダを定義します。
+
+| 型 | 符号化 |
+| --- | --- |
+| 先頭 | `payloadType`（`UInt32`）＋ `schemaVersion`（`UInt32`） |
+| 整数 | **ビッグエンディアン**の固定長 |
+| `enum` | 固定の `UInt32`（`case` の宣言順に依存させない） |
+| 可変長データ | `UInt32` の長さ前置き |
+| `Date` | **UTC epoch milliseconds の `Int64`** |
+| `Double` | **IEEE 754 の `bitPattern`**（文字列化しない） |
+| `UUID` | 16 バイトのビッグエンディアン |
+| `Optional` | **`0` / `1` のタグ** ＋ 値（`nil` は タグのみ） |
+| `Set` | 各要素を符号化し、**バイト列の辞書順にソート**してから連結 |
+| 配列（`grants` 等） | `sourceID` → `firstSuccessAt` → `ownerExportID` の順に符号化し、**同じくバイト列の辞書順にソート** |
+
+**配列もソートします。** 論理的には順序に意味がないため、追加順の違いで署名が変わってはいけません。
+
+`contentFingerprint` の正準化（6.2.4）と同じ方式ですが、**エンコーダは共用しません。** 用途が違えばスキーマ変更のタイミングも違い、片方の変更がもう片方の署名を壊すためです。
+
+##### 鍵の用途を分離する
+
+**同じマスター鍵を複数の用途で直接使いません。**
+
+| 用途 | 派生ラベル |
+| --- | --- |
+| 台帳・購入状態・コミットの署名 | `payload-signing-v1` |
+| `providerAssetKeyHash` のソルト（6.2.4） | `source-provider-key-v1` |
+
+`CryptoKeyStore` が保持するマスター鍵から **HKDF** で派生させます。`payloadType` を info に含めて用途ごとに鍵を分ける方式も採れますが、v1 では `payloadType` を署名対象へ含める方式とします。実装が単純で、鍵の数が増えないためです。
+
+**署名とソルトを分けるのは、性質が違うからです。** ソルトは値の秘匿が目的で、署名鍵は完全性の保証が目的です。同じ鍵を使うと、片方の運用（ローテーション等）がもう片方へ波及します。
 
 ##### HMAC の脅威モデル
 
@@ -3256,12 +3607,39 @@ v1 の脅威モデルを明記します。
 
 「破棄して続ける」の挙動は次のとおりです。
 
-- **現在の署名済み `UsageLedger` は変更しない**
 - クォータやトライアルクレジットを払い戻さない
+- **台帳側の予約を先に確定させる**（下記）
 - 該当の `ExportCommit`、出力ファイル、`OutputRecord` を削除する
 - 復旧エラーを解除し、新規書き出しを許可する
 
 払い戻さないため利用者に不利になりえますが、**破損した DB の情報を根拠に権利を増やす方が危険**です。改ざんによる枠の水増しに直結します。アプリが永久に使用不能になる状態も同時に避けられます。
+
+###### 予約を放置するとクレジットが払い戻される
+
+**「台帳を変更しない」では不十分でした。** 次の経路でトライアルクレジットが戻ります。
+
+1. 署名不正のコミットに対応する `trialReservations` が台帳にある
+2. 「破棄して続ける」で `ExportCommit` だけを削除する
+3. 次回起動時、**その予約は有効なコミットに対応しない**（起動順序の手順 3）
+4. 孤児予約として削除される
+5. **クレジットが 1 枚戻る**
+
+「払い戻さない」という方針と矛盾します。
+
+**署名済み `UsageLedger` 側の予約は信頼できます。** 破損しているのは DB のコミット行であり、台帳ではありません。破棄時に次を行います。
+
+| 順 | 操作 |
+| --- | --- |
+| 1 | `trialReservations` に対象 `exportID` の予約があるか確認する |
+| 2 | あれば、**同じ `sourceID` の `TrialEntry` へ変換する**（消費として確定させる） |
+| 3 | 台帳の保存が成功したことを確認する |
+| 4 | その後で `ExportCommit` と出力ファイルを削除する |
+
+**手順 3 が失敗した場合、コミットを削除せず復旧エラーを維持します。** 台帳を確定できていないのにコミットを消すと、次回起動で孤児予約として払い戻されます。
+
+`TrialEntry` の `ownerExportID` には対象の `exportID` をそのまま入れます。**その書き出しは成功していませんが、クレジットは消費されたものとして扱います。** これが「払い戻さない」の意味です。
+
+同じ素材を再度処理する場合、`trialEntries` に該当があるため `batchTrial(false)` となり、追加のクレジットは消費しません（6.5.6.1）。**利用者から見れば「1 枚分の試用機会を使ったが、その素材はまた試せる」**という状態になります。
 
 ##### 起動時の順序
 
@@ -3271,20 +3649,24 @@ v1 の脅威モデルを明記します。
 
 | 順 | 操作 | 依存 |
 | --- | --- | --- |
-| 1 | `UsageLedger` を読み込み、検証し、必要なら修復する（6.2.5） | — |
-| 2 | `ExportCommit` を読み込み、行ごとの署名を検証する | — |
+| 0 | **`PRAGMA journal_mode` を検証する**（WAL なら復旧エラー。7.1） | — |
+| 1 | `UsageLedger` を読み込み、検証し、必要なら修復する（6.2.5） | 0 の完了 |
+| 2 | `ExportCommit` を読み込み、行ごとの署名を検証する | 0 の完了 |
 | 3 | **有効なコミットに対応しない `trialReservations` を削除する**（孤児予約） | 1・2 の完了 |
 | 4 | 有効な未完了コミットを復旧する（下表） | 1・2・3 の完了 |
-| 5 | `PendingFileDeletion` と孤児ファイルを回収する（8.4.1） | 4 の完了 |
-| 6 | 未受け渡し出力を復元する（6.2.2.1） | 4 の完了 |
-| 7 | **`evaluateUpdate` を実行する**（6.8.5） | 6 の完了。`Generated` の件数が必要 |
-| 8 | `.required` なら更新画面、それ以外は通常画面を表示し、**新しい書き出しを許可する** | 全手順の完了 |
+| 5 | **DB 間参照の整合を検査する**（7.1 の「外部キーはスキーマ境界をまたげない」） | 4 の完了 |
+| 6 | `PendingFileDeletion` と孤児ファイルを回収する（8.4.1） | 5 の完了 |
+| 7 | 未受け渡し出力を復元する（6.2.2.1） | 5 の完了 |
+| 8 | **`evaluateUpdate` を実行する**（6.8.5） | 7 の完了。`Generated` の件数が必要 |
+| 9 | `.required` なら更新画面、それ以外は通常画面を表示し、**新しい書き出しを許可する** | 全手順の完了 |
 
 **手順 3 を手順 4 より前に置きます。** 孤児予約はクレジットを占有したままなので、これを回収する前に新しい認可を許可すると、実際には空いているクレジットを「使用中」と判定します。
 
+**手順 5 を手順 4 の後に置きます。** ロールバックが `OutputRecord` を削除するため、先に検査すると存在しない不一致を検出します。
+
 **署名検証に失敗したコミットに対応する予約は、自動削除しません。** そのコミットが会計済みかどうかを判断できない以上（7.4.3 の「コミット行の改ざん対策」）、予約だけを消すと台帳と食い違います。**復旧エラーが解消されるまで予約を保持します。**
 
-手順 5 を手順 4 の後に置くのは、ロールバックが `PendingFileDeletion` へ行を追加しうるためです。先に GC を走らせると、その回で回収できません。
+手順 6 を手順 5 の後に置くのは、ロールバックと孤児削除が `PendingFileDeletion` へ行を追加しうるためです。先に GC を走らせると、その回で回収できません。
 
 先に新しい書き出しを許可すると、あとから古いコミットをロールバックした際に、**すでに進んだ現在の台帳まで壊しかねません**。
 
@@ -3562,7 +3944,7 @@ PNG で原寸のまま 100 個保存すると数十 MB から 100MB を超えま
 
 ### 9.1 エラー型
 
-仕様 26.1 の 20 コードを `sealed interface AppError` として表現します。各要素は再試行可否、利用者向けメッセージ、診断フィールドを持ちます。
+仕様 26.1 の 20 コードを `enum AppError: Error` として表現します。各要素は再試行可否、利用者向けメッセージ、診断フィールドを持ちます。
 
 仕様 26.2 の再試行可否は型の上で表現し、実行時判断に委ねません。
 
@@ -3586,7 +3968,7 @@ func log(_ event: some LogEvent)   // log(String) は存在しない
 
 ### 9.3 握りつぶしの禁止
 
-すべての `catch` 箇所で `AppError` へ変換したうえで `log` を通すことを規約とします。`runCatching` の裸使用は lint で禁止します。
+すべての `catch` 節で `AppError` へ変換したうえで `log` を通すことを規約とします。`try?` による握りつぶしは lint で禁止し、`do / catch` または `Result` で明示的に扱います。
 
 ### 9.4 クラッシュ解析
 
@@ -3792,9 +4174,11 @@ struct RemoteConfigEnvelope: Sendable, Decodable {
 
 | 手段 | 用途 |
 | --- | --- |
-| テスト用フックによる `exit(0)` | 各手順の直後で決定的に落とす |
-| デバッガからの kill -9 | シグナルハンドラを経由しない終了 |
+| テスト用フックによる **`_exit(1)`** | 各手順の直後で決定的に落とす。`exit(0)` は正常終了であり `atexit` ハンドラやバッファのフラッシュが走るため、クラッシュ境界の検証にならない |
+| 外部プロセスからの `SIGKILL` | シグナルハンドラを経由しない終了。テストランナーとは別プロセスから送る |
 | メモリ圧迫によるジェッツァム | 実運用に最も近い経路。一括処理 50 枚で再現する |
+
+**強制終了フックはテスト専用ビルドにのみ含めます。** 手順ごとの中断点を製品ビルドへ残しません。ビルド構成のコンパイル条件（`#if DEBUG_FAULT_INJECTION`）で分離し、リリースビルドに含まれないことを CI で確認します。
 
 各項目は、**検証が成立する最も低い層**へ置きます。以下 12.1.1〜12.1.4 で層ごとに列挙します。対象は仕様 30.1 の全項目に加え、本設計で追加した判定を含みます。
 
@@ -3804,7 +4188,7 @@ struct RemoteConfigEnvelope: Sendable, Decodable {
 
 - `QuotaPolicy`（月跨ぎ、TZ 変更、時刻巻き戻し、うるう年、月末 23:59:59 → 00:00:00、24 時間境界）
 - `EntitlementResolver`（仕様 27.4 の全購入状態）
-- `BatchTriagePolicy`（5 つの要確認理由の各単独・複合、空集合）
+- `BatchTriagePolicy`（6 つの要確認理由の各単独・複合、空集合）
 - `triage` の入力が 5.7.1 の共通モデルだけであること。OS 固有の値に依存しないこと（6.5.2）
 - `ReviewIssue` が**発生単位**で列挙され、小さい顔が 3 人なら 3 件になること（6.5.2）
 - `issueID` が `detectionRevision` を含み、`OverlappingFaces` では顔 ID が辞書順に並ぶこと（6.5.2）
@@ -3840,6 +4224,12 @@ struct RemoteConfigEnvelope: Sendable, Decodable {
 - 同一素材 の再書き出しで `firstSuccessAt` が更新されないこと（6.2.0）
 - 端末時刻を過去へ戻しても 24 時間の窓が延びないこと。`effectiveNow` が後退しないこと（6.2.2.5）
 - `Domain` の時間判定が `now` ではなく `effectiveNow` だけを受け取ること（6.2.2.5）
+- **`isSameSource` を直接使わず、`sourceID` で同一性を判定していること**（6.2.4）
+- **provider 一致と content 一致が別レコードを指す場合に、1 件へ統合されること**（6.2.4）
+- **統合時に最も古い `firstSuccessAt` が維持され、トライアルが消費済みへ倒れること**（6.2.4）
+- **`DetectedFace` の角度が非 Optional であり、`Measurement<UnitAngle>` から度へ変換されること**（5.7.1）
+- **`lowConfidence` が顔ごとに 1 件の `ReviewIssue` になること**（6.5.2）
+- **6 種類の要確認理由すべてについて、単独・複合・空の判定が正しいこと**（6.5.2）
 - 未受け渡し出力の削除期限が端末時刻の変更で延びないこと（6.2.2.5）
 - `monthlyBlockedPeriod == period` のとき、`consumedExportIds` が空でも `Blocked(LedgerIntegrityFailure)` になること（6.2）
 - `trialIntegrityLocked` のとき `remainingCredits` が 0 になり、トライアル画面へ進入できないこと（6.5.6.1）
@@ -3970,7 +4360,11 @@ struct RemoteConfigEnvelope: Sendable, Decodable {
 - `ExportCommit` が状態遷移のたびに再署名され、正規の更新で検証失敗しないこと（7.4.3）
 - `SignedPayload` の署名対象に `payloadType` が含まれ、種別間の付け替えが検出されること（7.4.3）
 - 実 Keychain の鍵で署名・検証が往復すること。鍵の破棄が `IntegrityFailure` になること（6.2.5）
-- `ProtectedBlobStore` のデータと HMAC 鍵がともにバックアップ対象外であり、再インストール後が `Missing` になること（6.2.5 / 7.3.1）
+- `ProtectedBlobStore` のデータと HMAC 鍵がともにバックアップ対象外であること（6.2.5 / 7.3.1）
+- **blob `Missing` / 鍵 `Missing` で新規台帳が作られること**（7.3.2）
+- **blob `Missing` / 鍵 `Existing` でも新規台帳が作られ、復旧エラーにならないこと**（7.3.2）
+- 各ディレクトリのデータ保護クラスが 7.3.3 の表と一致すること
+- ロック中に `.complete` のファイルへアクセスした場合、破損ではなく「保護データ利用不可」として処理が一時停止すること（7.3.3）
 - `OutputRecord` の実体解決が `outputFileID` 経由であり、パス文字列の改変で専用ディレクトリ外を削除できないこと（7.4.3）
 - `StampAsset` の作成が atomic rename を経ること（8.4.1）
 - 写真ライブラリ登録日時の引き継ぎ（7.6）を、保存後に読み戻して検証すること
@@ -4006,11 +4400,21 @@ struct RemoteConfigEnvelope: Sendable, Decodable {
 
 仕様 34.5 が「完全自動を約束しない」と定めている以上、閾値でビルドを落とすのは不適切です。リリース間で検出率が有意に低下した場合のみ調査対象とします。
 
-同じ素材セットで `BatchTriagePolicy` の要確認率も計測します。要確認率が高すぎると Pro の価値が失われ、低すぎると見落としが増えるためです。`ExtremePose` の角度閾値（16 節）はこの計測から決めます。
+同じ素材セットで `BatchTriagePolicy` の要確認率も計測します。要確認率が高すぎると Pro の価値が失われ、低すぎると見落としが増えるためです。`extremePose` の角度閾値と `lowConfidence` の信頼度閾値（16 節）はこの計測から決めます。
 
 **固定の素材セットを流し、検出率と要確認率をリリース間で監視します。** iOS のバージョン更新で Vision の検出特性が変わることがあり、閾値の妥当性が崩れます。前リリースとの差が一定以上に開いた場合は閾値を見直します。
 
-iOS の `VNFaceObservation.confidence` は、この回帰監視でのみ参考値として記録します。トリアージには使いません（6.5.2）。
+##### `confidence` の有効性を先に判定する
+
+**`confidence` は 6.5.2 のトリアージに使います**（v1.x では使わないとしていましたが、iOS 単独化で方針が変わりました）。
+
+ただし、閾値を有効にする前に **5.7.1 の受入条件**を満たすことを確認します。この計測を先に行い、値が変動しない、あるいは検出品質と相関しない場合は `lowConfidence` をトリアージから外します。
+
+| 計測項目 | 判定 |
+| --- | --- |
+| `confidence` の分布（ヒストグラム） | 常に `1.0` に張り付いていないこと |
+| 目視で誤検出・見落とし近傍と判定した顔の `confidence` | 全体分布より有意に低いこと |
+| リビジョンを変えたときの分布の差 | 採用するリビジョンを固定する根拠として記録する |
 
 ### 12.3 プライバシーの受入テスト
 
@@ -4024,7 +4428,7 @@ iOS の `VNFaceObservation.confidence` は、この回帰監視でのみ参考�
 
 ### 12.4 アクセシビリティ
 
-仕様 29 章を受入条件とします。CMP は Canvas 自前描画部分の `semantics` 付与が必須のため、以下を明示的にテストします。
+仕様 29 章を受入条件とします。SwiftUI の `Canvas` は既定でアクセシビリティ要素を持たないため、`accessibilityLabel` / `accessibilityValue` / `accessibilityRepresentation` の明示的な付与が必須です。以下を明示的にテストします。
 
 - 顔レビュー画面の各顔領域に読み上げ可能なラベルがある
 - 処理進捗が読み上げ可能である
@@ -4211,7 +4615,7 @@ Web モックである以上、以下は本書の記述どおりには再現で�
 | **App Store ID** | 更新誘導のリンク先に必要（6.8.7）。App Store Connect でアプリを作成した時点で確定 | ストア登録時 |
 | **`user-data.db` と `stamps/` のバックアップ方針** | 仕様 20.4 が初期リリース前の決定としている。**2 つをまとめて決める**（7.3.1）。片方だけ復元されると参照と実体が食い違う | v1 実装中 |
 | **`lowConfidence` の閾値** | `FaceObservation.confidence` の下限。実素材の分布を見て決定（5.7.1 / 6.5.2） | v1 実機検証時 |
-| プライバシーポリシーの記載 | トライアル台帳（`SourceIdentity`）を期限なく端末内へ保持することを記載し、7.2.3 の例外と整合させる | ストア申請前 |
+| プライバシーポリシーの記載 | トライアル台帳（`SourceRecord`）を期限なく端末内へ保持することを記載し、7.2.3 の例外と整合させる | ストア申請前 |
 | 共有結果 `Unknown` 後の利用者操作 | `Generated` を維持するため、共有後に画面を離れると「保存していない写真があります」が出る。「共有できましたか？」と明示確認して `Delivered` にするか、`Generated` のまま保存・再共有・破棄を選ばせるか。OS 結果の写像だけでなく、その後の操作まで定義が必要（7.4.2） | 実装計画で確定 |
 | 基本スタンプの意匠 | ベクターで自作する 12〜20 種の具体的な図案 | v1 実装中 |
 | `extremePose` の角度閾値 | yaw / pitch の絶対値が何度を超えたら警告するか。検出品質テストの結果から決定（6.5.2） | v1 実機検証時 |
