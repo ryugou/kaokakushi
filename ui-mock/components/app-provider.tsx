@@ -114,12 +114,26 @@ export const BATCH_STATUS_LABELS: Record<BatchItemStatus, string> = {
   paused: "一時停止",
 }
 
+/**
+ * 要確認に対するユーザーの判断。
+ * 警告そのものは消えない。どう扱うと決めたかを記録する。
+ */
+export type ReviewResolution = "accepted-as-is" | "manual-region-added" | "unmasked-export-confirmed"
+
+export const RESOLUTION_LABELS: Record<ReviewResolution, string> = {
+  "accepted-as-is": "このままでよいと判断",
+  "manual-region-added": "手動で範囲を追加",
+  "unmasked-export-confirmed": "顔を隠さず保存",
+}
+
 export type BatchItem = {
   mediaId: string
   status: BatchItemStatus
   reasons: ReviewReason[]
-  /** 要確認をユーザーが解消したか */
+  /** 要確認をユーザーが確認したか */
   resolved: boolean
+  /** 確認した場合、どう扱うと決めたか。reasons は変化しない */
+  resolution: ReviewResolution | null
   /** 共通設定とは別に個別編集したか */
   hasOverride: boolean
   /** 加工後サムネイルの生成が終わったか */
@@ -284,7 +298,7 @@ type AppContextValue = {
   /** 「1枚ずつ確認」で個別に確認を終えた写真 */
   reviewedIds: string[]
   markReviewed: (mediaId: string) => void
-  resolveItem: (mediaId: string) => void
+  resolveItem: (mediaId: string, resolution?: ReviewResolution) => void
   resolveGroup: (reason: ReviewReason) => void
   markOverride: (mediaId: string) => void
   startBatchDetection: () => void
@@ -296,6 +310,8 @@ type AppContextValue = {
   resetBatch: () => void
   overrideCount: number
   applyCommonSettings: (mode: "keep" | "overwrite") => void
+  /** 共通の見た目設定を変えたときに呼ぶ */
+  onCommonVisualChanged: () => void
 
   /** 端末の空き容量（デモ用） */
   freeSpaceMb: number
@@ -370,7 +386,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const canBatchFull = plan === "pro"
   const canBatchTrial = trialCredits > 0
   const hasAds = plan === "free"
-  const batchMaxSelectable = canBatchFull ? BATCH_MAX_ITEMS : Math.max(1, Math.min(trialCredits, TRIAL_CREDITS))
+  // トライアルは「総枚数5枚まで」「新規写真は残クレジットまで」の2条件。
+  // 総枚数だけで絞ると、残0枚のとき消費済みの写真すら選べなくなる。
+  const batchMaxSelectable = canBatchFull ? BATCH_MAX_ITEMS : TRIAL_CREDITS
   const canExportSingle = plan !== "free" || remainingFree > 0
   // 有料スタンプで作った既存作品は、Freeでも閲覧と再書き出しはできるが変更はできない
   const lockedEdit = plan === "free" && reexportOf?.paidFeature !== undefined
@@ -686,19 +704,61 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   /* 一括処理                                                        */
   /* -------------------------------------------------------------- */
 
-  const invalidateGrid = React.useCallback(() => {
+  /**
+   * 確認状態の解除は、変更が見た目へ影響する写真だけに限定する。
+   * 一律に全解除すると、50枚のうち1枚直しただけで残り49枚も再確認になる。
+   */
+  const dropOverview = React.useCallback(() => {
     setGridConfirmed(false)
     setReachedEnd(false)
-    setReviewedIds([])
   }, [])
+
+  /** 個別写真の見た目を変えた */
+  const onItemVisualChanged = React.useCallback(
+    (id: string) => {
+      setReviewedIds((prev) => prev.filter((x) => x !== id))
+      setBatchItems((prev) =>
+        prev.map((item) => (item.mediaId === id ? { ...item, resolved: false, resolution: null } : item)),
+      )
+      dropOverview()
+    },
+    [dropOverview],
+  )
+
+  /** 共通設定を変えた。個別設定を持つ写真は影響を受けない */
+  const onCommonVisualChanged = React.useCallback(() => {
+    setBatchItems((prev) => {
+      const affected = prev.filter((i) => !i.hasOverride).map((i) => i.mediaId)
+      setReviewedIds((ids) => ids.filter((x) => !affected.includes(x)))
+      return prev.map((item) =>
+        item.hasOverride ? item : { ...item, resolved: false, resolution: null },
+      )
+    })
+    dropOverview()
+  }, [dropOverview])
+
+  /** 写真を追加した。追加分だけ未確認 */
+  const onSelectionAdded = React.useCallback(
+    (id: string) => {
+      setReviewedIds((prev) => prev.filter((x) => x !== id))
+      dropOverview()
+    },
+    [dropOverview],
+  )
+
+  /** 写真を削除した。残りの確認状態は維持する */
+  const onSelectionRemoved = React.useCallback(() => {
+    dropOverview()
+  }, [dropOverview])
 
   const toggleBatchSelection = React.useCallback(
     (id: string) => {
       setBatchSelection((prev) => {
         if (prev.includes(id)) {
-          invalidateGrid()
+          onSelectionRemoved()
           return prev.filter((x) => x !== id)
         }
+        // 条件1: 1バッチの総枚数
         if (prev.length >= batchMaxSelectable) {
           setUpgrade(
             canBatchFull
@@ -707,17 +767,26 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           )
           return prev
         }
-        invalidateGrid()
+        // 条件2: 消費済み台帳にない写真の枚数が残クレジットを超えないこと
+        if (!canBatchFull && !trialChargedIds.includes(id)) {
+          const freshSelected = prev.filter((x) => !trialChargedIds.includes(x)).length
+          if (freshSelected >= trialCredits) {
+            setUpgrade({ reason: "batch-size" })
+            return prev
+          }
+        }
+        onSelectionAdded(id)
         return [...prev, id]
       })
     },
-    [batchMaxSelectable, canBatchFull, invalidateGrid],
+    [batchMaxSelectable, canBatchFull, onSelectionAdded, onSelectionRemoved, trialChargedIds, trialCredits],
   )
 
   const clearBatchSelection = React.useCallback(() => {
     setBatchSelection([])
-    invalidateGrid()
-  }, [invalidateGrid])
+    setReviewedIds([])
+    dropOverview()
+  }, [dropOverview])
 
   const startBatchDetection = React.useCallback(() => {
     setBatchItems(
@@ -726,6 +795,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         status: "detecting" as BatchItemStatus,
         reasons: triage(findMedia(id)),
         resolved: false,
+        resolution: null,
         hasOverride: false,
         thumbReady: false,
         willFail: DEMO_ERROR_IDS.includes(id),
@@ -784,10 +854,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setGridConfirmed(true)
   }, [canConfirmGrid])
 
-  const resolveItem = React.useCallback((id: string) => {
+  /** 警告は消さず、どう扱うと決めたかを記録する */
+  const resolveItem = React.useCallback((id: string, resolution: ReviewResolution = "accepted-as-is") => {
     setBatchItems((prev) =>
       prev.map((item) =>
-        item.mediaId === id ? { ...item, resolved: true, status: "waiting" as BatchItemStatus } : item,
+        item.mediaId === id
+          ? { ...item, resolved: true, resolution, status: "waiting" as BatchItemStatus }
+          : item,
       ),
     )
   }, [])
@@ -798,7 +871,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setBatchItems((prev) =>
       prev.map((item) =>
         item.reasons.includes(reason) && !item.reasons.includes("no-face")
-          ? { ...item, resolved: true, status: "waiting" as BatchItemStatus }
+          ? {
+              ...item,
+              resolved: true,
+              resolution: "accepted-as-is" as ReviewResolution,
+              status: "waiting" as BatchItemStatus,
+            }
           : item,
       ),
     )
@@ -807,9 +885,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const markOverride = React.useCallback(
     (id: string) => {
       setBatchItems((prev) => prev.map((item) => (item.mediaId === id ? { ...item, hasOverride: true } : item)))
-      invalidateGrid()
+      onItemVisualChanged(id)
     },
-    [invalidateGrid],
+    [onItemVisualChanged],
   )
 
   /** 共通設定を変えたときの扱い。個別設定を残すか、すべて上書きするか */
@@ -818,9 +896,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (mode === "overwrite") {
         setBatchItems((prev) => prev.map((item) => ({ ...item, hasOverride: false })))
       }
-      invalidateGrid()
+      onCommonVisualChanged()
     },
-    [invalidateGrid],
+    [onCommonVisualChanged],
   )
 
   const startBatchExport = React.useCallback(() => {
@@ -1040,6 +1118,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     resetBatch,
     overrideCount,
     applyCommonSettings,
+    onCommonVisualChanged,
     freeSpaceMb,
     lowStorage,
     setLowStorage,

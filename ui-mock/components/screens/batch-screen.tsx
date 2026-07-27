@@ -31,9 +31,11 @@ import { EFFECT_LABELS, type EffectType } from "@/components/face-mask"
 import {
   BATCH_MAX_ITEMS,
   BATCH_STATUS_LABELS,
+  RESOLUTION_LABELS,
   useApp,
   type BatchItem,
   type ExportRatio,
+  type ReviewResolution,
 } from "@/components/app-provider"
 import { MediaCanvas, MediaThumb } from "@/components/media-canvas"
 import { PrivacyNote, ScreenHeader, SectionTitle } from "@/components/app-bits"
@@ -720,8 +722,8 @@ function ReviewStage() {
       <PreviewDialog
         item={preview}
         onClose={() => setPreview(null)}
-        onResolve={(id) => {
-          resolveItem(id)
+        onResolve={(id, resolution) => {
+          resolveItem(id, resolution)
           setPreview(null)
         }}
         onOverride={(id) => {
@@ -799,7 +801,7 @@ function PreviewDialog({
 }: {
   item: BatchItem | null
   onClose: () => void
-  onResolve: (mediaId: string) => void
+  onResolve: (mediaId: string, resolution: ReviewResolution) => void
   onOverride: (mediaId: string) => void
 }) {
   const { effect } = useApp()
@@ -828,20 +830,45 @@ function PreviewDialog({
 
             {needsAction ? <ReasonList reasons={item.reasons} /> : null}
 
+            {/* 警告は消さず、どう扱うと決めたかを記録する */}
             <div className="flex flex-col gap-2">
               {needsAction ? (
-                <Button
-                  size="lg"
-                  className="h-12 rounded-2xl text-sm font-bold"
-                  onClick={() => onResolve(item.mediaId)}
-                >
-                  内容を見た。確認済みにする
-                </Button>
+                <>
+                  <p className="text-[11px] font-bold text-muted-foreground">この写真をどうしますか？</p>
+                  <Button
+                    size="lg"
+                    className="h-12 rounded-2xl text-sm font-bold"
+                    onClick={() => onResolve(item.mediaId, "accepted-as-is")}
+                  >
+                    内容を見た。このままでよい
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="lg"
+                    className="h-12 rounded-2xl text-sm font-bold"
+                    onClick={() => onResolve(item.mediaId, "manual-region-added")}
+                  >
+                    手動で隠す範囲を追加した
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="lg"
+                    className="h-12 rounded-2xl text-sm font-bold text-destructive"
+                    onClick={() => onResolve(item.mediaId, "unmasked-export-confirmed")}
+                  >
+                    顔を隠さずそのまま保存する
+                  </Button>
+                </>
+              ) : null}
+              {item.resolution ? (
+                <p className="rounded-xl bg-secondary px-3 py-2 text-[11px] leading-relaxed text-secondary-foreground">
+                  判断：{RESOLUTION_LABELS[item.resolution]}（警告の記録は残ります）
+                </p>
               ) : null}
               <Button
-                variant="outline"
+                variant="ghost"
                 size="lg"
-                className="h-12 rounded-2xl text-sm font-bold"
+                className="h-11 rounded-2xl text-sm"
                 onClick={() => onOverride(item.mediaId)}
               >
                 この写真だけ個別に調整する
