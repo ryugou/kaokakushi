@@ -7,7 +7,7 @@ import { Cake, Check, Crown, Heart, ImageIcon, PawPrint, Shapes, Smile, Sparkles
 import { cn } from "@/lib/utils"
 import { MEDIA_LIBRARY } from "@/lib/mock-data"
 import { myStampToArt, STAMP_SOURCES, type MyStamp } from "@/lib/stamps"
-import { useApp } from "@/components/app-provider"
+import { CUSTOM_STAMP_LIMIT, useApp } from "@/components/app-provider"
 import { PrivacyNote, ScreenHeader } from "@/components/app-bits"
 import { StampArtView } from "@/components/stamp-art"
 import { Button } from "@/components/ui/button"
@@ -39,18 +39,14 @@ const COLORS: { id: string; label: string; bg: string; fg: string }[] = [
   { id: "ink", label: "ブラック", bg: "bg-foreground/85", fg: "text-background" },
 ]
 
-/** 端末のなかにある画像（デモ用の素材＋写真ライブラリ） */
+/** 端末のなかにある画像（ファイルアプリのPNG＋写真ライブラリ） */
 const IMAGE_SOURCES = [
   ...STAMP_SOURCES,
-  ...MEDIA_LIBRARY.filter((m) => m.kind === "photo").map((m) => ({
-    id: m.id,
-    src: m.src,
-    label: m.title,
-  })),
+  ...MEDIA_LIBRARY.map((m) => ({ id: m.id, src: m.src, label: m.title })),
 ]
 
 export function CustomStampScreen() {
-  const { back, addMyStamp } = useApp()
+  const { back, addMyStamp, myStamps } = useApp()
   const [mode, setMode] = React.useState<Mode>("image")
   const [name, setName] = React.useState("")
   const [shape, setShape] = React.useState<Shape>("circle")
@@ -150,7 +146,9 @@ export function CustomStampScreen() {
                   )
                 })}
               </div>
-              <FieldDescription>PNGや写真を、そのままスタンプにできます</FieldDescription>
+              <FieldDescription>
+                写真ライブラリの画像とファイルアプリのPNGから選べます。透過PNGは透明なまま、それ以外は円か角丸で切り抜きます
+              </FieldDescription>
             </Field>
 
             <Field>
@@ -242,6 +240,14 @@ export function CustomStampScreen() {
           />
           <FieldDescription>あとから探しやすい名前をつけましょう</FieldDescription>
         </Field>
+
+        <div className="flex flex-col gap-1 rounded-2xl bg-secondary px-4 py-3 text-[11px] leading-relaxed text-secondary-foreground">
+          <p className="font-bold">登録するときの処理</p>
+          <p>・スタンプ用のサイズ（長辺1,024px程度）へ縮小します</p>
+          <p>・透過はそのまま保ちます</p>
+          <p>・元の画像は変更されません</p>
+          <p>・登録できるのは{CUSTOM_STAMP_LIMIT}個までです（現在 {myStamps.length}個）</p>
+        </div>
 
         <PrivacyNote />
       </div>

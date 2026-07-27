@@ -65,7 +65,7 @@ export function PrivacyNote({ className }: { className?: string }) {
   return (
     <p className={cn("flex items-center justify-center gap-1.5 text-[11px] text-muted-foreground", className)}>
       <Smartphone className="size-3.5 shrink-0" aria-hidden />
-      写真や動画は端末内で処理されます
+      選択した写真は端末内で処理され、外部サーバーへ送信されません
     </p>
   )
 }

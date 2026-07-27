@@ -92,7 +92,7 @@ export type MyStamp = {
   fg?: string
 }
 
-/** 端末のなかにある画像（デモ用の素材） */
+/** 端末のなかにある画像（デモ用） */
 export type StampSource = { id: string; src: string; label: string }
 
 export const STAMP_SOURCES: StampSource[] = [

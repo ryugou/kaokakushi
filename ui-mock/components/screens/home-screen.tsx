@@ -1,9 +1,8 @@
 "use client"
 
 import * as React from "react"
-import { ChevronRight, ImageIcon, Layers, Play, Settings, ShieldCheck, Smile, Sparkles, Video } from "lucide-react"
+import { ChevronRight, ImageIcon, Layers, Settings, ShieldCheck, Smile, Sparkles } from "lucide-react"
 
-import { cn } from "@/lib/utils"
 import { findMedia } from "@/lib/mock-data"
 import { FREE_MONTHLY_LIMIT, useApp } from "@/components/app-provider"
 import { AdSlot, PrivacyNote, SectionTitle } from "@/components/app-bits"
@@ -17,17 +16,28 @@ export function HomeScreen() {
     go,
     plan,
     hasAds,
-    canBatch,
+    canBatchFull,
+    canBatchTrial,
+    trialCredits,
     remainingFree,
     history,
     startEditing,
     requestUpgrade,
     openPicker,
-    videoLimitLabel,
+    guardNewWork,
   } = useApp()
-  const recent = history.slice(0, 6)
+
+  const recent = history.filter((h) => h.type === "single").slice(0, 6)
   const [info, setInfo] = React.useState<InfoTopic | null>(null)
   const outOfFree = plan === "free" && remainingFree === 0
+
+  const openBatch = () => {
+    if (canBatchFull || canBatchTrial) {
+      guardNewWork("まとめて加工", () => go("batch"))
+      return
+    }
+    requestUpgrade(plan === "standard" ? "batch-standard" : "batch-credit")
+  }
 
   return (
     <div className="flex flex-col gap-6 px-4 pt-2 pb-8">
@@ -45,22 +55,17 @@ export function HomeScreen() {
       </header>
 
       <div className="flex flex-col gap-3">
-        <div className="grid grid-cols-2 gap-3">
-          <PickCard
-            label="写真を選ぶ"
-            hint="1件ずつ加工"
-            icon={ImageIcon}
-            className="bg-primary text-primary-foreground"
-            onClick={() => openPicker("photo")}
-          />
-          <PickCard
-            label="動画を選ぶ"
-            hint={`顔を追いかけます・最大${videoLimitLabel}`}
-            icon={Video}
-            className="bg-card text-foreground ring-1 ring-foreground/10"
-            onClick={() => openPicker("video")}
-          />
-        </div>
+        <button
+          type="button"
+          onClick={openPicker}
+          className="flex h-36 flex-col items-start justify-between rounded-3xl bg-primary p-5 text-left text-primary-foreground shadow-sm transition-transform active:scale-[0.98]"
+        >
+          <ImageIcon className="size-9" aria-hidden />
+          <span>
+            <span className="block font-rounded text-lg font-bold">写真を選ぶ</span>
+            <span className="block text-xs opacity-85">1枚ずつ加工します</span>
+          </span>
+        </button>
         <p className="text-center text-sm font-medium text-foreground text-pretty">
           顔を自動で見つけて、かんたんに隠せます
         </p>
@@ -74,16 +79,16 @@ export function HomeScreen() {
               <span className="font-rounded text-base font-extrabold leading-none text-accent-foreground">
                 {remainingFree}
               </span>
-              <span className="text-[9px] text-accent-foreground">件</span>
+              <span className="text-[9px] text-accent-foreground">枚</span>
             </div>
             <div className="min-w-0 flex-1">
               <p className="text-sm font-bold">
-                {outOfFree ? "今月の無料保存を使い切りました" : `今月あと${remainingFree}件保存できます`}
+                {outOfFree ? "今月の無料保存を使い切りました" : `今月あと${remainingFree}枚保存できます`}
               </p>
               <p className="text-[11px] text-muted-foreground">
                 {outOfFree
-                  ? "単体で加工するならStandardで無制限"
-                  : `無料プランは月${FREE_MONTHLY_LIMIT}件・写真と動画をあわせた件数です`}
+                  ? "Standardなら1枚ずつ無制限で保存できます"
+                  : `無料プランは月${FREE_MONTHLY_LIMIT}枚まで保存できます`}
               </p>
             </div>
             <Button variant="ghost" size="icon-lg" className="size-9 rounded-full" onClick={() => go("pricing")}>
@@ -94,43 +99,41 @@ export function HomeScreen() {
         </Card>
       ) : null}
 
-      <section className="flex flex-col gap-3">
-        <SectionTitle
-          action={
-            <Button variant="link" size="sm" className="h-auto p-0 text-xs" onClick={() => go("history")}>
-              すべて見る
-            </Button>
-          }
-        >
-          最近加工したもの
-        </SectionTitle>
-        <div className="-mx-4 flex gap-3 overflow-x-auto px-4 pb-1">
-          {recent.map((item, index) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => startEditing(item.mediaId)}
-              className="w-24 shrink-0 text-left"
-            >
-              <div className="relative">
-                <MediaThumb
-                  media={findMedia(item.mediaId)}
-                  className="aspect-square w-24 ring-1 ring-foreground/10"
-                  effect={item.effect}
-                  priority={index === 0}
-                />
-                {item.kind === "video" ? (
-                  <span className="absolute bottom-1 left-1 grid size-5 place-items-center rounded-full bg-foreground/70 text-background">
-                    <Play className="size-2.5" aria-hidden />
-                  </span>
-                ) : null}
-              </div>
-              <p className="mt-1.5 truncate text-[11px] font-medium">{item.method}</p>
-              <p className="truncate text-[10px] text-muted-foreground">{item.processedAt}</p>
-            </button>
-          ))}
-        </div>
-      </section>
+      {recent.length > 0 ? (
+        <section className="flex flex-col gap-3">
+          <SectionTitle
+            action={
+              <Button variant="link" size="sm" className="h-auto p-0 text-xs" onClick={() => go("history")}>
+                すべて見る
+              </Button>
+            }
+          >
+            最近加工した写真
+          </SectionTitle>
+          <div className="-mx-4 flex gap-3 overflow-x-auto px-4 pb-1">
+            {recent.map((item, index) =>
+              item.type === "single" ? (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => guardNewWork("編集する", () => startEditing(item.mediaId))}
+                  className="w-24 shrink-0 text-left"
+                >
+                  {/* 履歴のサムネイルは必ず加工後の状態で表示する */}
+                  <MediaThumb
+                    media={findMedia(item.mediaId)}
+                    className="aspect-square w-24 ring-1 ring-foreground/10"
+                    effect={item.effect}
+                    priority={index === 0}
+                  />
+                  <p className="mt-1.5 truncate text-[11px] font-medium">{item.method}</p>
+                  <p className="truncate text-[10px] text-muted-foreground">{item.processedAt}</p>
+                </button>
+              ) : null,
+            )}
+          </div>
+        </section>
+      ) : null}
 
       <section className="flex flex-col gap-3">
         <SectionTitle>べんりな使いかた</SectionTitle>
@@ -138,9 +141,15 @@ export function HomeScreen() {
           <ShortcutRow
             icon={Layers}
             label="まとめて加工"
-            hint={canBatch ? "複数の素材を一度に加工" : "Proで使えます"}
-            badge={canBatch ? null : "Pro"}
-            onClick={() => (canBatch ? go("batch") : requestUpgrade("batch"))}
+            hint={
+              canBatchFull
+                ? "最大50枚をまとめて加工"
+                : canBatchTrial
+                  ? `一括処理お試し：あと${trialCredits}枚`
+                  : "お試しクレジットを使い切りました"
+            }
+            badge={canBatchFull ? null : canBatchTrial ? "お試し" : "Pro"}
+            onClick={openBatch}
           />
           <ShortcutRow
             icon={Smile}
@@ -196,37 +205,6 @@ function ShortcutRow({
         </span>
       ) : null}
       <ChevronRight className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-    </button>
-  )
-}
-
-function PickCard({
-  label,
-  hint,
-  icon: Icon,
-  className,
-  onClick,
-}: {
-  label: string
-  hint: string
-  icon: typeof ImageIcon
-  className?: string
-  onClick: () => void
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        "flex h-36 flex-col items-start justify-between rounded-3xl p-4 text-left shadow-sm transition-transform active:scale-[0.98]",
-        className,
-      )}
-    >
-      <Icon className="size-8" aria-hidden />
-      <span>
-        <span className="block font-rounded text-base font-bold">{label}</span>
-        <span className="block text-[11px] opacity-80">{hint}</span>
-      </span>
     </button>
   )
 }

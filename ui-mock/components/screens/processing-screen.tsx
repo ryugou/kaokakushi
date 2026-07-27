@@ -9,7 +9,7 @@ import { PrivacyNote } from "@/components/app-bits"
 import { Progress } from "@/components/ui/progress"
 
 export function ProcessingScreen() {
-  const { media, faces, hidden, effect, go, completeExport, effectLabel } = useApp()
+  const { media, faces, hidden, effect, go, completeSingleExport, effectLabel } = useApp()
   const [progress, setProgress] = React.useState(4)
   const doneRef = React.useRef(false)
 
@@ -26,14 +26,15 @@ export function ProcessingScreen() {
   React.useEffect(() => {
     if (progress < 100 || doneRef.current) return
     doneRef.current = true
-    completeExport()
+    completeSingleExport()
     const t = window.setTimeout(() => go("done"), 500)
     return () => window.clearTimeout(t)
-  }, [progress, completeExport, go])
+  }, [progress, completeSingleExport, go])
 
   if (!media) return null
 
-  const step = progress < 35 ? "顔をさがしています" : progress < 75 ? "顔を隠しています" : "書き出しています"
+  const step =
+    progress < 35 ? "顔をさがしています" : progress < 75 ? "顔を隠しています" : "加工した写真をつくっています"
 
   return (
     <div className="flex min-h-full flex-col items-center justify-center gap-6 px-6 py-10">
@@ -58,7 +59,7 @@ export function ProcessingScreen() {
       <div className="flex flex-col items-center gap-2">
         <p className="flex items-center gap-1.5 text-xs font-medium text-primary">
           <ShieldCheck className="size-4" aria-hidden />
-          写真・動画は外部へ送信していません
+          写真は外部へ送信していません
         </p>
         <PrivacyNote />
       </div>

@@ -1,24 +1,22 @@
 "use client"
 
-import { Camera, MapPinOff, Music2, ShieldCheck, Sparkles } from "lucide-react"
+import { AlertTriangle, Camera, CalendarClock, Lock, MapPinOff, ShieldCheck, Sparkles } from "lucide-react"
 
 import { cn } from "@/lib/utils"
-import { formatDuration } from "@/lib/mock-data"
 import {
   useApp,
-  type ExportQuality,
   type ExportRatio,
   type ExportTarget,
+  type FitMode,
 } from "@/components/app-provider"
-import { LockDot, ScreenHeader } from "@/components/app-bits"
+import { ScreenHeader } from "@/components/app-bits"
 import { MediaCanvas } from "@/components/media-canvas"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
 
 const TARGETS: { id: ExportTarget; label: string; hint: string; ratio: ExportRatio }[] = [
   { id: "ig-post", label: "Instagram投稿", hint: "正方形", ratio: "1:1" },
-  { id: "ig-story", label: "ストーリーズ／リール", hint: "たて長", ratio: "9:16" },
-  { id: "tiktok", label: "TikTok", hint: "たて長", ratio: "9:16" },
+  { id: "ig-story", label: "ストーリーズ", hint: "たて長", ratio: "9:16" },
   { id: "original", label: "元のサイズ", hint: "そのまま", ratio: "original" },
 ]
 
@@ -29,10 +27,10 @@ const RATIOS: { id: ExportRatio; label: string }[] = [
   { id: "original", label: "元の比率" },
 ]
 
-const QUALITIES: { id: ExportQuality; label: string; hint: string }[] = [
-  { id: "standard", label: "標準", hint: "軽くて速い" },
-  { id: "1080p", label: "1080p", hint: "きれい" },
-  { id: "4k", label: "4K", hint: "対応端末のみ" },
+const FIT_MODES: { id: FitMode; label: string; hint: string }[] = [
+  { id: "crop", label: "切り抜く", hint: "中央を残します" },
+  { id: "blur", label: "背景をぼかす", hint: "余白をぼかしで埋めます" },
+  { id: "contain", label: "全体を収める", hint: "余白は単色になります" },
 ]
 
 const CROP_INSET: Record<ExportRatio, string> = {
@@ -50,22 +48,25 @@ export function ExportScreen() {
     effect,
     exportSettings,
     updateExport,
+    updateMetadata,
     back,
     go,
-    canExport,
+    plan,
+    remainingFree,
+    canExportSingle,
     requestUpgrade,
-    canExport4K,
-    deviceSupports4K,
-    videoLimitLabel,
+    skipFaces,
+    reexportOf,
   } = useApp()
 
   if (!media) return null
 
-  const isVideo = media.kind === "video"
   const inset = CROP_INSET[exportSettings.ratio]
+  const meta = exportSettings.metadata
+  const locked = reexportOf !== null && plan === "free"
 
   const handleSave = () => {
-    if (!canExport) {
+    if (!canExportSingle) {
       requestUpgrade("export-limit")
       return
     }
@@ -91,9 +92,30 @@ export function ExportScreen() {
           </span>
         </MediaCanvas>
 
+        {locked ? (
+          <div className="flex items-start gap-2 rounded-2xl bg-secondary px-3 py-2.5">
+            <Lock className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden />
+            <p className="text-[11px] leading-relaxed text-secondary-foreground text-pretty">
+              このプロジェクトはそのまま書き出せます。編集するにはStandardが必要です。
+            </p>
+          </div>
+        ) : null}
+
+        {skipFaces ? (
+          <div className="flex items-start gap-2 rounded-2xl bg-chart-3/20 px-3 py-2.5">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-foreground" aria-hidden />
+            <p className="text-[11px] leading-relaxed text-foreground text-pretty">
+              顔は検出されませんでした。
+              {plan === "free"
+                ? `このまま保存すると、今月の無料枠を1枚使用します（残り${remainingFree}枚）。`
+                : "このまま保存すると、顔を隠さずに書き出します。"}
+            </p>
+          </div>
+        ) : null}
+
         <section className="flex flex-col gap-2">
           <h2 className="font-rounded text-sm font-bold">投稿先</h2>
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-3 gap-2">
             {TARGETS.map((t) => (
               <button
                 key={t.id}
@@ -106,15 +128,13 @@ export function ExportScreen() {
                     : "bg-card text-foreground ring-1 ring-foreground/10",
                 )}
               >
-                <span className="flex items-center gap-1.5 text-xs font-bold">
+                <span className="flex items-center gap-1.5 text-[11px] font-bold">
                   {t.id.startsWith("ig") ? (
-                    <Camera className="size-3.5" aria-hidden />
-                  ) : t.id === "tiktok" ? (
-                    <Music2 className="size-3.5" aria-hidden />
+                    <Camera className="size-3.5 shrink-0" aria-hidden />
                   ) : (
-                    <Sparkles className="size-3.5" aria-hidden />
+                    <Sparkles className="size-3.5 shrink-0" aria-hidden />
                   )}
-                  {t.label}
+                  <span className="truncate">{t.label}</span>
                 </span>
                 <span className="text-[10px] opacity-80">{t.hint}</span>
               </button>
@@ -144,102 +164,75 @@ export function ExportScreen() {
         </section>
 
         <section className="flex flex-col gap-2">
-          <h2 className="font-rounded text-sm font-bold">画質</h2>
+          <h2 className="font-rounded text-sm font-bold">比率が変わるときの処理</h2>
           <div className="grid grid-cols-3 gap-2">
-            {QUALITIES.map((q) => {
-              const locked = q.id === "4k" && !canExport4K
-              const unsupported = q.id === "4k" && canExport4K && !deviceSupports4K
-              return (
-                <button
-                  key={q.id}
-                  type="button"
-                  onClick={() => {
-                    if (locked) {
-                      requestUpgrade("export-4k")
-                      return
-                    }
-                    if (unsupported) return
-                    updateExport({ quality: q.id })
-                  }}
-                  aria-disabled={unsupported}
-                  className={cn(
-                    "relative flex h-14 flex-col items-center justify-center gap-0.5 rounded-2xl text-xs font-bold transition-colors",
-                    exportSettings.quality === q.id
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-card text-foreground ring-1 ring-foreground/10",
-                    (locked || unsupported) && "opacity-55",
-                  )}
-                >
-                  {q.label}
-                  <span className="text-[10px] font-medium opacity-80">
-                    {unsupported ? "この端末は非対応" : locked ? "Pro" : q.hint}
-                  </span>
-                  {locked ? <LockDot /> : null}
-                </button>
-              )
-            })}
+            {FIT_MODES.map((f) => (
+              <button
+                key={f.id}
+                type="button"
+                onClick={() => updateExport({ fitMode: f.id })}
+                className={cn(
+                  "flex h-16 flex-col items-center justify-center gap-0.5 rounded-2xl px-2 text-center text-[11px] font-bold transition-colors",
+                  exportSettings.fitMode === f.id
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-card text-foreground ring-1 ring-foreground/10",
+                )}
+              >
+                {f.label}
+                <span className="text-[10px] font-medium opacity-80">{f.hint}</span>
+              </button>
+            ))}
           </div>
-          <p className="px-1 text-[11px] leading-relaxed text-muted-foreground">
-            {canExport4K
-              ? "Proでは対応端末で4K書き出しを利用できます。"
-              : "FreeとStandardは最大1080pで書き出せます。4KはProの機能です。"}
-          </p>
         </section>
 
-        {isVideo ? (
-          <section className="flex flex-col gap-2">
-            <h2 className="font-rounded text-sm font-bold">動画の設定</h2>
-            <div className="flex flex-col gap-1 rounded-2xl bg-card p-2 ring-1 ring-foreground/10">
-              <SettingRow
-                label="音声を残す"
-                hint="消すと無音で保存されます"
-                checked={exportSettings.keepAudio}
-                onChange={(v) => updateExport({ keepAudio: v })}
-              />
-              <SettingRow
-                label="背景をぼかして縦動画にする"
-                hint="よこ長の動画をたて長に整えます"
-                checked={exportSettings.verticalBlur}
-                onChange={(v) => updateExport({ verticalBlur: v })}
-              />
-              <div className="flex items-center justify-between gap-3 px-3 py-3 text-xs">
-                <span className="font-medium">動画の長さ</span>
-                <span className="text-muted-foreground">
-                  {formatDuration(media.duration ?? 0)} ／ 上限{videoLimitLabel}
-                </span>
-              </div>
-              <div className="flex items-center justify-between gap-3 px-3 py-3 text-xs">
-                <span className="font-medium">予想処理時間</span>
-                <span className="text-muted-foreground">
-                  約{Math.max(5, Math.round((media.duration ?? 10) * 0.6))}秒
-                </span>
-              </div>
-            </div>
-          </section>
-        ) : null}
-
         <section className="flex flex-col gap-2">
-          <h2 className="font-rounded text-sm font-bold">安心のための設定</h2>
+          <h2 className="font-rounded text-sm font-bold">記録される情報</h2>
           <div className="rounded-2xl bg-card p-2 ring-1 ring-foreground/10">
             <SettingRow
-              label="位置情報などの記録を消す"
-              hint="撮影場所や機種の情報を残しません"
+              label="位置情報を削除"
+              hint="撮影場所を残しません"
               icon={<MapPinOff className="size-4 text-primary" aria-hidden />}
-              checked={exportSettings.stripMetadata}
-              onChange={(v) => updateExport({ stripMetadata: v })}
+              checked={meta.stripLocation}
+              onChange={(v) => updateMetadata({ stripLocation: v })}
+            />
+            <SettingRow
+              label="撮影機器の情報を削除"
+              hint="端末名やレンズの情報を残しません"
+              checked={meta.stripDevice}
+              onChange={(v) => updateMetadata({ stripDevice: v })}
+            />
+            <SettingRow
+              label="コメント・編集ソフトの情報を削除"
+              checked={meta.stripEditor}
+              onChange={(v) => updateMetadata({ stripEditor: v })}
+            />
+            <SettingRow
+              label="撮影日時を保持"
+              hint="写真アプリの並び順を保ちます"
+              icon={<CalendarClock className="size-4 text-primary" aria-hidden />}
+              checked={meta.keepCaptureDate}
+              onChange={(v) => updateMetadata({ keepCaptureDate: v })}
             />
           </div>
+          <p className="px-1 text-[11px] leading-relaxed text-muted-foreground">
+            撮影日時を削除しても、写真アプリ内の並び順は元の写真に合わせます。
+          </p>
           <p className="flex items-start gap-1.5 px-1 text-[11px] leading-relaxed text-muted-foreground">
             <ShieldCheck className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-            書き出しも端末内で行われます。選択した写真や動画は外部サーバーへ送信されません。元の写真や動画は変更されず、加工結果は別ファイルとして保存されます。
+            元の写真は変更されません。選択した写真は外部サーバーへ送信されず、加工結果は別ファイルとして保存されます。
           </p>
         </section>
       </div>
 
       <div className="sticky bottom-0 border-t bg-card/95 p-4 backdrop-blur">
         <Button size="lg" className="h-14 w-full rounded-2xl text-base font-bold" onClick={handleSave}>
-          保存する
+          加工した写真をつくる
         </Button>
+        {plan === "free" ? (
+          <p className="pt-2 text-center text-[11px] text-muted-foreground">
+            {canExportSingle ? `今月あと${remainingFree}枚保存できます` : "今月の無料保存を使い切りました"}
+          </p>
+        ) : null}
       </div>
     </div>
   )

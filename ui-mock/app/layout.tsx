@@ -16,7 +16,7 @@ const _rounded = M_PLUS_Rounded_1c({
 export const metadata: Metadata = {
   title: 'かおかくし | 顔をかんたんに隠してSNSへ',
   description:
-    '写真や動画に写った顔を自動で見つけて、モザイク・ぼかし・スタンプでかんたんに隠せるアプリ。処理は端末内で行われます。',
+    '写真に写った顔を自動で見つけて、モザイク・ぼかし・スタンプでかんたんに隠せるアプリ。選択した写真は端末内で処理されます。',
   generator: 'v0.app',
   icons: {
     icon: [

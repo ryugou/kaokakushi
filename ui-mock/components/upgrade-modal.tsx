@@ -2,7 +2,14 @@
 
 import { Check, Crown } from "lucide-react"
 
-import { FREE_MONTHLY_LIMIT, useApp, type Plan, type UpgradeReason } from "@/components/app-provider"
+import {
+  BATCH_MAX_ITEMS,
+  FREE_MONTHLY_LIMIT,
+  TRIAL_CREDITS,
+  useApp,
+  type Plan,
+  type UpgradeReason,
+} from "@/components/app-provider"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 
@@ -14,18 +21,18 @@ type Copy = {
   benefits: string[]
 }
 
-function buildCopy(reason: UpgradeReason, plan: Plan): Copy {
+function buildCopy(reason: UpgradeReason): Copy {
   switch (reason) {
     case "export-limit":
       return {
         target: "standard",
         title: "今月の無料保存を使い切りました",
-        body: "Standardなら、写真も動画も1件ずつ無制限で保存できます。",
+        body: "Standardなら、写真を1枚ずつ無制限で保存できます。",
         primary: "月300円で無制限にする",
         benefits: [
-          "単体書き出しが無制限になります",
+          "1枚ずつの書き出しが無制限になります",
           "広告が表示されません",
-          "動画は1件あたり最大5分まで加工できます",
+          "追加スタンプとマイスタンプが使えます",
         ],
       }
     case "premium-stamp":
@@ -36,7 +43,7 @@ function buildCopy(reason: UpgradeReason, plan: Plan): Copy {
         primary: "Standardを確認する",
         benefits: [
           "かわいい・動物・季節などの追加スタンプ",
-          "自作スタンプも登録できます",
+          "マイスタンプも登録できます",
           "基本スタンプはFreeでもそのまま使えます",
         ],
       }
@@ -46,50 +53,62 @@ function buildCopy(reason: UpgradeReason, plan: Plan): Copy {
         title: "自分だけのスタンプを作れます",
         body: "Standardなら、端末内の画像を自分専用のスタンプとして登録できます。",
         primary: "Standardを確認する",
-        benefits: ["絵柄・かたち・色をえらんで作成", "いくつでも保存できます", "追加スタンプもすべて使えます"],
+        benefits: ["写真やPNGからスタンプを作成", "最大100個まで登録できます", "追加スタンプもすべて使えます"],
       }
-    case "batch":
+    case "batch-standard":
       return {
         target: "pro",
         title: "まとめて加工できます",
-        body: "Proなら、複数の写真や動画をまとめて加工・保存できます。",
+        body: "Proなら、旅行やイベントの写真をまとめて加工・保存できます。",
         primary: "Proを確認する",
         benefits: [
-          "1回の一括処理で最大50素材",
-          "処理キューで素材ごとの進捗を確認",
-          "一部が失敗しても残りの処理を続けます",
+          `1回の一括処理で最大${BATCH_MAX_ITEMS}枚`,
+          "一覧で仕上がりを見渡し、注意が必要な写真だけ直せます",
+          "失敗した写真だけあとから再試行できます",
         ],
       }
-    case "long-video":
-      return plan === "free"
-        ? {
-            target: "standard",
-            title: "長い動画も加工できます",
-            body: "無料プランは60秒までです。Standardでは最大5分、Proでは最大30分の動画に対応しています。",
-            primary: "Standardを確認する",
-            benefits: ["Standardは1件あたり最大5分", "Proは1件あたり最大30分", "顔の動きを追いかけて隠します"],
-          }
-        : {
-            target: "pro",
-            title: "もっと長い動画に対応します",
-            body: "Standardは5分までです。Proでは最大30分の動画に対応しています。",
-            primary: "Proを確認する",
-            benefits: ["1件あたり最大30分の動画", "複数の動画をまとめて処理", "対応端末では4K書き出し"],
-          }
-    case "export-4k":
+    case "batch-credit":
       return {
         target: "pro",
-        title: "4Kで書き出せます",
-        body: "Proでは、対応端末で4K書き出しを利用できます。",
+        title: "お試しの一括処理クレジットを使い切りました",
+        body: `Proなら最大${BATCH_MAX_ITEMS}枚までまとめて処理できます。`,
         primary: "Proを確認する",
-        benefits: ["対応端末で4K出力", "FreeとStandardは最大1080p", "一括処理でも同じ設定を適用できます"],
+        benefits: [
+          `1回の一括処理で最大${BATCH_MAX_ITEMS}枚`,
+          "処理キューで進みぐあいを確認",
+          "一括設定プリセットとバッチ履歴",
+        ],
+      }
+    case "batch-size":
+      return {
+        target: "pro",
+        title: "選べる枚数の上限です",
+        body: `現在のお試しでは最大${TRIAL_CREDITS}枚まで選べます。Proなら最大${BATCH_MAX_ITEMS}枚までまとめて処理できます。`,
+        primary: "Proを確認する",
+        benefits: [
+          `1回の一括処理で最大${BATCH_MAX_ITEMS}枚`,
+          "要確認の写真だけを抽出して確認",
+          "成功件数と失敗件数のサマリ",
+        ],
+      }
+    case "edit-locked":
+      return {
+        target: "standard",
+        title: "編集にはStandardが必要です",
+        body: "このプロジェクトはそのまま書き出せます。編集するにはStandardが必要です。",
+        primary: "Standardを確認する",
+        benefits: [
+          "変更せずに書き出すだけならFreeのままできます",
+          "追加スタンプとマイスタンプを新しい写真へ使えます",
+          "1枚ずつの書き出しが無制限になります",
+        ],
       }
   }
 }
 
 export function UpgradeModal() {
-  const { upgrade, closeUpgrade, go, plan } = useApp()
-  const info = upgrade ? buildCopy(upgrade.reason, plan) : null
+  const { upgrade, closeUpgrade, go } = useApp()
+  const info = upgrade ? buildCopy(upgrade.reason) : null
 
   return (
     <Dialog open={upgrade !== null} onOpenChange={(open) => (!open ? closeUpgrade() : undefined)}>
@@ -116,7 +135,7 @@ export function UpgradeModal() {
             </ul>
             {upgrade?.reason === "export-limit" ? (
               <p className="rounded-2xl bg-secondary px-3 py-2.5 text-[11px] leading-relaxed text-secondary-foreground">
-                無料プランは月{FREE_MONTHLY_LIMIT}件まで保存できます。残り件数は毎月1日にもどります。
+                無料プランは月{FREE_MONTHLY_LIMIT}枚まで保存できます。残り枚数は毎月1日にもどります。
               </p>
             ) : null}
             <div className="flex flex-col gap-2">

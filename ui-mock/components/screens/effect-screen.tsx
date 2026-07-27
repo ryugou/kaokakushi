@@ -20,7 +20,19 @@ const METHODS: { type: EffectType; icon: typeof Blend }[] = [
 ]
 
 export function EffectScreen() {
-  const { media, faces, hidden, effect, setEffect, back, go, canUsePremiumStamps, requestUpgrade, myStamps } = useApp()
+  const {
+    media,
+    faces,
+    hidden,
+    effect,
+    setEffect,
+    back,
+    go,
+    canUsePremiumStamps,
+    canUseCustomStamps,
+    requestUpgrade,
+    myStamps,
+  } = useApp()
 
   if (!media) return null
 
@@ -164,22 +176,35 @@ export function EffectScreen() {
 
             {myStamps.length > 0 ? (
               <>
-                <p className="text-xs font-bold">マイスタンプ</p>
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-bold">マイスタンプ</p>
+                  {canUseCustomStamps ? null : <ProBadge label="Standard以上" />}
+                </div>
                 <div className="grid grid-cols-4 gap-2">
                   {myStamps.map((stamp) => {
                     const active = effect.stampId === stamp.id
+                    const locked = !canUseCustomStamps
                     return (
                       <button
                         key={stamp.id}
                         type="button"
-                        onClick={() => setEffect((prev) => ({ ...prev, stampId: stamp.id }))}
+                        onClick={() =>
+                          locked
+                            ? requestUpgrade("custom-stamp", `「${stamp.name}」はマイスタンプです。`)
+                            : setEffect((prev) => ({ ...prev, stampId: stamp.id }))
+                        }
                         className={cn(
-                          "flex flex-col items-center gap-1 rounded-2xl p-2 transition-colors",
+                          "relative flex flex-col items-center gap-1 rounded-2xl p-2 transition-colors",
                           active ? "bg-accent" : "hover:bg-muted",
                         )}
                       >
-                        <StampArtView art={myStampToArt(stamp)} className="size-10" sizes="40px" />
+                        <StampArtView
+                          art={myStampToArt(stamp)}
+                          className={cn("size-10", locked && "opacity-45")}
+                          sizes="40px"
+                        />
                         <span className="w-full truncate text-[10px] font-medium">{stamp.name}</span>
+                        {locked ? <LockDot /> : null}
                       </button>
                     )
                   })}

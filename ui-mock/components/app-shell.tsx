@@ -6,8 +6,8 @@ import { AppProvider, useApp } from "@/components/app-provider"
 import { PhoneShell } from "@/components/phone-shell"
 import { BottomNav } from "@/components/bottom-nav"
 import { MediaPicker } from "@/components/media-picker"
-import { KindChooser } from "@/components/kind-chooser"
 import { UpgradeModal } from "@/components/upgrade-modal"
+import { DiscardDialog, RecoveryDialog, UnsavedOutputDialog } from "@/components/pending-dialogs"
 import { HomeScreen } from "@/components/screens/home-screen"
 import { DetectScreen } from "@/components/screens/detect-screen"
 import { EffectScreen } from "@/components/screens/effect-screen"
@@ -32,7 +32,7 @@ export function AppShell() {
 }
 
 function AppShellInner() {
-  const { screen, pickerKind, closePicker, selectMedia, openKindChooser } = useApp()
+  const { screen, openPicker } = useApp()
   const scrollRef = React.useRef<HTMLDivElement>(null)
 
   React.useEffect(() => {
@@ -56,11 +56,14 @@ function AppShellInner() {
         {screen === "custom-stamp" ? <CustomStampScreen /> : null}
       </main>
 
-      {TAB_SCREENS.includes(screen) ? <BottomNav onNew={openKindChooser} /> : null}
+      {/* v1 は写真専用なので、種類選択をはさまず写真ピッカーへ直接進む */}
+      {TAB_SCREENS.includes(screen) ? <BottomNav onNew={openPicker} /> : null}
 
-      <KindChooser />
-      <MediaPicker kind={pickerKind} onClose={closePicker} onSelect={selectMedia} />
+      <MediaPicker />
       <UpgradeModal />
+      <UnsavedOutputDialog />
+      <DiscardDialog />
+      <RecoveryDialog />
     </PhoneShell>
   )
 }

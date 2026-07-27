@@ -3,7 +3,7 @@
 import { Check, Crown, Layers, Minus } from "lucide-react"
 
 import { cn } from "@/lib/utils"
-import { FREE_MONTHLY_LIMIT, useApp, type Plan } from "@/components/app-provider"
+import { BATCH_MAX_ITEMS, FREE_MONTHLY_LIMIT, TRIAL_CREDITS, useApp, type Plan } from "@/components/app-provider"
 import { PrivacyNote, ScreenHeader, SectionTitle } from "@/components/app-bits"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -24,48 +24,48 @@ const PLANS: PlanCard[] = [
     name: "Free",
     price: "無料",
     note: "まず便利さを体験するプラン",
-    lead: "基本機能はすべて使えます",
+    lead: "顔を隠して保存するところまで、ぜんぶ使えます",
     features: [
-      { label: `単体書き出しは月${FREE_MONTHLY_LIMIT}件まで`, ok: true },
-      { label: "写真・動画の両方に対応", ok: true },
+      { label: `1枚ずつの書き出しは月${FREE_MONTHLY_LIMIT}枚まで`, ok: true },
+      { label: "顔の自動検出と手動での範囲追加", ok: true },
       { label: "モザイク・ぼかし・黒塗り・基本スタンプ", ok: true },
-      { label: "動画は1件あたり最大60秒", ok: true },
+      { label: "縦横比の変更・背景ぼかし・メタデータ設定", ok: true },
+      { label: `一括処理はお試しの${TRIAL_CREDITS}枚ぶんだけ`, ok: true },
       { label: "広告が表示されます", ok: false },
-      { label: "追加スタンプ・自作スタンプ", ok: false },
-      { label: "一括処理", ok: false },
+      { label: "追加スタンプ・マイスタンプ", ok: false },
     ],
   },
   {
     id: "standard",
     name: "Standard",
     price: "月300円",
-    note: "日常的に1件ずつ使うプラン",
-    lead: "写真や短い動画を1件ずつ加工する方に",
+    note: "日常的に写真を1枚ずつ加工する人向け",
+    lead: "回数を気にせず、1枚ずつていねいに加工したい方に",
     highlight: true,
     features: [
-      { label: "単体書き出しが無制限", ok: true },
+      { label: "1枚ずつの書き出しが無制限", ok: true },
       { label: "Freeの全機能", ok: true },
       { label: "広告なし", ok: true },
       { label: "追加スタンプが使えます", ok: true },
-      { label: "自作スタンプを登録できます", ok: true },
-      { label: "動画は1件あたり最大5分", ok: true },
-      { label: "一括処理・処理キュー・4K出力", ok: false },
+      { label: "マイスタンプを最大100個まで登録できます", ok: true },
+      { label: `一括処理はお試しの${TRIAL_CREDITS}枚ぶんだけ`, ok: true },
+      { label: "処理キュー・一括設定プリセット", ok: false },
     ],
   },
   {
     id: "pro",
     name: "Pro",
     price: "月980円",
-    note: "大量素材をまとめて時短するプラン",
-    lead: "大量の写真・動画をまとめて処理したい人向け",
+    note: "イベントの写真をまとめて片づけるプラン",
+    lead: "旅行やイベントの写真を最大50枚選び、顔をまとめて検出します。一覧で仕上がりを見渡し、注意が必要な写真だけを開いて直せば、そのまま一括で保存できます。",
     features: [
       { label: "Standardの全機能", ok: true },
-      { label: "写真・動画の一括処理と一括書き出し", ok: true },
-      { label: "処理キューで進捗を個別に確認", ok: true },
-      { label: "一部が失敗しても残りを継続・個別に再試行", ok: true },
-      { label: "1回の一括処理で最大50素材", ok: true },
-      { label: "動画は1件あたり最大30分", ok: true },
-      { label: "対応端末では4K出力", ok: true },
+      { label: `1回の一括処理で最大${BATCH_MAX_ITEMS}枚`, ok: true },
+      { label: "おまかせ一括と1枚ずつ確認の2つのすすめかた", ok: true },
+      { label: "要確認の写真だけを抽出して確認", ok: true },
+      { label: "処理キューで進みぐあいを確認", ok: true },
+      { label: "失敗した写真だけあとから再試行", ok: true },
+      { label: "一括設定プリセットとバッチ履歴", ok: true },
     ],
   },
 ]
@@ -73,19 +73,20 @@ const PLANS: PlanCard[] = [
 type Cell = string | boolean
 
 const COMPARISON: { label: string; values: [Cell, Cell, Cell] }[] = [
-  { label: "単体書き出し", values: [`月${FREE_MONTHLY_LIMIT}件`, "無制限", "無制限"] },
-  { label: "写真・動画", values: [true, true, true] },
+  { label: "1枚ずつの書き出し", values: [`月${FREE_MONTHLY_LIMIT}枚`, "無制限", "無制限"] },
   { label: "顔の自動検出", values: [true, true, true] },
-  { label: "動画内の顔追跡", values: [true, true, true] },
-  { label: "モザイク・ぼかし", values: [true, true, true] },
+  { label: "手動で範囲を追加", values: [true, true, true] },
+  { label: "モザイク・ぼかし・黒塗り", values: [true, true, true] },
   { label: "基本スタンプ", values: [true, true, true] },
   { label: "追加スタンプ", values: [false, true, true] },
-  { label: "自作スタンプ", values: [false, true, true] },
+  { label: "マイスタンプ", values: [false, "100個", "100個"] },
+  { label: "縦横比・背景ぼかし", values: [true, true, true] },
+  { label: "メタデータ設定", values: [true, true, true] },
   { label: "広告", values: ["あり", "なし", "なし"] },
-  { label: "動画上限", values: ["60秒", "5分", "30分"] },
-  { label: "一括処理", values: [false, false, true] },
+  { label: "一括処理", values: [`お試し${TRIAL_CREDITS}枚`, `お試し${TRIAL_CREDITS}枚`, `最大${BATCH_MAX_ITEMS}枚`] },
   { label: "処理キュー", values: [false, false, true] },
-  { label: "4K出力", values: [false, false, "対応端末のみ"] },
+  { label: "一括設定プリセット", values: [false, false, true] },
+  { label: "バッチ履歴", values: [false, false, true] },
 ]
 
 export function PricingScreen() {
@@ -123,9 +124,7 @@ export function PricingScreen() {
               <p
                 className={cn(
                   "flex items-start gap-1.5 rounded-2xl px-3 py-2 text-[11px] leading-relaxed",
-                  p.id === "pro"
-                    ? "bg-chart-3/15 text-foreground"
-                    : "bg-secondary text-secondary-foreground",
+                  p.id === "pro" ? "bg-chart-3/15 text-foreground" : "bg-secondary text-secondary-foreground",
                 )}
               >
                 {p.id === "pro" ? <Layers className="mt-0.5 size-3.5 shrink-0" aria-hidden /> : null}
@@ -163,6 +162,10 @@ export function PricingScreen() {
             </section>
           )
         })}
+
+        <p className="rounded-2xl bg-secondary px-4 py-3 text-[11px] leading-relaxed text-secondary-foreground">
+          写真に写っていない顔をアプリが見つけられないことがあります。書き出す前に、ご自身で仕上がりをご確認ください。同じ人物を写真をまたいで判定することはできません。
+        </p>
 
         <section className="flex flex-col gap-2">
           <SectionTitle>できることをくらべる</SectionTitle>
@@ -210,7 +213,7 @@ export function PricingScreen() {
         </section>
 
         <p className="px-1 text-[11px] leading-relaxed text-muted-foreground">
-          選んだ写真や動画は外部サーバーへ送信されません。プランを変えても加工した素材は残ります。
+          選んだ写真は外部サーバーへ送信されません。プランを変えても、加工した写真と履歴は残ります。
         </p>
         <PrivacyNote />
       </div>

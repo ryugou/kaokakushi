@@ -1,11 +1,11 @@
 "use client"
 
-import { Check, FileText, HelpCircle, ShieldCheck, type LucideIcon } from "lucide-react"
+import { Check, FileText, HelpCircle, MessageSquare, ShieldCheck, type LucideIcon } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 
-export type InfoTopic = "privacy" | "guide" | "terms"
+export type InfoTopic = "privacy" | "guide" | "terms" | "feedback"
 
 const CONTENT: Record<
   InfoTopic,
@@ -13,48 +13,54 @@ const CONTENT: Record<
 > = {
   privacy: {
     icon: ShieldCheck,
-    title: "プライバシーについて",
-    body: "選択した写真や動画は、端末内で加工され、外部サーバーへ送信されません。",
+    title: "プライバシーポリシー",
+    body: "選択した写真は端末内で加工され、外部サーバーへ送信されません。",
     points: [
       "顔の検出も加工も端末内で行います",
-      "写真や動画をサーバーに送信しません",
-      "保存時に撮影場所などの記録を消せます",
+      "写真をサーバーに送信しません",
+      "保存時に位置情報や撮影機器の記録を消せます",
       "加工の履歴も端末内にだけ残ります",
     ],
-    note: "アプリを削除すると、履歴とマイスタンプも一緒に消えます。",
+    note: "広告の表示、購入の確認、不具合の解析には通信が発生します。写真そのものは送信しません。",
   },
   guide: {
     icon: HelpCircle,
     title: "使いかたガイド",
     body: "3つのステップで、顔をかんたんに隠せます。",
     points: [
-      "1. ホームで写真か動画をえらびます",
-      "2. 顔が自動で見つかるので、隠したい顔をタップします",
-      "3. 隠しかたをえらんで保存します",
-      "うまく見つからないときは「顔をたす」で自分で囲めます",
+      "1. ホームで写真をえらびます",
+      "2. 顔が自動で見つかります。はじめはすべて隠す状態です",
+      "3. 残したい顔をタップして、かくし方をえらんで保存します",
+      "見つからない顔があるときは「手動で範囲を追加」で自分で囲めます",
     ],
-    note: "動画は顔の動きを追いかけて隠します。長さはプランによって変わります。",
+    note: "写っている顔をすべて見つけられるとはかぎりません。保存する前に仕上がりをご確認ください。",
+  },
+  feedback: {
+    icon: MessageSquare,
+    title: "ご意見・ご要望",
+    body: "こんな機能がほしい、という声を教えてください。",
+    points: [
+      "使いにくかったところ",
+      "うまく顔が見つからなかった写真の種類",
+      "ほしいスタンプ",
+      "動画への対応",
+    ],
+    note: "いただいた内容は、今後の改善の参考にします。写真そのものは送信されません。",
   },
   terms: {
     icon: FileText,
     title: "利用規約・ライセンス",
-    body: "このアプリは、写真や動画に写った人のプライバシーを守るためのものです。",
+    body: "このアプリは、写真に写った人のプライバシーを守るためのものです。",
     points: [
       "本人の許可なく他人の写真を公開しないでください",
-      "加工結果を保証するものではありません",
+      "すべての顔を検出することや、加工結果を保証するものではありません",
       "有料プランはいつでも変更・解約できます",
       "アイコンは Lucide（ISCライセンス）を使用しています",
     ],
   },
 }
 
-export function InfoDialog({
-  topic,
-  onClose,
-}: {
-  topic: InfoTopic | null
-  onClose: () => void
-}) {
+export function InfoDialog({ topic, onClose }: { topic: InfoTopic | null; onClose: () => void }) {
   const info = topic ? CONTENT[topic] : null
   const Icon = info?.icon
 
