@@ -3,7 +3,7 @@
 | 項目 | 内容 |
 | --- | --- |
 | 文書名 | かおかくし 技術スタックおよびアーキテクチャ設計 |
-| バージョン | 1.17 |
+| バージョン | 1.18 |
 | 作成日 | 2026-07-27 |
 | 対象 | 写真・動画向け顔匿名化アプリ（iOS / Android） |
 | 上位文書 | 写真・動画向け顔匿名化アプリ 仕様書 v0.1 |
@@ -349,18 +349,31 @@ iOS の `confidence` はこのモデルに含めません。Android に対応す
 
 仕様 14 章に対応します。UI モックは書き出しのたびに無条件で残数を 1 減らしていますが、実装ではこれを純粋関数の判定に置き換えます。
 
+##### 台帳は 1 つ
+
+**通常クォータ、`ExportGrant`、トライアル台帳を別々の値として持ちません。1 つの署名済みオブジェクトとして原子的に置き換えます。**
+
 ```kotlin
-data class QuotaLedger(
-    val period: YearMonth,              // 消費を計上している年月
-    val consumed: Int,
-    val grants: List<ExportGrant>,      // 24 時間の無償再書き出し権
+data class UsageLedger(
+    val period: YearMonth,                    // 消費を計上している年月
+    val consumedExportIds: Set<String>,       // 計上済みの書き出し
+    val grants: Map<String, Instant>,         // sourceHash → 初回成功時刻
+    val trialSourceHashes: Set<String>,       // 一括処理トライアルの消費済み
+    val lastObservedAt: Instant,              // 後退させない基準時刻（6.2.2.5）
 )
 
-data class ExportGrant(
-    val sourceHash: String,
-    val firstSuccessAt: Instant,
-)
+val UsageLedger.consumed: Int get() = consumedExportIds.size
+```
 
+**消費を件数ではなく書き出し ID の集合で持ちます。** 単なる `Int` では、7.4.3 が要求する「同じ `exportId` の再適用を弾く」も「特定の書き出しの消費だけ取り消す」も実装できません。集合にすれば、再適用は自然に冪等になり、ロールバックは該当 ID の削除で済みます。
+
+`grants` を `Map<sourceHash, Instant>` にしたのも同じ理由です。同一 `sourceHash` への追記が上書きにならず、`firstSuccessAt` を維持できます（6.2.0）。
+
+3 つを別々の SecureStore 値として更新すると、片方だけ書けた状態が生じます。1 つの署名済みオブジェクトなら、置き換えは全部か無かです。
+
+##### 判定
+
+```kotlin
 sealed interface QuotaDecision {
     object Unlimited : QuotaDecision        // Standard / Pro
     object FreeReexport : QuotaDecision     // 24 時間以内の再書き出し。消費しない
@@ -368,22 +381,32 @@ sealed interface QuotaDecision {
     data class Blocked(val limit: Int) : QuotaDecision
 }
 
+data class QuotaEvaluation(
+    val decision: QuotaDecision,
+    val updatedLedger: UsageLedger,   // 時刻更新・月次更新・期限切れ grant の整理を含む
+)
+
 fun evaluate(
-    ledger: QuotaLedger,
+    ledger: UsageLedger,
     plan: Plan,
     sourceHash: String,
-    now: Instant,
+    effectiveNow: Instant,            // 6.2.2.5 で正規化済み。端末時刻を直接渡さない
     zone: TimeZone,
-): QuotaDecision
+): QuotaEvaluation
 ```
+
+**判定結果だけでなく更新後の台帳も返します。** `QuotaDecision` しか返さないと、`lastObservedAt` の前進、月次更新、期限切れ `grant` の削除を永続化できません。
 
 判定順序は以下とします。
 
-1. `plan != Free` なら `Unlimited`
-2. 期間更新を適用する（6.2.3 の巻き戻し防止つき）
-3. `grants` に同一 `sourceHash` があり `now - firstSuccessAt < 24h` なら `FreeReexport`
-4. `consumed >= limit` なら `Blocked`
-5. それ以外は `Consume`
+1. `lastObservedAt` を `effectiveNow` へ前進させる
+2. 期間更新と期限切れ `grant` の整理を適用する（6.2.3）
+3. `plan != Free` なら `Unlimited`
+4. `grants[sourceHash]` があり `effectiveNow - it < 24h` なら `FreeReexport`
+5. `consumed >= limit` なら `Blocked`
+6. それ以外は `Consume`
+
+**有料プランで `Unlimited` を返す場合も、手順 1 と 2 は必ず実施してから返します。** 有料期間中に時刻更新と grant 整理を止めると、降格した瞬間に古い状態から判定が始まります。
 
 #### 6.2.0 ExportGrant の作成規則
 
@@ -391,8 +414,8 @@ fun evaluate(
 
 | 動作 | 条件 |
 | --- | --- |
-| `ExportGrant` を作る | 利用可能な出力の生成が正常に完了した時点（7.4.1）。プランを問わない |
-| `consumed` を増やす | `QuotaDecision` が `Consume` のときだけ |
+| `grants` へ `sourceHash` を追加する | 利用可能な出力の生成が正常に完了した時点（7.4.1）。プランを問わない |
+| `consumedExportIds` へ `exportId` を追加する | `QuotaDecision` が `Consume` のときだけ |
 | `firstSuccessAt` を更新する | しない。同一 `sourceHash` の有効な grant があれば、そのまま維持する |
 
 有料プランでの書き出し時に grant を作らないと、次の経路が破綻します。
@@ -558,18 +581,25 @@ Pro は 1 バッチ 50 枚のため、高解像度写真の完成物が数百 MB
 
 **すべての時間判定に端末時刻をそのまま使いません。単調増加する基準時刻を通します。**
 
+時刻の正規化を独立した処理として 1 か所に置きます。各判定が個別に `maxOf` を書くと、書き忘れた箇所だけ防御が抜けます。
+
 ```kotlin
-data class QuotaLedger(
-    val period: YearMonth,
-    val consumed: Int,
-    val grants: List<ExportGrant>,
-    val lastObservedAt: Instant,   // 後退させない
+data class TimeAnchor(val lastObservedAt: Instant)
+
+data class ObservedTime(
+    val effectiveNow: Instant,
+    val updatedAnchor: TimeAnchor,
 )
 
-val effectiveNow = maxOf(now, ledger.lastObservedAt)
+fun observeTime(now: Instant, anchor: TimeAnchor): ObservedTime {
+    val effectiveNow = maxOf(now, anchor.lastObservedAt)
+    return ObservedTime(effectiveNow, anchor.copy(lastObservedAt = effectiveNow))
+}
 ```
 
 `now - firstSuccessAt < 24h` に端末時刻を直接使うと、**書き出し後に時計を 1 週間戻せば差が負になり、常に 24 時間未満と判定されます。** 時計が元の日時へ追いつくまで `FreeReexport` が残り続けます。
+
+**アンカーは `UsageLedger.lastObservedAt` として保持します**（6.2）。型を分けているのは責務を示すためで、保存先は台帳と同一です。
 
 6.2.3 では月次期間の後退を防いでいますが、24 時間の窓には同じ防御がありませんでした。基準時刻を 1 つに集約して両方へ適用します。
 
@@ -582,7 +612,7 @@ val effectiveNow = maxOf(now, ledger.lastObservedAt)
 
 これをしないと、クォータだけでなく**未保存出力の削除期限まで端末時刻の変更で延長されます**。
 
-`lastObservedAt` は、アプリが時刻を参照するたびに `maxOf(現在値, now)` で更新します。
+**`domain` の時間判定は `now` を引数に取りません。`effectiveNow` だけを受け取ります。** 端末時刻に触れてよいのは `observeTime` の呼び出し口 1 か所だけとし、それ以外へ `Instant.now()` 相当を渡さないことを規約とします。
 
 #### 6.2.3 月初リセットと時刻巻き戻し
 
@@ -591,18 +621,20 @@ val effectiveNow = maxOf(now, ledger.lastObservedAt)
 **月初にリセットするのは `consumed` だけです。`grants` は月をまたいで保持します。**
 
 ```kotlin
-fun rollPeriod(ledger: QuotaLedger, now: Instant, zone: TimeZone): QuotaLedger {
-    val current = now.toLocalDateTime(zone).yearMonth
+fun rollPeriod(ledger: UsageLedger, effectiveNow: Instant, zone: TimeZone): UsageLedger {
+    val current = effectiveNow.toLocalDateTime(zone).yearMonth
     // 24時間を過ぎた権利だけを落とす。月の境界とは無関係
-    val activeGrants = ledger.grants.filter { now - it.firstSuccessAt < 24.hours }
+    val activeGrants = ledger.grants.filterValues { effectiveNow - it < 24.hours }
 
     return if (current > ledger.period) {
-        ledger.copy(period = current, consumed = 0, grants = activeGrants)
+        ledger.copy(period = current, consumedExportIds = emptySet(), grants = activeGrants)
     } else {
         ledger.copy(grants = activeGrants)   // 同一または過去 → 期間はリセットしない
     }
 }
 ```
+
+引数は `effectiveNow` です。`now` を直接受け取ると 6.2.2.5 の防御が抜けます。
 
 `grants` を月初に空にすると、**7 月 31 日 23:59 に書き出して 8 月 1 日 00:01 に再書き出しした場合、2 分しか経っていないのに `FreeReexport` になりません。** 24 時間の窓は月の境界と無関係であり、両者を連動させる理由はありません。
 
@@ -618,9 +650,9 @@ fun rollPeriod(ledger: QuotaLedger, now: Instant, zone: TimeZone): QuotaLedger {
 
 #### 6.2.5 改ざん耐性
 
-`QuotaLedger` を平文で DB に保存すると、DB を書き換えるだけで無料枠が無制限になります。一方で仕様 14.5 は、不正利用防止のためだけに端末固有識別子や過剰な個人情報を収集することを禁じています。
+`UsageLedger` を平文で DB に保存すると、DB を書き換えるだけで無料枠が無制限になります。一方で仕様 14.5 は、不正利用防止のためだけに端末固有識別子や過剰な個人情報を収集することを禁じています。
 
-折衷案として、Keychain / Keystore の鍵で `QuotaLedger` に HMAC 署名を付与し、検証失敗時は「消費済み」側へ倒します。サーバー照合も端末識別子の収集も行いません。
+折衷案として、Keychain / Keystore の鍵で `UsageLedger` に HMAC 署名を付与し、検証失敗時は「消費済み」側へ倒します。サーバー照合も端末識別子の収集も行いません。
 
 再インストールで枠が戻ることは仕様 14.5 が明示的に許容しているため、追跡しません。
 
@@ -629,7 +661,7 @@ fun rollPeriod(ledger: QuotaLedger, now: Instant, zone: TimeZone): QuotaLedger {
 RevenueCat の `CustomerInfo` をアプリ全体に流さず、純粋関数で畳み込みます。
 
 ```kotlin
-fun resolve(snapshot: CustomerInfoSnapshot, now: Instant): Entitlement
+fun resolve(snapshot: CustomerInfoSnapshot, effectiveNow: Instant): Entitlement
 
 data class Entitlement(
     val plan: Plan,                     // free / standard / pro
@@ -1185,16 +1217,15 @@ Pro を必要とするのは、バッチという単位に対する操作だけ�
 | `CustomStamp` | 仕様 19.6。スタンプ一覧の項目（8.4） |
 | `StampAsset` | 新規。プロジェクトが参照する不変の画像実体。内容ハッシュを主キーとし参照カウントを持つ（8.4） |
 | `ExportRecord` | 仕様 19.7。`batchId` を追加 |
-| `OutputRecord` | 新規。写真ごとの出力状態（6.2.2） |
-| `ExportCommit` | 新規。書き出しのコミットジャーナル（7.4.3） |
+| `OutputRecord` | 新規。写真ごとの出力状態。`exportId` でコミットと対応づける（7.4.3） |
+| `ExportCommit` | 新規。書き出しのコミットジャーナル。行に HMAC を付ける（7.4.3） |
 | `Batch` | 新規。バッチ単位の履歴（7.2.6） |
 | `BatchPreset` | 新規。一括設定プリセット（6.5.8） |
 
 以下は DB ではなく SecureStore へ保存します。改ざんで権限や枠を書き換えられないようにするためです（6.2.5 の HMAC 署名つき）。
 
 - `SubscriptionState`（6.3 の `Entitlement` キャッシュ）
-- `QuotaLedger`（6.2）
-- 一括処理トライアルの消費済み台帳（6.5.6.1）。残クレジットは保存せず台帳から導出する
+- `UsageLedger`（6.2）。通常クォータ・grant・トライアル台帳・基準時刻を1つの署名済みオブジェクトとして原子的に置き換える。残クレジットは保存せず台帳から導出する
 
 ### 7.2 履歴とプライバシー
 
@@ -1229,15 +1260,18 @@ Pro を必要とするのは、バッチという単位に対する操作だけ�
 
 **「履歴を保存しない」を選んだ場合、本当に保存しません。** 完了画面を離れた時点で、プロジェクト設定、検出結果、サムネイル、加工用の中間ファイルを削除します。内部的な利便性のために残しておくことはしません。プライバシー保護を掲げるアプリが、保存しないと選んだ利用者のデータを保持している状態は許容できないためです。
 
-例外は 3 つです。
+例外は 4 つです。
 
 - **未受け渡しの出力ファイル**（6.2.2）。利用者がまだ受け取っていない成果物であり、履歴とは性質が異なります。保存・共有・破棄のいずれかで解消します
-- **`QuotaLedger` の `sourceHash` と初回成功時刻**（6.2）。無料枠の判定に必要な最小限であり、SecureStore 側に保持します。画像の内容を復元できる情報を含みません
+- **`UsageLedger` の `sourceHash` と初回成功時刻**（6.2）。無料枠の判定に必要な最小限であり、SecureStore 側に保持します。画像の内容を復元できる情報を含みません
 - **一括処理トライアルの消費済み素材識別値**（6.5.6.1）。5 枚分のトライアル対象を判定するために、`sourceHash` を SecureStore へ **期限なく** 保持します。こちらも画像の内容を復元できる情報を含みません
+- **未完了の `ExportCommit` と、それが参照する検証済み出力ファイル**（7.4.3）。書き出しの整合性を回復するための運用データであり、コミット完了またはロールバック後に削除します
 
 3 つ目は保持期間が無期限である点が他と異なります。設定画面での個別説明までは要しませんが、**プライバシーポリシーの記載と整合させる必要があります**（16 節の未決事項）。
 
-この設定では、やり直し（7.2.4）はできません。再度書き出すには設定を作り直すことになります。24 時間以内であれば `QuotaLedger` により無料枠は追加消費されませんが、編集内容は復元されません。これは「保存しない」を選んだ帰結として受け入れます。設定画面にその旨を明記します。
+4 つ目は履歴ではなく、中断した処理の後始末です。放置すると台帳と出力の不整合が残るため、この設定の対象外とします。
+
+この設定では、やり直し（7.2.4）はできません。再度書き出すには設定を作り直すことになります。24 時間以内であれば `UsageLedger` の grant により無料枠は追加消費されませんが、編集内容は復元されません。これは「保存しない」を選んだ帰結として受け入れます。設定画面にその旨を明記します。
 
 #### 7.2.4 やり直しのための保持保証
 
@@ -1361,28 +1395,75 @@ enum class ShareResult { Completed, Canceled, Unknown, Failed }
 data class ExportCommit(
     val exportId: String,
     val projectId: String,
+    val batchId: String?,
     val sourceHash: String,
     val outputPath: String,
-    val quotaDecision: QuotaDecision,
-    val consumesTrialCredit: Boolean,
+    val mutation: AccountingMutation,   // 確定した更新内容
     val state: ExportCommitState,
+    val signature: ByteArray,           // Keychain / Keystore の鍵による HMAC
+)
+
+/** 台帳へ適用すべき更新。判定そのものは保存しない */
+data class AccountingMutation(
+    val consumeExportId: String?,        // Consume のときだけ非 null
+    val grantToCreate: ExportGrant?,     // プランを問わず作る（6.2.0）
+    val trialSourceHashToAdd: String?,   // トライアル消費のときだけ非 null
 )
 
 enum class ExportCommitState { Prepared, FileVerified, AccountingCommitted, Completed }
 ```
 
-手順は以下とします。
+**`QuotaDecision` そのものは保存しません。** `Blocked` を含みうる判定を、すでに生成が始まったコミットへ持たせる意味がありません。保存するのは**確定した更新内容**です。復旧時に判定をやり直す必要もなくなります。
 
+`OutputRecord` にも `exportId` を持たせ、どのコミットに対応するかを一意にします。
+
+```kotlin
+data class OutputRecord(
+    val exportId: String,
+    val projectId: String,
+    val batchId: String?,
+    val outputPath: String,
+    val state: OutputState,
+)
+```
+
+##### 手順
+
+0. `ExportCommit(Prepared)` を Room へ保存する（一時パスを確定させる）
 1. 一時ファイルを生成し、整合性とデコードを検証する
-2. `ExportCommit(FileVerified)` を Room へ保存する
-3. クォータ、`ExportGrant`、トライアル台帳を**冪等に**更新し、`AccountingCommitted` にする
+2. `ExportCommit(FileVerified)` へ更新する
+3. `UsageLedger` を**冪等に**置き換え、`AccountingCommitted` にする
 4. `OutputRecord(Generated)` を保存する
 5. `ExportCommit(Completed)` へ更新する
-6. **起動時に未完了のコミットを再開し、整合させる**
 
-冪等性の鍵は 2 種類です。**クォータ消費は `exportId`、トライアル消費は `sourceHash`** で二重適用を防ぎます。前者は同じ書き出しの再実行、後者は同じ写真の再書き出しを弾くためで、目的が異なります。
+手順 0 で `Prepared` を先に書くのは、**生成中に落ちたときに孤児となる一時ファイルを起動時に特定するため**です。ジャーナルに記録のない一時ファイルは掃除対象になります。
 
-起動時の再開は、`FileVerified` で止まっていれば手順 3 から、`AccountingCommitted` で止まっていれば手順 4 から続けます。ファイルが失われていた場合はコミットを破棄し、消費も取り消します。この場合は生成が完了していないため、6.2.1 の「生成の失敗では消費しない」に該当します。
+冪等性の鍵は 2 種類です。**クォータ消費は `exportId`、トライアル消費は `sourceHash`。** 前者は同じ書き出しの再実行、後者は同じ写真の再書き出しを弾くもので、目的が異なります。台帳が集合を保持しているため（6.2）、再適用は自然に無害です。
+
+##### コミット行の改ざん対策
+
+`ExportCommit` は Room にありますが、その内容が SecureStore の台帳更新を駆動します。**Room を書き換えれば台帳を任意に操作できてしまう**ため、コミット行にも Keychain / Keystore の鍵で HMAC を付けます（6.2.5 と同じ方式）。署名検証に失敗した行は復旧に使わず、破棄して一時ファイルも削除します。
+
+##### 起動時の順序
+
+**復旧を終えるまで、新しい書き出しを開始させません。**
+
+1. 未完了 `ExportCommit` をすべて復旧する
+2. 不要な一時ファイルを掃除する
+3. 未受け渡し出力を復元する（6.2.2.1）
+4. 通常画面を表示する
+5. 新しい書き出しを許可する
+
+先に新しい書き出しを許可すると、あとから古いコミットをロールバックした際に、**すでに進んだ現在の台帳まで壊しかねません**。
+
+復旧の内容は状態で決まります。
+
+| 中断位置 | 復旧 |
+| --- | --- |
+| `Prepared` | 一時ファイルを削除しコミットを破棄する。生成未完了なので消費しない（6.2.1） |
+| `FileVerified` | ファイルが健在なら手順 3 から続行。失われていれば破棄し、台帳は変更しない |
+| `AccountingCommitted` | 手順 4 から続行する |
+| `Completed` | 何もしない |
 
 ### 7.5 削除候補の選定
 
@@ -1634,6 +1715,10 @@ Rust + Axum。`/v1/config` は静的 JSON と ETag による配信とします�
 - 端末時刻を過去へ戻しても 24 時間の窓が延びないこと。`effectiveNow` が後退しないこと（6.2.2.5）
 - 未受け渡し出力の削除期限が端末時刻の変更で延びないこと（6.2.2.5）
 - `ExportCommit` が各段階で中断しても、起動時に整合が回復すること（7.4.3）
+- 復旧が終わるまで新しい書き出しを開始できないこと（7.4.3）
+- `ExportCommit` の署名検証に失敗した行が復旧に使われないこと（7.4.3）
+- `evaluate` が更新後の `UsageLedger` を返し、Unlimited でも時刻更新と grant 整理が行われること（6.2）
+- `domain` の時間判定が `now` ではなく `effectiveNow` だけを受け取ること（6.2.2.5）
 - クォータ消費が `exportId`、トライアル消費が `sourceHash` で冪等であること（7.4.3）
 - 背景処理の変更で `Reviewed` が解除されること。メタデータ設定の変更では解除されないこと（6.5.3）
 - `review_required` の導出がモードで異なること。1 枚ずつ確認では `Normal` の未確認写真も含むこと（6.5.8）
@@ -1664,7 +1749,7 @@ Rust + Axum。`/v1/config` は静的 JSON と ETag による配信とします�
 - `CustomStamp` を削除しても、それを使用したプロジェクトが再書き出しできること（8.4）
 - `StampAsset` が内容ハッシュで重複排除され、参照カウントが 0 になったときのみ削除されること（8.4）
 - 追加スタンプとカスタムスタンプで、降格後の再書き出し可否が同一であること（6.7）
-- 「履歴を保存しない」設定で、未受け渡し出力・`QuotaLedger`・トライアル台帳の 3 つ以外が残らないこと（7.2.3）
+- 「履歴を保存しない」設定で、未受け渡し出力・`UsageLedger`・未完了 `ExportCommit` の 3 つ以外が残らないこと（7.2.3）
 - プロジェクト設定ハッシュの一致判定により、Free の「変更せず再書き出し」が許可されること（6.7）
 - 降格後の操作可否が 6.7 の表と一致すること
 - 顔の初期状態が常に加工対象であること（6.1 の不変条件）
