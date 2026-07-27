@@ -3,7 +3,7 @@
 | 項目 | 内容 |
 | --- | --- |
 | 文書名 | 顔かくし 技術スタックおよびアーキテクチャ設計 |
-| バージョン | 1.25 |
+| バージョン | 1.26 |
 | 作成日 | 2026-07-27 |
 | 対象 | 写真・動画向け顔匿名化アプリ（iOS / Android） |
 | 上位文書 | 写真・動画向け顔匿名化アプリ 仕様書 v0.1 |
@@ -149,7 +149,7 @@ Android の最低対応が API 29 のため、`RenderEffect`（API 31 以降）�
 ```
 kaokakushi/
 ├── composeApp/              CMP アプリ本体（共有 UI とエントリポイント）
-│   ├── commonMain/          全画面の Compose UI、ナビゲーション
+│   ├── commonMain/          全画面の Compose UI、ナビゲーション、StampRasterizer 実装（5.1.1）
 │   ├── androidMain/         Activity、AndroidView（広告バナー）
 │   └── iosMain/             ComposeUIViewController、UIKitViewController 埋め込み
 │
@@ -199,8 +199,12 @@ v1 では全画面を Compose で実装します。iOS の特定画面を SwiftU
 ドメイン    拡張率適用（上 25% / 下 15% / 左右 15%）
             形状決定（楕円 / 円 / 矩形 / 角丸）
             強度の相対値 → 絶対値換算
-            スタンプのベクター描画とラスタライズ
-            → RenderPlan
+            スタンプは StampRenderSpec として記述するだけ
+    ↓
+アプリ層    StampRasterizer で StampRenderSpec をビットマップ化
+            → bitmapId を得る
+    ↓
+ドメイン    bitmapId を差し込んで RenderPlan を生成
     ↓
 ネイティブ  RenderPlan を受け取り、4 プリミティブのみ実行
             ①マスク内モザイク ②マスク内ぼかし ③単色塗り ④画像貼り付け
@@ -208,7 +212,36 @@ v1 では全画面を Compose で実装します。iOS の特定画面を SwiftU
 
 顔領域の位置と大きさは、ドメイン内では 0〜1 の正規化座標で保持します（仕様 19.3 と一致）。ドメインは出力サイズを `RenderPlan` 生成時に受け取りますが、**顔領域を永続的なピクセル座標として保持しません**。これにより拡張率やマージンの計算がプラットフォーム間でずれず、同じ設定を解像度の異なる出力へ適用できます。
 
-スタンプをベクターで自作する方針により、ドメイン側が Compose Canvas でベクターを描いてビットマップ化できます。ネイティブ側は「画像を貼る」1 プリミティブで全スタンプを処理でき、スタンプの種類が増えてもネイティブコードは増えません。
+#### 5.1.1 スタンプのラスタライズをドメインへ置かない
+
+**ラスタライズは Compose Canvas を使うため、`domain` の責務にできません。** 4.1 の「`domain` は Compose の型を使わない」と直接矛盾します。
+
+`domain` が扱うのは記述だけです。
+
+```kotlin
+// domain — プラットフォーム非依存
+data class StampRenderSpec(
+    val stampId: String,
+    val bounds: NormalizedRect,
+    val rotationDegrees: Float,
+    val opacity: Float,
+)
+
+// rendering adapter — composeApp または shared/rendering
+interface StampRasterizer {
+    suspend fun rasterize(spec: StampRenderSpec, size: PixelSize): RasterizedStamp
+}
+```
+
+`RenderOp.Stamp(bitmapId)` を組み立てる順序は次のとおりです。
+
+1. `domain` が `StampRenderSpec` を生成する
+2. アプリケーション層が `StampRasterizer` でラスタライズし、`bitmapId` を得る
+3. その `bitmapId` を渡して `domain` が `RenderPlan` を生成する
+
+`domain` はポート（`StampRasterizer`）を定義するだけで、実装を持ちません。4.1 の依存の向きと一致します。
+
+スタンプをベクターで自作する方針の利点は変わりません。ネイティブ側は「画像を貼る」1 プリミティブで全スタンプを処理でき、スタンプの種類が増えてもネイティブコードは増えません。ラスタライズが Compose 側にあることで、**両 OS で同じ描画結果**になる点も維持されます。
 
 ### 5.2 RenderPlan
 
@@ -782,6 +815,20 @@ HMAC 鍵そのものが失われた、または無効化された場合（生体
 `monthlyBlockedPeriod` を上限判定より前に置く理由は、修復後の `consumedExportIds` が空だからです。上限判定だけでは `consumed(0) >= limit` が成立せず、そのまま通過します。
 
 再インストールで枠が戻ることは仕様 14.5 が明示的に許容しているため、追跡しません。
+
+##### バックアップ対象からの除外
+
+**署名済みデータと HMAC 鍵のライフサイクルを一致させます。** データだけがクラウドバックアップや端末移行で復元され、鍵が復元されないと、**通常の再インストールでも `IntegrityFailure` になり、当月枠とトライアルが封鎖されます。** これは直前の「再インストールで枠が戻る」方針と正反対の結果です。
+
+v1 では次を規則とします。
+
+| 対象 | 規則 |
+| --- | --- |
+| `ProtectedBlobStore` のファイル / DataStore | **クラウドバックアップ対象外**（iOS は `isExcludedFromBackup`、Android は `data_extraction_rules.xml` で除外） |
+| HMAC 鍵 | **端末外へ移行しない**（Android Keystore はエクスポート不可。iOS の Keychain は `ThisDeviceOnly` 系のアクセシビリティを指定） |
+| 再インストール・端末移行後 | 両方とも消えるため `Missing` となり、**新規台帳を作る**（6.2.5 の読み込み結果の分類） |
+
+鍵とデータの**どちらか一方だけが残る状態を作らない**ことが要点です。両方消えれば `Missing`、両方残れば `Valid` となり、`IntegrityFailure` は実際の改ざんか鍵の破棄に限定されます。
 
 ### 6.3 権限解決（EntitlementResolver）
 
@@ -1371,7 +1418,7 @@ Pro を必要とするのは、バッチという単位に対する操作だけ�
 | `CustomStamp` | 仕様 19.6。スタンプ一覧の項目（8.4） |
 | `StampAsset` | 新規。プロジェクトが参照する不変の画像実体。内容ハッシュを主キーとし参照カウントを持つ（8.4） |
 | `ExportRecord` | 仕様 19.7。`batchId` を追加 |
-| `OutputRecord` | 新規。写真ごとの出力状態。`exportId` でコミットと対応づける。実体はパスではなく `outputFileId` で参照し、`outputDigest` を持つ（7.4.3） |
+| `OutputRecord` | 新規。写真ごとの出力状態。`exportId` でコミットと対応づける。実体はパスではなく `outputFileId` で参照し、`outputByteSize` と `outputSha256` を持つ（7.4.3） |
 | `ExportCommit` | 新規。書き出しのコミットジャーナル。行に HMAC を付ける（7.4.3） |
 | `Batch` | 新規。バッチ単位の履歴（7.2.6） |
 | `BatchPreset` | 新規。一括設定プリセット（6.5.8） |
@@ -1564,6 +1611,7 @@ data class ExportCommit(
     val sourceHash: String,
     val outputFileId: String,                 // パスではなく ID。専用ディレクトリ配下で解決する
     val authorization: ExportAuthorization,   // 開始前に固定する
+    val verifiedOutput: VerifiedOutput?,      // Prepared では null。FileVerified 以降は必須
     val accountingAt: Instant?,               // 会計内容を確定した時刻
     val accountingPeriod: YearMonth?,         // 計上先の年月
     val intent: AccountingIntent?,            // Prepared では null
@@ -1572,12 +1620,31 @@ data class ExportCommit(
     val signature: ByteArray,                 // Keychain / Keystore の鍵による HMAC
 )
 
-data class GrantMutation(val sourceHash: String, val firstSuccessAt: Instant)
+/** 手順1の検証結果。これ自体も HMAC の対象に含める */
+data class VerifiedOutput(
+    val byteSize: Long,
+    val sha256: ByteArray,
+)
+
+/** grant の操作。ensure と preserve を型で分ける */
+sealed interface GrantAction {
+    /** 有効な grant がなければ firstSuccessAt で新規作成してよい */
+    data class Ensure(
+        val sourceHash: String,
+        val firstSuccessAt: Instant,
+    ) : GrantAction
+
+    /** 認可時の grant を維持するだけ。新規作成は禁止 */
+    data class PreserveAuthorized(
+        val sourceHash: String,
+        val firstSuccessAt: Instant,
+    ) : GrantAction
+}
 
 /** 台帳へ適用しようとする内容。FileVerified で確定する */
 data class AccountingIntent(
     val consumeExportId: String?,
-    val grantToEnsure: GrantMutation,
+    val grantAction: GrantAction,
     val trialSourceHashToEnsure: String?,
 )
 
@@ -1594,6 +1661,43 @@ enum class ExportCommitState { Prepared, FileVerified, AccountingCommitted, Comp
 **「適用しようとする内容」と「実際に適用された結果」を分けます。** 台帳を更新する前に「実際に新規追加した値」を確定することはできません。前者は `FileVerified` で、後者は `AccountingCommitted` で埋まります。
 
 ただし `AccountingApplied` を Room へ書く前に落ちる可能性があるため、**これだけを根拠にロールバックできません。** 台帳側の `ownerExportId`（6.2）が最終的な判断材料です。
+
+###### grant の操作を型で分ける
+
+**`grantToEnsure` という単一フィールドでは preserve を表現できません。** どの勘定でも「新規作成してよい」という指示になり、後段の文章だけで例外を設けることになります。通常処理と起動時復旧が同じ `AccountingIntent` を読む以上、復旧側の実装が ensure してしまう経路が残ります。
+
+`GrantAction` として型で分けます。
+
+| 勘定 | `grantAction` |
+| --- | --- |
+| `PaidUnlimited` / `FreeMonthlyConsume` / `BatchTrial(true)` / `BatchTrial(false)` | `Ensure(sourceHash, accountingAt)` |
+| `FreeMonthlyReexport` | `PreserveAuthorized(sourceHash, authorization.authorizedGrant.firstSuccessAt)` |
+
+`PreserveAuthorized` の適用規則です。
+
+- 同じ `firstSuccessAt` の grant がまだ存在する → **変更しない**
+- 期限切れとして既に削除されている → **再追加しない**
+- 別の `firstSuccessAt` へ差し替えない
+- `accountingAt` を使った新規作成を**禁止する**
+
+型で分けたことにより、通常処理と起動時復旧が同じコードパスを通っても 24 時間窓を延長できません。文章上の特例ではなく、`when` の網羅で強制されます。
+
+###### 検証結果をジャーナルへ持つ
+
+**`FileVerified` で落ちた場合、`OutputRecord` はまだ存在しません**（作られるのは会計反映後の手順 5）。検証済みファイルと同じ内容かを起動時に確認する材料が、コミット側になければ復旧できません。
+
+`verifiedOutput` を `ExportCommit` へ持たせます。
+
+| 状態 | `verifiedOutput` |
+| --- | --- |
+| `Prepared` | `null` |
+| `FileVerified` 以降 | 必須 |
+
+- 復旧時は実体のサイズ・SHA-256・デコードを再確認し、`verifiedOutput` と突き合わせる
+- 手順 5 の `OutputRecord` 作成時は、`verifiedOutput` から値をコピーする（再計算しない）
+- `verifiedOutput` は `ExportCommit` の HMAC 対象に含める
+
+再計算ではなくコピーにするのは、手順 1 と手順 5 の間にファイルが差し替えられた場合に検出するためです。再計算した値を記録すると、差し替え後の内容を「正しい記録値」として固定してしまいます。
 
 ##### 書き出し開始前に権限を固定する
 
@@ -1784,13 +1888,18 @@ data class OutputRecord(
     val exportId: String,
     val projectId: String,
     val batchId: String?,
-    val outputFileId: String,     // パスではなく ID。専用ディレクトリ配下で解決する
-    val outputDigest: ByteArray,  // 生成時に確定した内容ダイジェスト
+    val outputFileId: String,      // パスではなく ID。専用ディレクトリ配下で解決する
+    val outputByteSize: Long,      // verifiedOutput からコピー
+    val outputSha256: ByteArray,   // verifiedOutput からコピー
     val state: OutputState,
     val generatedAt: Instant,
-    val expiresAt: Instant,       // generatedAt + 24.hours
+    val expiresAt: Instant,        // generatedAt + 24.hours
 )
 ```
+
+**アルゴリズムを名前で固定します。** `outputDigest` のような抽象名にすると、iOS と Android で別のアルゴリズムを選ぶ余地が残ります。両 OS で同じ値を突き合わせる用途なので、SHA-256 に固定します。
+
+**サイズも記録します。** ダイジェストだけでは、手順 7 の「サイズが記録値と一致する」を判定できません。サイズ比較はダイジェスト計算より安く、途中書き込みを先に弾けます。
 
 **パスを DB へ直接持ちません。** `outputFileId` から専用ディレクトリ配下のパスを解決します。パス文字列を保存すると、DB を書き換えるだけで `../` を含む値を注入でき、期限切れ削除の処理に別のアプリ内部ファイルを消させる経路ができます。ID からの解決なら、削除対象が構造的に専用ディレクトリの外へ出ません。
 
@@ -1804,14 +1913,14 @@ data class OutputRecord(
 | --- | --- | --- |
 | −1 | `transact` 内で時刻正規化・月次更新・期限切れ grant の整理を**永続化**し、その結果として `ExportAuthorization` を得る。`Blocked` なら以降へ進まない | ProtectedBlobStore |
 | 0 | `ExportCommit(Prepared)` を保存（`intent` は `null`） | Room |
-| 1 | 一時ファイルを生成し、整合性とデコードを検証 | ファイルシステム |
-| 2 | `intent` を確定し `ExportCommit(FileVerified)` を保存 | Room |
-| 3 | `UsageLedger` を冪等に置き換える（要素へ `ownerExportId` を付与） | ProtectedBlobStore |
+| 1 | 一時ファイルを生成し、サイズ・SHA-256・デコードを検証して `VerifiedOutput` を得る | ファイルシステム |
+| 2 | `verifiedOutput` と `intent` を確定し `ExportCommit(FileVerified)` を保存 | Room |
+| 3 | `UsageLedger` を冪等に置き換える（`grantAction` に従う。要素へ `ownerExportId` を付与） | ProtectedBlobStore |
 | 4 | `applied` を埋めて `ExportCommit(AccountingCommitted)` を保存 | Room |
-| 5 | `OutputRecord(Generated)` を `exportId` を主キーに upsert | Room |
+| 5 | `OutputRecord(Generated)` を `exportId` を主キーに upsert。サイズと SHA-256 は `verifiedOutput` から**コピーする** | Room |
 | 6 | `ExportCommit(Completed)` を保存 | Room |
 | 7 | `OutputRecord` と出力ファイルの**健全性**を確認する（下記） | Room / ファイルシステム |
-| 8 | `Completed` の `ExportCommit` を削除する | Room |
+| 8 | `Completed` の `ExportCommit` を削除する。**ここが会計の最終確定境界** | Room |
 
 **手順 8 を省くと、書き出しのたびにコミット行が永久に蓄積します。** ジャーナルは中断からの復旧のためだけに存在するので、役目を終えたら消します。
 
@@ -1825,24 +1934,57 @@ data class OutputRecord(
 | --- | --- |
 | `OutputRecord` が存在する | 手順 5 が反映されている |
 | `outputFileId` から解決したファイルが存在する | 実体がある |
-| ファイルサイズが 0 でなく、記録値と一致する | 途中書き込みでない |
-| 内容ダイジェストが `outputDigest` と一致する | 内容が入れ替わっていない |
+| ファイルサイズが 0 でなく、`outputByteSize` と一致する | 途中書き込みでない |
+| SHA-256 が `outputSha256` と一致する | 内容が入れ替わっていない |
 | 簡易デコードが成功する | 画像として開ける |
 
 いずれかが不成立なら削除せず、そのコミットをロールバック対象として扱います。この時点ではジャーナルが残っているため、会計を正しく戻せます。
 
+###### 会計の最終確定境界
+
+**コミット行の削除をもって会計を最終確定とします。ジャーナルが残っている間だけ、会計をロールバックできます。**
+
+この境界を置く理由は 2 つです。
+
+**1. 消費の確定点が再び曖昧になる**
+
+文書では既に次を定めています。
+
+- 生成完了後の異常終了では消費を戻さない（6.2.1）
+- 利用者が破棄しても消費を戻さない（6.2.2.4）
+- トライアルは初回の正常生成で消費する（6.5.6.1）
+
+コミット削除まで完了した出力は、正常生成が確定済みです。その後のストレージ障害だけを払い戻し対象にすると、「異常終了では戻さないがストレージ障害では戻す」という区別が必要になり、6.2.1 の確定点が崩れます。
+
+**2. 所有者モデルが破綻する**
+
+`ownerExportId` を根拠にコミット削除後のロールバックを許すと、次が成立します。
+
+1. Export A が grant を作り、所有者が A になる
+2. A のコミットを正常に削除する
+3. 同じ素材を Export B で正常に再書き出しする
+4. B は既存 grant を利用するため、所有者は A のまま
+5. 後から A の出力ファイルが失われる
+6. `ownerExportId` を根拠に grant を削除する
+7. **B も正常成功しているのに grant が消える**
+
+トライアル台帳でも同じです。7.4.3 の非終端コミット直列化は、**非終端の間しか効きません。** A のコミットは既に削除済みなので、B の開始を止められません。
+
 ###### コミット削除後にファイルが失われた場合
 
-ジャーナルを消したあとで `OutputRecord` と実体が食い違うことは、外部要因（OS によるキャッシュ削除、ストレージ障害）で起こりえます。この経路の規則を定めます。
+ジャーナルを消したあとで `OutputRecord` と実体が食い違うことは、外部要因（OS によるキャッシュ削除、ストレージ障害）で起こりえます。**この経路では `UsageLedger` を変更しません。**
 
 | 状況 | 扱い |
 | --- | --- |
-| 元素材と設定から再生成できる | **追加消費なしで再生成する。** 消費は既に済んでいる |
-| 再生成できない（元素材が削除された等） | 利用者へ通知し、**該当 `exportId` の月間消費のみ**を可能なら取り消す |
-| grant / トライアル台帳の取り消し | **`ownerExportId` が該当 `exportId` と一致する場合だけ**行う |
-| 整合性を判断できない | 復旧エラーとして扱う（自動では戻さない） |
+| 元素材と設定から再生成できる | 同じ `exportId` の復旧として、**追加消費なしで再生成する** |
+| 再生成できない（元素材が削除された等） | 出力を復元できない旨を利用者へ通知し、壊れた `OutputRecord` を削除する |
+| 月間枠 | **戻さない** |
+| grant | **戻さない** |
+| トライアルクレジット | **戻さない** |
 
-`ownerExportId` の一致を条件にする理由は、6.2 の所有者方式と同じです。他の成功した書き出しが使っている grant を、この 1 件の欠損で消してはいけません。
+利用者への文言は次とします。
+
+> この加工済み写真のデータが失われました。元の写真が残っていれば、同じ設定でもう一度作成できます（無料枠は消費しません）。
 
 **手順 3 と 4 を逆にしてはいけません。** 先に `AccountingCommitted` を書くと、台帳が未反映のまま「反映済み」として復旧されます。この順なら 3 と 4 の間で落ちても状態は `FileVerified` のままなので、台帳更新を冪等に再適用できます。
 
@@ -1912,7 +2054,7 @@ data class SignedPayload(
 | `Prepared` | 一時ファイルを削除しコミットを破棄する。生成未完了なので消費しない（6.2.1） |
 | `FileVerified` | ファイルが健在なら手順 3 から続行。失われていれば破棄し、台帳は変更しない |
 | `AccountingCommitted` | **出力ファイルを再検証してから**手順 5 へ進む（下記） |
-| `Completed` | `OutputRecord` と出力ファイルの存在を確認し、揃っていればコミット行を削除する。欠けていれば復旧エラー |
+| `Completed` | `OutputRecord` と出力ファイルの**サイズ・SHA-256・デコード**を確認し、すべて正常ならコミット行を削除する。不一致なら手順 7 と同じロールバック処理を行う |
 | 署名検証に失敗 | 復旧エラー。自動破棄しない |
 
 `Completed` を無条件に削除しません。手順 6 と 7 の間で落ちた可能性があり、**コミット行だけが復旧の手がかり**だからです。
@@ -2206,9 +2348,16 @@ Rust + Axum。`/v1/config` は静的 JSON と ETag による配信とします�
 - `OutputRecord` が `ExportCommit` 削除後も単独で期限判定できること（7.4.3）
 - `UsageLedger` の署名検証失敗時、修復済み台帳が作られ、翌月に月間枠が再開しトライアルは封じられたままであること（6.2.5）
 - `ExportCommit` が状態遷移のたびに再署名され、正規の更新で検証失敗しないこと（7.4.3）
-- `BatchTrial(false)` でも grant が ensure されること（7.4.3）
-- **`FreeMonthlyReexport` の生成中に 24 時間を超えても、新しい grant が作られず窓が延びないこと**（7.4.3 preserve）
-- **認可時の grant が会計時に期限切れでも、その 1 回は完了し、grant は再登録されないこと**（7.4.3 preserve）
+- `BatchTrial(false)` でも `GrantAction.Ensure` になること（7.4.3）
+- **`FreeMonthlyReexport` の `grantAction` が `PreserveAuthorized` であり、生成中に 24 時間を超えても新しい grant が作られないこと**（7.4.3）
+- **`PreserveAuthorized` を起動時復旧から適用しても、`accountingAt` で grant が作られないこと**（7.4.3）
+- **認可時の grant が会計時に期限切れでも、その 1 回は完了し、grant は再登録されないこと**（7.4.3）
+- **`FileVerified` で落ちた場合、`verifiedOutput` と実体を突き合わせて復旧できること**（7.4.3）
+- **手順 5 のサイズ・SHA-256 が `verifiedOutput` からのコピーであり、再計算でないこと**（7.4.3）
+- **コミット行削除後にファイルを失っても、月間枠・grant・トライアルが戻らないこと**（7.4.3 会計の最終確定境界）
+- **コミット削除済みの Export A のファイル欠損で、同一素材を再書き出しした Export B の grant が消えないこと**（7.4.3）
+- **`domain` が `StampRasterizer` ポートのみを持ち、Compose Canvas を参照しないこと**（5.1.1）
+- **`ProtectedBlobStore` のデータと HMAC 鍵がともにバックアップ対象外であり、再インストール後が `Missing` になること**（6.2.5）
 - **`monthlyBlockedPeriod == period` のとき、`consumedExportIds` が空でも `Blocked(LedgerIntegrityFailure)` になること**（6.2）
 - **`trialIntegrityLocked` のとき `remainingCredits` が 0 になり、トライアル画面へ進入できないこと**（6.5.6.1）
 - **`Missing` で通常台帳が作られ、初回起動の利用者が封鎖されないこと**（6.2.5）
