@@ -221,7 +221,7 @@ Swift 6 の strict concurrency を有効にします。
 | --- | --- |
 | `Domain` の値型 | `Sendable`。判定関数はすべて純粋関数 |
 | `UsageLedgerStore` | **`actor`**。台帳の読み取り・変更・署名・保存を直列化する（7.4.3） |
-| `ExportStartGate` | **`actor`**。`sourceHash` 単位と月間認可のゲートを保持する（7.4.3） |
+| `ExportStartGate` | **`actor`**。素材単位と月間認可のゲートを保持する（7.4.3） |
 | UI の状態オブジェクト | `@MainActor` |
 | `MediaKit` の重い処理 | `nonisolated` な `async` 関数。呼び出し側が並行度を制御する |
 
@@ -996,7 +996,7 @@ v1 では次を規則とします。
 2. 期間更新と期限切れ `grant` の整理を適用する（6.2.3）
 3. `access == Unlimited` なら `Unlimited`
 4. **`monthlyBlockedPeriod == period` なら `Blocked(LedgerIntegrityFailure)`**（6.2.5）
-5. `grants[sourceHash]` があり `effectiveNow - it.firstSuccessAt < 24h` なら `FreeReexport`
+5. `ledger.grant(for: source)` があり `effectiveNow - it.firstSuccessAt < 24h` なら `FreeReexport`
 6. `consumed >= limit` なら `Blocked(MonthlyLimitReached, limit)`
 7. それ以外は `Consume`
 
@@ -1012,9 +1012,9 @@ v1 では次を規則とします。
 
 | 動作 | 条件 |
 | --- | --- |
-| `grants` へ `sourceHash` を追加する | 利用可能な出力の生成が正常に完了した時点＝コミット手順 8 の完了（7.4.3）。プランを問わない |
+| `grants` へ素材を追加する | 利用可能な出力の生成が正常に完了した時点＝コミット手順 8 の完了（7.4.3）。プランを問わない |
 | `consumedExportIds` へ `exportID` を追加する | `QuotaDecision` が `Consume` のときだけ |
-| `firstSuccessAt` を更新する | しない。同一 `sourceHash` の有効な grant があれば、そのまま維持する |
+| `firstSuccessAt` を更新する | しない。同一素材 の有効な grant があれば、そのまま維持する |
 
 有料プランでの書き出し時に grant を作らないと、次の経路が破綻します。
 
@@ -1022,7 +1022,7 @@ v1 では次を規則とします。
 2. 1 時間後に Free へ降格する
 3. 写真 A を再書き出しする
 
-grant がなければ `FreeReexport` にならず枠を 1 枚消費します。これは 6.7 の「降格した事実はクォータ判定に影響しない。判定に使うのは `sourceHash` と経過時間だけ」と矛盾します。
+grant がなければ `FreeReexport` にならず枠を 1 枚消費します。これは 6.7 の「降格した事実はクォータ判定に影響しない。判定に使うのは素材の同一性と経過時間だけ」と矛盾します。
 
 `firstSuccessAt` を更新しないのは、再書き出しのたびに窓が延びると 24 時間の上限が意味を失うためです。
 
@@ -1056,8 +1056,8 @@ grant がなければ `FreeReexport` にならず枠を 1 枚消費します。�
 
 **出力に状態を持たせます。** 状態は永続化し、異常終了をまたいでも保たれます。
 
-```kotlin
-enum class OutputState { Generated, Delivered, Discarded }
+```swift
+enum OutputState: Sendable { case generated, delivered, discarded }
 ```
 
 | 状態 | 意味 | 保持する期間 |
@@ -1072,8 +1072,8 @@ enum class OutputState { Generated, Delivered, Discarded }
 
 バッチの状態は、各 `OutputRecord`（型定義は 7.4.3）の状態から集計して導出します。
 
-```kotlin
-// バッチの未受け渡し枚数 = records.count { it.batchID == id && it.state == Generated }
+```swift
+// バッチの未受け渡し枚数 = records.count { $0.batchID == id && $0.state == .generated }
 ```
 
 一括保存が部分的に成功した場合、**すでに `Delivered` の写真を再保存せず、`Generated` の写真だけを再試行**します。
@@ -1184,17 +1184,20 @@ Pro は 1 バッチ 50 枚のため、高解像度写真の完成物が数百 MB
 
 時刻の正規化を独立した処理として 1 か所に置きます。各判定が個別に `maxOf` を書くと、書き忘れた箇所だけ防御が抜けます。
 
-```kotlin
-data class TimeAnchor(val lastObservedAt: Instant)
+```swift
+struct TimeAnchor: Sendable { let lastObservedAt: Date }
 
-data class ObservedTime(
-    val effectiveNow: Instant,
-    val updatedAnchor: TimeAnchor,
-)
+struct ObservedTime: Sendable {
+    let effectiveNow: Date
+    let updatedAnchor: TimeAnchor
+}
 
-fun observeTime(now: Instant, anchor: TimeAnchor): ObservedTime {
-    val effectiveNow = maxOf(now, anchor.lastObservedAt)
-    return ObservedTime(effectiveNow, anchor.copy(lastObservedAt = effectiveNow))
+func observeTime(now: Date, anchor: TimeAnchor) -> ObservedTime {
+    let effectiveNow = max(now, anchor.lastObservedAt)
+    return ObservedTime(
+        effectiveNow: effectiveNow,
+        updatedAnchor: TimeAnchor(lastObservedAt: effectiveNow)
+    )
 }
 ```
 
@@ -1221,16 +1224,24 @@ fun observeTime(now: Instant, anchor: TimeAnchor): ObservedTime {
 
 **月初にリセットするのは `consumed` だけです。`grants` は月をまたいで保持します。**
 
-```kotlin
-fun rollPeriod(ledger: UsageLedger, effectiveNow: Instant, zone: TimeZone): UsageLedger {
-    val current = effectiveNow.toLocalDateTime(zone).yearMonth
+```swift
+func rollPeriod(
+    _ ledger: UsageLedger,
+    effectiveNow: Date,
+    timeZone: TimeZone
+) -> UsageLedger {
+    let current = YearMonth(from: effectiveNow, in: timeZone)
     // 24時間を過ぎた権利だけを落とす。月の境界とは無関係
-    val activeGrants = ledger.grants.filterValues { effectiveNow - it.firstSuccessAt < 24.hours }
+    let activeGrants = ledger.grants.filter {
+        effectiveNow.timeIntervalSince(-e.firstSuccessAt) < 24 * 3600
+    }
 
-    return if (current > ledger.period) {
-        ledger.copy(period = current, consumedExportIds = emptySet(), grants = activeGrants)
+    if current > ledger.period {
+        // 期間が進んだ → consumed だけをリセット
+        return ledger.with(period: current, consumedExportIDs: [], grants: activeGrants)
     } else {
-        ledger.copy(grants = activeGrants)   // 同一または過去 → 期間はリセットしない
+        // 同一または過去 → 期間はリセットしない
+        return ledger.with(grants: activeGrants)
     }
 }
 ```
@@ -1247,7 +1258,7 @@ fun rollPeriod(ledger: UsageLedger, effectiveNow: Instant, zone: TimeZone): Usag
 
 ##### 単一ハッシュでは足りない
 
-`sourceHash` 1 本にすると、**OS が画像を変換した場合に同一素材と判定できません。**
+`contentFingerprint` 1 本にすると、**OS が画像を変換した場合に同一素材と判定できません。**
 
 PhotosPicker は、要求形式や iCloud の状態によって HEIC を JPEG へ変換して返します。変換後は先頭・末尾のバイト列が別物になるため、**同じ写真が別ハッシュになり、無料枠を二重に消費します。** これは 6.2.4 が掲げる「同一素材なのに二重消費する方向へ倒さない」に正面から反します。
 
@@ -1324,7 +1335,7 @@ struct TrialReservation: Sendable, Equatable {
 
 ##### 正準化規則
 
-**「複合」だけでは実装が一意に定まりません。** バイト順やフィールド境界が違えば、同じ写真から別のハッシュが出ます。`sourceHash` は無料枠の判定に直結するため、規則を固定します。
+**「複合」だけでは実装が一意に定まりません。** バイト順やフィールド境界が違えば、同じ写真から別のハッシュが出ます。`contentFingerprint` は無料枠の判定に直結するため、規則を固定します。
 
 | 項目 | 規則 |
 | --- | --- |
@@ -1354,24 +1365,24 @@ capturedAt    : UInt32(8)  + Int64    // 無ければ UInt32(0) のみ
 
 **バイト列の組み立てを固定しても、入力の取得元が曖昧なら同じ写真から別のハッシュが出ます。**
 
-```kotlin
-data class SourceFingerprintInput(
-    val fileSize: Long,
-    val headBytes: ByteArray,
-    val tailBytes: ByteArray,
-    val capturedAtUtcMillis: Long?,
-    val representation: SourceRepresentation,
-)
+```swift
+struct SourceFingerprintInput: Sendable {
+    let fileSize: Int64
+    let headBytes: Data
+    let tailBytes: Data
+    let capturedAtUTCMillis: Int64?
+    let representation: SourceRepresentation
+}
 
-enum class SourceRepresentation {
-    Original,      // プロバイダーが返した原データ
-    Transcoded,    // OS が変換した派生データしか取得できなかった
+enum SourceRepresentation: Sendable {
+    case original      // プロバイダーが返した原データ
+    case transcoded    // OS が変換した派生データしか取得できなかった
 }
 ```
 
 **撮影日時の優先順位を固定します。**
 
-1. **写真ライブラリの撮影日時**（iOS は `PHAsset.creationDate`、Android は `MediaStore.Images.DATE_TAKEN`）
+1. **写真ライブラリの撮影日時**（`PHAsset.creationDate`）
 2. 無ければ **EXIF の撮影日時**（`DateTimeOriginal`）
 3. どちらも無ければ **`null`**（長さ 0 のフィールド）
 
@@ -1386,7 +1397,7 @@ enum class SourceRepresentation {
 
 **処理自体を拒否しません。** 利用者にとって「この写真は加工できません」は理解不能な失敗です。`Transcoded` では同一素材の保証が弱まり、同じ写真を別素材と判定して**無料枠を余分に消費する**ことがありえますが、これは 6.2.4 が既に許容している「別素材なのに無料で再書き出しできる」の逆方向ではなく、利用者に不利な方向です。
 
-そのため `representation` を `sourceHash` の**入力には含めません**。含めると、同じ写真が取得経路によって別ハッシュになります。`Transcoded` は診断のための区分値としてのみ記録し（`LogValue` の列挙、9.2）、変換が発生する頻度を計測します。頻度が高ければ、v1.x で原データ取得の再試行を強化します。
+そのため `representation` を `contentFingerprint` の**入力には含めません**。含めると、同じ写真が取得経路によって別ハッシュになります。`Transcoded` は診断のための区分値としてのみ記録し（`LogValue` の列挙、9.2）、変換が発生する頻度を計測します。頻度が高ければ、v1.x で原データ取得の再試行を強化します。
 
 ##### プロジェクト設定ハッシュ
 
@@ -1401,7 +1412,7 @@ enum class SourceRepresentation {
 | 欠損値 | 長さ 0 のフィールドとして明示する |
 | フィールド順 | スキーマで固定する。追加は末尾のみ |
 
-アルゴリズムと形式は `sourceHash` と同じ（SHA-256、長さ前置き、スキーマバージョン付き）です。
+アルゴリズムと形式は `contentFingerprint` と同じ（SHA-256、長さ前置き、スキーマバージョン付き）です。
 
 `Float` を文字列化しない理由は、`toString` の桁数が実装依存だからです。同じ値が `0.15` と `0.15000001` になれば別ハッシュになります。ビット表現なら一意です。
 
@@ -1417,13 +1428,13 @@ enum class SourceRepresentation {
 
 `ProtectedBlobStore` の読み込み結果を、原因ごとに分けた型で返します。
 
-```kotlin
-sealed interface ProtectedLoadResult<out T> {
-    data class Valid<T>(val value: T) : ProtectedLoadResult<T>
-    data object Missing : ProtectedLoadResult<Nothing>                    // まだ存在しない
-    data object IntegrityFailure : ProtectedLoadResult<Nothing>           // HMAC 不一致
-    data object TemporarilyUnavailable : ProtectedLoadResult<Nothing>     // Keychain/Keystore/ファイルの一時障害
-    data class UnsupportedSchema(val version: Int) : ProtectedLoadResult<Nothing>
+```swift
+enum ProtectedLoadResult<T: Sendable>: Sendable {
+    case valid(T)
+    case missing                        // まだ存在しない
+    case integrityFailure               // HMAC 不一致
+    case temporarilyUnavailable         // Keychain・ファイルの一時障害
+    case unsupportedSchema(version: Int)
 }
 ```
 
@@ -1438,13 +1449,13 @@ sealed interface ProtectedLoadResult<out T> {
 
 **`TemporarilyUnavailable` と `IntegrityFailure` を混同しないことが要点です。** 鍵ストアが一時的に利用できないだけの状態を改ざんとして修復すると、正常な利用者の枠を消します。両者は「署名検証まで到達したか」で区別できます。データを読めて HMAC が一致しない場合のみ `IntegrityFailure` です。読み込み自体が失敗した場合、鍵を取得できなかった場合は `TemporarilyUnavailable` です。
 
-HMAC 鍵そのものが失われた、または無効化された場合（生体認証の登録変更等で Keystore の鍵が破棄された場合を含む）は、データを検証できないため `IntegrityFailure` として扱います。鍵の喪失と改ざんは端末側から区別できないためです。
+HMAC 鍵そのものが失われた、または無効化された場合（Keychain の項目が失われた場合を含む）は、データを検証できないため `IntegrityFailure` として扱います。鍵の喪失と改ざんは端末側から区別できないためです。
 
 ##### 検証失敗時の扱い
 
 以下は `IntegrityFailure` に対する規則です。
 
-**空の `UsageLedger` を作り直しません。** 台帳は消費件数だけでなく、どの `sourceHash` が grant を持ちトライアルを消費したかを保持しています。空にすると**無料枠もトライアルも全回復**し、改ざんの動機になります。
+**空の `UsageLedger` を作り直しません。** 台帳は消費件数だけでなく、どの素材が grant を持ちトライアルを消費したかを保持しています。空にすると**無料枠もトライアルも全回復**し、改ざんの動機になります。
 
 **`IntegrityFailure` を一時的な読み取り結果のままにしません。保守的に修復した永続状態へ変換します。**
 
@@ -1458,9 +1469,12 @@ HMAC 鍵そのものが失われた、または無効化された場合（生体
 | `monthlyBlockedPeriod` | 現在月 |
 | `trialIntegrityLocked` | `true` |
 | `grants` | 空 |
-| `consumedExportIds` | 空 |
+| `consumedExportIDs` | 空 |
 | `trialEntries` | 空 |
+| **`trialReservations`** | **空** |
 | `period` | 現在月 |
+
+`trialReservations` を空にすることを明記します。書き漏らすと、修復後も過去の予約が残っているものとして残クレジットが減り、`trialIntegrityLocked` と合わせて二重に封鎖されます。
 
 結果として次のようになります。
 
@@ -1493,8 +1507,8 @@ v1 では次を規則とします。
 
 | 対象 | 規則 |
 | --- | --- |
-| `ProtectedBlobStore` のファイル / DataStore | **クラウドバックアップ対象外**（iOS は `isExcludedFromBackup`、Android は `data_extraction_rules.xml` で除外） |
-| HMAC 鍵 | **端末外へ移行しない**（Android Keystore はエクスポート不可。iOS の Keychain は `ThisDeviceOnly` 系のアクセシビリティを指定） |
+| `ProtectedBlobStore` のファイル | **クラウドバックアップ対象外**（`isExcludedFromBackup`。7.3.1） |
+| HMAC 鍵 | **端末外へ移行しない**（Keychain へ `ThisDeviceOnly` 系のアクセシビリティを指定。7.3.1） |
 | 再インストール・端末移行後 | 両方とも消えるため `Missing` となり、**新規台帳を作る**（6.2.5 の読み込み結果の分類） |
 
 鍵とデータの**どちらか一方だけが残る状態を作らない**ことが要点です。両方消えれば `Missing`、両方残れば `Valid` となり、`IntegrityFailure` は実際の改ざんか鍵の破棄に限定されます。
@@ -1503,15 +1517,15 @@ v1 では次を規則とします。
 
 RevenueCat の `CustomerInfo` をアプリ全体に流さず、純粋関数で畳み込みます。
 
-```kotlin
-fun resolve(snapshot: CustomerInfoSnapshot, effectiveNow: Instant): Entitlement
+```swift
+func resolve(snapshot: CustomerInfoSnapshot, effectiveNow: Date) -> Entitlement
 
-data class Entitlement(
-    val plan: Plan,                     // free / standard / pro
-    val status: PlanStatus,             // active / grace / pending / expired / revoked
-    val expiresAt: Instant?,
-    val lastVerifiedAt: Instant,
-)
+struct Entitlement: Sendable, Equatable {
+    let plan: Plan               // free / standard / pro
+    let status: PlanStatus       // active / grace / pending / expired / revoked
+    let expiresAt: Date?
+    let lastVerifiedAt: Date
+}
 ```
 
 要件は 3 点です。
@@ -1565,15 +1579,15 @@ Pro は月単位で契約と解約を繰り返す利用者が一定数いると�
 
 進入条件を式で示します。
 
-```kotlin
-val canEnterBatch =
+```swift
+let canEnterBatch =
     capabilities.canUseProBatch ||
     (
         capabilities.canUseBatchTrial &&
         !usageLedger.trialIntegrityLocked &&
         (
             remainingCredits > 0 ||
-            usageLedger.trialEntries.isNotEmpty()
+            !usageLedger.trialEntries.isEmpty
         )
     )
 ```
@@ -1607,28 +1621,29 @@ v1 では写真のみを対象とします。
 
 写真単位の要確認理由を純粋関数で判定します。
 
-```kotlin
-enum class ReviewReason {
-    NoFaceDetected,      // 顔を 1 つも検出できなかった
-    SmallFace,           // 検出用画像上で短辺 24px 未満の顔がある
-    ExtremePose,         // 横や上下を大きく向いた顔がある
-    FaceAtEdge,          // 拡張後の領域が画像境界に接する顔がある
-    OverlappingFaces,    // 領域同士が重なる顔がある
+```swift
+enum ReviewReason: Sendable, Hashable {
+    case noFaceDetected      // 顔を 1 つも検出できなかった
+    case lowConfidence       // 検出信頼度が閾値未満（5.7.1）
+    case smallFace           // 検出用画像上で短辺 24px 未満の顔がある
+    case extremePose         // 横や上下を大きく向いた顔がある
+    case faceAtEdge          // 拡張後の領域が画像境界に接する顔がある
+    case overlappingFaces    // 領域同士が重なる顔がある
 }
 
-/** 警告 1 件。理由ではなく「発生」を表す */
-data class ReviewIssueId(
-    val detectionRevision: Long,
-    val reason: ReviewReason,
-    val affectedFaceTrackIds: List<String>,   // 辞書順にソート済み
-)
+/// 警告 1 件の同一性。理由ではなく「発生」を識別する
+struct ReviewIssueID: Sendable, Hashable {
+    let detectionRevision: Int64
+    let reason: ReviewReason
+    let affectedFaceTrackIDs: [String]   // 辞書順にソート済み
+}
 
-data class ReviewIssue(
-    val issueID: ReviewIssueId,
-    val affectedFaceTrackIds: Set<String>,
-)
+struct ReviewIssue: Sendable, Equatable {
+    let id: ReviewIssueID
+    let affectedFaceTrackIDs: Set<String>
+}
 
-fun triage(result: DetectionResult, detectionRevision: Long): List<ReviewIssue>
+func triage(_ result: DetectionResult, detectionRevision: Int64) -> [ReviewIssue]
 ```
 
 ##### 警告は発生単位で持つ
@@ -1667,25 +1682,24 @@ v1 では対応づけを試みません。
 | `OverlappingFaces` | 重なる 2 件を**辞書順に並べる**（順序で別 ID にならないように） |
 | `NoFaceDetected` | 空。ID は写真 ID と `detectionRevision` から生成する |
 
-**判定に使えるのは、両 OS が等しく提供する値だけです。**
+##### 判定に使う値（v1.x からの変更）
 
-当初は「検出信頼度が閾値未満」を理由の 1 つに置いていましたが、これは実現できません。iOS の `VNFaceObservation` は `confidence`（0〜1）を持つ一方、**ML Kit の `Face` には検出信頼度のアクセサが存在しない**ためです（`getBoundingBox` / `getHeadEulerAngleX・Y・Z` / `getLandmark` / `getSmilingProbability` / `getLeftEyeOpenProbability` / `getTrackingId` のみ）。
+**v1.x では `confidence` をトリアージから外していました。** ML Kit に対応する API が無く、Android だけ警告が出ない非対称が生じるためです。**iOS 単独になったため、この制約は消えます。**
 
-片方だけで判定すると、同じ写真で Android だけ警告が出ない非対称が生じます。警告の量が OS で変わることは、安全性の非対称そのものです。12.1 の契約テスト（両 OS で同一スイート）とも矛盾します。
+仕様 8.1 が求めるとおり `lowConfidence` をトリアージ理由へ戻し、`extremePose` と併用します。
 
-そこで **頭部回転角** に置き換えました。両 OS が対称に提供します。
-
-| 値 | iOS | Android |
+| 理由 | 判定 | 捉える失敗 |
 | --- | --- | --- |
-| yaw（左右の向き） | `VNFaceObservation.yaw` | `getHeadEulerAngleY()` |
-| pitch（上下の向き） | `VNFaceObservation.pitch` | `getHeadEulerAngleX()` |
-| roll（傾き） | `VNFaceObservation.roll` | `getHeadEulerAngleZ()` |
+| `lowConfidence` | `confidence` が閾値未満 | 検出器自身が確信を持てていない。誤検出または見落としの近傍 |
+| `extremePose` | `yawDegrees` または `pitchDegrees` の絶対値が閾値超過 | 検出はできているが、**拡張率の既定値では隠しきれない**可能性がある |
 
-横や上下を大きく向いた顔は検出枠が実際の顔を覆いきれないことがあり、警告する価値は信頼度と同等です。`ExtremePose` は yaw または pitch の絶対値が閾値を超えたときに立てます。
+**両方を残すのは、捉える失敗が違うからです。** 正面を向いた顔を低い信頼度で検出することもあれば、高い信頼度で真横の顔を検出することもあります。片方だけでは、もう一方の状況を見逃します。
 
-`confidence` は iOS でのみ取得できるため、**トリアージには使いません**。12.2 の検出品質の回帰監視でのみ、iOS 側の参考値として記録します。
+`extremePose` は、**角度が `nil` の顔には立てません**（5.7.1）。判定材料が無いためです。その顔は `lowConfidence` と `isSmallFace` が別途評価します。
 
-`triage` の結果が写真の **検出ステータス**（6.5.3）を決めます。空集合なら `Normal`、空でなければ `ReviewRequired` です。閾値はリモート設定で調整可能とします。
+閾値（`confidence` の下限、yaw / pitch の上限）はリモート設定で調整可能とします（11.1）。実素材での分布を見てから決めるため、初期値は 16 節の未決事項です。
+
+`triage` の結果が写真の **検出ステータス**（6.5.3）を決めます。空なら `Normal`、空でなければ `ReviewRequired` です。
 
 **このトリアージは、検出された顔の品質しか評価できません。** 検出されなかった顔の存在は、いかなる警告条件にも現れません。
 
@@ -1699,9 +1713,9 @@ v1 では対応づけを試みません。
 
 **写真の状態を 2 つの軸で持ちます。** 「アプリが何を検出したか」と「利用者が何を確認したか」は別の情報であり、1 つの状態へ混ぜると「通常なのに確認済み」「要確認を確認済みへ変更する」といった意味の混線が生じます。
 
-```kotlin
-enum class DetectionStatus { Normal, ReviewRequired }   // triage の結果
-enum class ReviewStatus { Unreviewed, Reviewed }        // 利用者の操作
+```swift
+enum DetectionStatus: Sendable { case normal, reviewRequired }   // triage の結果
+enum ReviewStatus: Sendable { case unreviewed, reviewed }        // 利用者の操作
 ```
 
 | 軸 | 値 | 決まり方 |
@@ -1749,8 +1763,8 @@ enum class ReviewStatus { Unreviewed, Reviewed }        // 利用者の操作
 
 おまかせ一括の「一覧の仕上がりを確認しました」は写真単位ではなくバッチ全体の操作なので、独立して持ちます。
 
-```kotlin
-data class BatchReviewState(val overviewConfirmed: Boolean)
+```swift
+struct BatchReviewState: Sendable { let overviewConfirmed: Bool }
 ```
 
 ##### 確認状態の解除
@@ -1806,21 +1820,21 @@ data class BatchReviewState(val overviewConfirmed: Boolean)
 
 **警告を消すのではなく、警告に対する利用者の判断を記録します。** 検出結果は事実であり、利用者が確認したからといって事実が変わるわけではないためです。
 
-```kotlin
-sealed interface ReviewResolution {
-    /** 内容を見て、このままでよいと判断した */
-    data object AcceptedAsIs : ReviewResolution
+```swift
+enum ReviewResolution: Sendable, Equatable {
+    /// 内容を見て、このままでよいと判断した
+    case acceptedAsIs
 
-    /** 手動で隠す範囲を追加した。どの領域かを保持する */
-    data class ManualRegionAdded(val regionID: String) : ReviewResolution
+    /// 手動で隠す範囲を追加した。どの領域かを保持する
+    case manualRegionAdded(regionID: String)
 
-    /** 顔を隠さずそのまま保存すると選んだ */
-    data object UnmaskedExportConfirmed : ReviewResolution
+    /// 顔を隠さずそのまま保存すると選んだ
+    case unmaskedExportConfirmed
 }
 
-data class ReviewDecision(
-    val resolutions: Map<ReviewIssueId, ReviewResolution>,
-)
+struct ReviewDecision: Sendable, Equatable {
+    let resolutions: [ReviewIssueID: ReviewResolution]
+}
 ```
 
 **`ManualRegionAdded` は `regionID` を持ちます。** 単なる列挙値だと、どの手動領域を追加したのかが分かりません。あとから利用者がその領域を削除した場合に、判断だけが残って「対応済み」と表示されます。
@@ -1832,17 +1846,18 @@ data class ReviewDecision(
 
 **判断は `ReviewIssue` ごとに記録します（理由ごとではありません）。** 1 枚の写真には複数の警告が同時に付き、同じ理由が複数件つくこともあります（6.5.2）。
 
-```kotlin
-ReviewDecision(
-    resolutions = mapOf(
-        // 1 人目の小さい顔に範囲を足した
-        ReviewIssueId(rev, SmallFace, listOf("face-1")) to ManualRegionAdded("region-9"),
-        // 2 人目はそのままでよいと判断した
-        ReviewIssueId(rev, SmallFace, listOf("face-2")) to AcceptedAsIs,
-        // 端の顔はそのままでよいと判断した
-        ReviewIssueId(rev, FaceAtEdge, listOf("face-5")) to AcceptedAsIs,
-    )
-)
+```swift
+ReviewDecision(resolutions: [
+    // 1 人目の小さい顔に範囲を足した
+    ReviewIssueID(detectionRevision: rev, reason: .smallFace, affectedFaceTrackIDs: ["face-1"])
+        : .manualRegionAdded(regionID: "region-9"),
+    // 2 人目はそのままでよいと判断した
+    ReviewIssueID(detectionRevision: rev, reason: .smallFace, affectedFaceTrackIDs: ["face-2"])
+        : .acceptedAsIs,
+    // 端の顔はそのままでよいと判断した
+    ReviewIssueID(detectionRevision: rev, reason: .faceAtEdge, affectedFaceTrackIDs: ["face-5"])
+        : .acceptedAsIs,
+])
 ```
 
 `ReviewRequired` の写真が `Reviewed` になる条件は、**その写真の `List<ReviewIssue>` すべてに対して `ReviewResolution` が記録されていること**です。1 件でも未記録なら `Unreviewed` のままです。
@@ -1940,7 +1955,7 @@ Free および Standard の利用者は、Pro の中核である一括処理を�
 
 #### 6.5.6.1 同一写真の再書き出し
 
-**クレジットの消費判定は、6.2.4 の同一素材判定（`sourceHash`）に従います。** 加工内容が異なっても、同じ元写真であれば追加消費しません。
+**クレジットの消費判定は、6.2.4 の `isSameSource` に従います。** 加工内容が異なっても、同じ元写真であれば追加消費しません。
 
 これがないと、モザイクで書き出して結果を見てから強度を調整して再書き出しするだけで 2 クレジット消費し、通常の無料枠（24 時間以内の再書き出しは追加消費なし）より厳しい扱いになります。試用のための枠がやり直しで目減りする設計は、トライアルの目的に反します。
 
@@ -1948,49 +1963,47 @@ Free および Standard の利用者は、Pro の中核である一括処理を�
 
 **残クレジット数は保存しません。消費済み台帳から導出します。**
 
-```kotlin
-val remainingCredits =
-    if (usageLedger.trialIntegrityLocked) {
-        0
-    } else {
-        maxOf(
+```swift
+let remainingCredits =
+    usageLedger.trialIntegrityLocked
+        ? 0
+        : max(
             0,
             configuredCreditCount
-                - usageLedger.trialEntries.size
-                - usageLedger.trialReservations.size,
+                - usageLedger.trialEntries.count
+                - usageLedger.trialReservations.count
         )
-    }
 ```
 
 ##### クレジットの予約
 
 **認可だけではクレジットを占有できません。** `UsageLedgerStore.transact` は更新を直列化しますが、**認可結果を台帳へ残さなければ、生成完了までクレジットは空いたまま**です。
 
-残り 1 枚の状態で、異なる `sourceHash` の 2 件が並行して認可されると、`sourceHash` ゲートは別素材なので通過し、どちらも `trialEntries.size` が同じ値を見て `BatchTrial(true)` になります。結果としてクレジットを 1 枚超過します。
+残り 1 枚の状態で、異なる素材 の 2 件が並行して認可されると、素材ゲートは別素材なので通過し、どちらも `trialEntries.size` が同じ値を見て `BatchTrial(true)` になります。結果としてクレジットを 1 枚超過します。
 
 Free の単体書き出しには月間認可ゲートがありますが（7.4.3）、一括トライアルには対応する仕組みがありませんでした。
 
 台帳へ予約を持たせます。
 
-```kotlin
-data class UsageLedger(
+```swift
+struct UsageLedger {
     // ...
-    val trialReservations: Map<String, String>,   // sourceHash → exportID
-)
+    let trialReservations: [TrialReservation]   // source と exportID の組（6.2.4）
+}
 ```
 
 | 契機 | 操作 | 保存先 |
 | --- | --- | --- |
-| 認可時（`BatchTrial(true)` と判定。手順 −2） | `trialReservations[sourceHash] = exportID` を**同じ `transact` の中で**追加する | ProtectedBlobStore |
+| 認可時（`BatchTrial(true)` と判定。手順 −2） | 該当素材の `TrialReservation` を**同じ `transact` の中で**追加する | ProtectedBlobStore |
 | `Prepared` の保存に失敗（手順 0） | **補償トランザクション**で予約を削除する | ProtectedBlobStore |
-| 台帳への適用（手順 4） | **同じ台帳トランザクション内で**予約を削除し、`trialEntries[sourceHash]` へ移す | ProtectedBlobStore |
+| 台帳への適用（手順 4） | **同じ台帳トランザクション内で**予約を削除し、`trialEntries` の該当要素 へ移す | ProtectedBlobStore |
 | 最終確定（手順 8） | **台帳には触らない**（DB のみ） | — |
 | ロールバック | この `exportID` が所有する**予約または `trialEntries`** を削除する | ProtectedBlobStore |
 | 起動時 | コミットの無い予約を孤児として削除する。**その完了後に新規認可を許可する** | ProtectedBlobStore |
 
 **残数計算は `trialEntries` と `trialReservations` の合計で行います。** 予約を数えなければ、予約を作った意味がありません。
 
-**不変条件: 同じ `sourceHash` が `trialEntries` と `trialReservations` の両方に存在してはなりません。** 予約から entry への移動は同一トランザクション内の削除と追加であり、中間状態が観測されません。この条件を台帳の検証時にも確認します。
+**不変条件: 同じ素材 が `trialEntries` と `trialReservations` の両方に存在してはなりません。** 予約から entry への移動は同一トランザクション内の削除と追加であり、中間状態が観測されません。この条件を台帳の検証時にも確認します。
 
 予約の削除は `ownerExportID` と同じ規則で、**その `exportID` が所有する予約だけ**を対象とします（6.2）。
 
@@ -2004,7 +2017,7 @@ data class UsageLedger(
 
 付与数（`configuredCreditCount`）はリモート設定で変更できます（11.1）。導出にしておけば、5 枚から増減しても挙動が自動的に決まります。残数を保存していると、既存利用者の残数を移行する処理が必要になります。
 
-台帳は `Map<sourceHash, TrialEntry>` として `UsageLedger` 内に保持します（6.2）。新しく追加した写真だけが消費対象になります。
+台帳は `[TrialEntry]` として `UsageLedger` 内に保持します（6.2）。新しく追加した写真だけが消費対象になります。
 
 この規則により、5 クレジットは「最大 5 回の書き出し」ではなく **「最大 5 枚を試す権利」** として機能します。
 
@@ -2054,12 +2067,12 @@ Pro の説明文でこれを誤解させないことを、文言作成時の制�
 
 キューの `review_required` は独立した真実を持たず、**利用者の確認待ちを表す導出値**です。導出条件は 6.5.3 のモードで異なります。
 
-```kotlin
-val requiresUserReview = when (mode) {
-    BatchMode.Auto ->
-        detectionStatus == ReviewRequired && reviewStatus == Unreviewed
-    BatchMode.OneByOne ->
-        reviewStatus == Unreviewed
+```swift
+let requiresUserReview = switch mode {
+case .auto:
+    detectionStatus == .reviewRequired && reviewStatus == .unreviewed
+case .oneByOne:
+    reviewStatus == .unreviewed
 }
 ```
 
@@ -2086,7 +2099,7 @@ Pro の価値を具体化するため、以下を含めます。
 - 一枚の失敗でバッチ全体を停止しない
 - アプリ再起動後に未完了キューを復元する
 - 元素材へのアクセス権限を失った場合は再選択を求める
-- バックグラウンド処理は Android が Foreground Service と明示的な通知、iOS は OS の実行制限に従う
+- バックグラウンド処理は OS の実行制限に従う。`BGProcessingTask` は使わず、フォアグラウンド継続を前提とする
 
 #### 6.5.9 一括設定と個別修正の優先順位
 
@@ -2121,12 +2134,12 @@ Pro の価値を具体化するため、以下を含めます。
 
 **判定軸は「作成時のプラン」ではなく「現在の設定内容が要求するプラン」です。**
 
-```kotlin
-/** 表示用。「Standard が必要です」の文言に使う */
-fun requiredPlan(project: Project): Plan
+```swift
+/// 表示用。「Standard が必要です」の文言に使う
+func requiredPlan(_ project: Project) -> Plan
 
-/** 実装上の判定。プラン名ではなく能力で決める */
-fun canEdit(project: Project, capabilities: ResolvedCapabilities): Boolean
+/// 実装上の判定。プラン名ではなく能力で決める
+func canEdit(_ project: Project, capabilities: ResolvedCapabilities) -> Bool
 ```
 
 **`requiredPlan` の戻り値で可否を決めません。** 必要プラン名と現在のプラン名を比較する実装になると、`status = pending` が素通りします。可否は `canEdit` が `capabilities.canUsePremiumStamps` / `canUseCustomStamps` を見て決めます。`requiredPlan` は Paywall の文言を組み立てるためだけに使います。
@@ -2189,7 +2202,7 @@ Pro を必要とするのは、バッチという単位に対する操作だけ�
 
 **Free で書き出す場合は、内容にかかわらず 6.2 の `QuotaPolicy` に従います。** 新規の書き出しでは月間枠を 1 枚消費し、同じ元写真を初回成功から 24 時間以内に再書き出す場合は追加消費しません（`FreeReexport`）。
 
-降格したという事実は、クォータ判定に影響しません。判定に使うのは `sourceHash` と経過時間だけです。
+降格したという事実は、クォータ判定に影響しません。判定に使うのは素材の同一性と経過時間だけです。
 
 **「閲覧」と「変更」を分けます。** Free でも編集画面を開いて内容を確認できます。有料スタンプを含むプロジェクトで**変更操作を行おうとした時点**で、2 つの選択肢を提示します。
 
@@ -2299,13 +2312,19 @@ GRDB（SQLite）を使います。採用理由は 3.3 に示します。
 
 容量上限を超えた場合、古いプロジェクトから順に削除します。サムネイルだけを削除して設定を残す中間状態は設けません。状態が増えるだけで利用者の利益になりません。
 
-**「履歴を保存しない」を選んだ場合、本当に保存しません。** 完了画面を離れた時点で、プロジェクト設定、検出結果、サムネイル、加工用の中間ファイルを削除します。内部的な利便性のために残しておくことはしません。プライバシー保護を掲げるアプリが、保存しないと選んだ利用者のデータを保持している状態は許容できないためです。
+**「履歴を保存しない」を選んだ場合、本当に保存しません。** 完了画面を離れた時点で、次をすべて削除します。
+
+- プロジェクト設定、検出結果、サムネイル、加工用の中間ファイル
+- **`ExportRecord`**（7.5.2）
+- **完了済みの `ExportQueueItem`**（7.5.2）
+
+内部的な利便性のために残しておくことはしません。プライバシー保護を掲げるアプリが、保存しないと選んだ利用者のデータを保持している状態は許容できないためです。
 
 例外は 4 つです。
 
 - **未受け渡しの出力ファイル**（6.2.2）。利用者がまだ受け取っていない成果物であり、履歴とは性質が異なります。保存・共有・破棄のいずれかで解消します
-- **`UsageLedger` の `sourceHash` と初回成功時刻**（6.2）。無料枠の判定に必要な最小限であり、ProtectedBlobStore 側に保持します。画像の内容を復元できる情報を含みません
-- **一括処理トライアルの消費済み素材識別値**（6.5.6.1）。5 枚分のトライアル対象を判定するために、`sourceHash` を ProtectedBlobStore へ **期限なく** 保持します。こちらも画像の内容を復元できる情報を含みません
+- **`UsageLedger` の `SourceIdentity` と初回成功時刻**（6.2）。無料枠の判定に必要な最小限であり、ProtectedBlobStore 側に保持します。画像の内容を復元できる情報を含みません
+- **一括処理トライアルの消費済み素材識別値**（6.5.6.1）。5 枚分のトライアル対象を判定するために、`SourceIdentity` を ProtectedBlobStore へ **期限なく** 保持します。こちらも画像の内容を復元できる情報を含みません
 - **未完了の `ExportCommit` と、それが参照する検証済み出力ファイル**（7.4.3）。書き出しの整合性を回復するための運用データであり、コミット完了またはロールバック後に削除します
 
 3 つ目は保持期間が無期限である点が他と異なります。設定画面での個別説明までは要しませんが、**プライバシーポリシーの記載と整合させる必要があります**（16 節の未決事項）。
@@ -2469,12 +2488,12 @@ GRDB（SQLite）を使います。採用理由は 3.3 に示します。
 
 「共有シートを開いた」ことは受け渡しの成功ではありません。**どの結果で `Delivered` へ遷移するかを明示します。**
 
-```kotlin
-interface SharePresenter {
-    suspend fun share(file: OutputFile): ShareResult
+```swift
+protocol SharePresenter: Sendable {
+    func share(_ file: OutputFile) async -> ShareResult
 }
 
-enum class ShareResult { Completed, Canceled, Unknown, Failed }
+enum ShareResult: Sendable { case completed, canceled, unknown, failed }
 ```
 
 | 結果 | 出力状態 | 扱い |
@@ -2486,7 +2505,7 @@ enum class ShareResult { Completed, Canceled, Unknown, Failed }
 
 `Unknown` は、共有先アプリが完了を返さない場合に生じます。ここで `Delivered` にすると、実際には渡っていない写真を「保存済み」として一時ファイルを消しかねません。**受け取れていない可能性がある側へ倒します。**
 
-**何を `Completed` とするかは、実装計画で OS ごとに先に定義します。** 契約テストは決定手段ではなく、決めた契約を検証する手段です。テストで挙動を突き合わせてから決めると、そのときの実装が仕様になってしまいます。
+**何を `completed` とするかは、実装前に先に定義します。** テストは決定手段ではなく、決めた契約を検証する手段です。テストで挙動を突き合わせてから決めると、そのときの実装が仕様になってしまいます。
 
 実装計画で定義する内容は次のとおりです。
 
@@ -2506,7 +2525,7 @@ enum class ShareResult { Completed, Canceled, Unknown, Failed }
 | 完成済みファイルの公開 | ファイルシステム |
 | `OutputRecord` = `Generated` | DB |
 | Free 枠の消費、`ExportGrant` の作成 | ProtectedBlobStore |
-| 一括トライアル台帳への `sourceHash` 追加 | ProtectedBlobStore |
+| 一括トライアル台帳への素材追加 | ProtectedBlobStore |
 
 **単一トランザクションで更新できません。** 異常終了の位置によって次が起こります。
 
@@ -2518,64 +2537,58 @@ enum class ShareResult { Completed, Canceled, Unknown, Failed }
 
 **永続的なコミットジャーナルを置きます。**
 
-```kotlin
-data class ExportCommit(
-    val exportID: String,
-    val projectID: String,
-    val batchID: String?,
-    val sourceHash: String,
-    val outputFileID: String,                 // パスではなく ID。専用ディレクトリ配下で解決する
-    val authorization: ExportAuthorization,   // 開始前に固定する
-    val verifiedOutput: VerifiedOutput?,      // Prepared では null。FileVerified 以降は必須
-    val finalizedAt: Instant?,                // 最終確定処理の effectiveNow
-    val finalizedPeriod: YearMonth?,          // 計上先の年月。finalizedAt から導出
-    val intent: AccountingIntent?,            // Prepared では null
-    val applied: AccountingApplied?,          // 台帳へ適用したあとに埋まる
-    val state: ExportCommitState,
-    val signature: ByteArray,                 // Keychain の鍵による HMAC
-)
-
-/** 手順1の検証結果。これ自体も HMAC の対象に含める */
-data class VerifiedOutput(
-    val byteSize: Long,
-    val sha256: ByteArray,
-)
-
-/** grant の操作。ensure と preserve を型で分ける */
-sealed interface GrantAction {
-    /** 有効な grant がなければ firstSuccessAt で新規作成してよい */
-    data class Ensure(
-        val sourceHash: String,
-        val firstSuccessAt: Instant,
-    ) : GrantAction
-
-    /** 認可時の grant を維持するだけ。新規作成は禁止 */
-    data class PreserveAuthorized(
-        val sourceHash: String,
-        val firstSuccessAt: Instant,
-    ) : GrantAction
+```swift
+struct ExportCommit: Sendable {
+    let exportID: String
+    let projectID: String
+    let batchID: String?
+    let source: SourceIdentity              // 6.2.4
+    let outputFileID: String                // パスではなく ID。専用ディレクトリ配下で解決する
+    let authorization: ExportAuthorization  // 開始前に固定する
+    let verifiedOutput: VerifiedOutput?     // Prepared では nil。FileVerified 以降は必須
+    let finalizedAt: Date?                  // Finalizing で確定する effectiveNow
+    let finalizedPeriod: YearMonth?         // 計上先の年月。finalizedAt から導出
+    let intent: AccountingIntent?           // Finalizing で確定する
+    let applied: AccountingApplied?         // 台帳へ適用したあとに埋まる
+    let state: ExportCommitState
+    let signature: Data                     // Keychain の鍵による HMAC
 }
 
-/** 台帳へ適用しようとする内容。時刻は finalizedAt から導出する */
-data class AccountingIntent(
-    val consumeExportID: String?,
-    val grantAction: GrantAction,
-    val trialSourceHashToEnsure: String?,
-)
+/// 手順1の検証結果。これ自体も HMAC の対象に含める
+struct VerifiedOutput: Sendable {
+    let byteSize: Int64
+    let sha256: Data
+}
 
-/** 台帳へ実際に適用された結果。AccountingCommitted で確定する */
-data class AccountingApplied(
-    val consumedInserted: Boolean,
-    val grantInsertedByThisExport: Boolean,
-    val trialInsertedByThisExport: Boolean,
-)
+/// grant の操作。ensure と preserve を型で分ける
+enum GrantAction: Sendable {
+    /// 有効な grant がなければ firstSuccessAt で新規作成してよい
+    case ensure(source: SourceIdentity, firstSuccessAt: Date)
 
-enum class ExportCommitState {
-    Prepared,
-    FileVerified,          // finalizedAt はまだ null
-    Finalizing,            // finalizedAt を確定した。台帳へ適用する直前
-    AccountingCommitted,
-    ReadyToPublish,        // 手順8の直前。まだ非公開
+    /// 認可時の grant を維持するだけ。新規作成は禁止
+    case preserveAuthorized(source: SourceIdentity, firstSuccessAt: Date)
+}
+
+/// 台帳へ適用しようとする内容。時刻は finalizedAt から導出する
+struct AccountingIntent: Sendable {
+    let consumeExportID: String?
+    let grantAction: GrantAction
+    let trialSourceToEnsure: SourceIdentity?
+}
+
+/// 台帳へ実際に適用された結果。AccountingCommitted で確定する
+struct AccountingApplied: Sendable {
+    let consumedInserted: Bool
+    let grantInsertedByThisExport: Bool
+    let trialInsertedByThisExport: Bool
+}
+
+enum ExportCommitState: Sendable {
+    case prepared
+    case fileVerified          // finalizedAt はまだ nil
+    case finalizing            // finalizedAt を確定した。台帳へ適用する直前
+    case accountingCommitted
+    case readyToPublish        // 手順8の直前。まだ非公開
 }
 ```
 
@@ -2593,8 +2606,8 @@ enum class ExportCommitState {
 
 | 勘定 | `grantAction` |
 | --- | --- |
-| `PaidUnlimited` / `FreeMonthlyConsume` / `BatchTrial(true)` / `BatchTrial(false)` | `Ensure(sourceHash, finalizedAt)` |
-| `FreeMonthlyReexport` | `PreserveAuthorized(sourceHash, authorization.authorizedGrant.firstSuccessAt)` |
+| `paidUnlimited` / `freeMonthlyConsume` / `batchTrial(true)` / `batchTrial(false)` | `.ensure(source:firstSuccessAt: finalizedAt)` |
+| `freeMonthlyReexport` | `.preserveAuthorized(source:firstSuccessAt: authorization.authorizedGrant.firstSuccessAt)` |
 
 `PreserveAuthorized` の適用規則です。
 
@@ -2637,13 +2650,13 @@ enum class ExportCommitState {
 
 そこで **`FileVerified` では `finalizedAt` を確定しません。** 最終確定を試みる直前に `Finalizing` 状態を保存し、そこで初めて時刻を決めます。
 
-```kotlin
-data class ExportCommit(
+```swift
+struct ExportCommit {
     // ...
-    val finalizedAt: Instant?,           // Finalizing 以降で必須。FileVerified では null
-    val finalizedPeriod: YearMonth?,     // finalizedAt から導出
+    let finalizedAt: Date?             // Finalizing 以降で必須。FileVerified では nil
+    let finalizedPeriod: YearMonth?    // finalizedAt から導出
     // ...
-)
+}
 ```
 
 | 値 | 導出元 |
@@ -2675,25 +2688,25 @@ data class ExportCommit(
 
 **`Blocked` になりうる評価を、生成が終わったあとに行いません。**
 
-```kotlin
-data class AuthorizedGrant(
-    val sourceHash: String,
-    val firstSuccessAt: Instant,        // 認可時に有効だった grant の開始時刻
-)
+```swift
+struct AuthorizedGrant: Sendable {
+    let source: SourceIdentity
+    let firstSuccessAt: Date       // 認可時に有効だった grant の開始時刻
+}
 
-data class ExportAuthorization(
-    val entitlementSnapshot: Entitlement,
-    val accountingMode: ExportAccountingMode,
-    val authorizedAt: Instant,
-    val authorizedGrant: AuthorizedGrant?,   // FreeMonthlyReexport のとき必須
-)
+struct ExportAuthorization: Sendable {
+    let entitlementSnapshot: Entitlement
+    let accountingMode: ExportAccountingMode
+    let authorizedAt: Date
+    let authorizedGrant: AuthorizedGrant?   // freeMonthlyReexport のとき必須
+}
 
-/** どの勘定を使う書き出しか。Blocked は含めない */
-sealed interface ExportAccountingMode {
-    data object PaidUnlimited : ExportAccountingMode         // Standard / Pro の通常書き出し
-    data object FreeMonthlyConsume : ExportAccountingMode    // Free の単体処理。月間枠を1消費
-    data object FreeMonthlyReexport : ExportAccountingMode   // 24時間以内の再書き出し
-    data class BatchTrial(val consumesTrialCredit: Boolean) : ExportAccountingMode
+/// どの勘定を使う書き出しか。blocked は含めない
+enum ExportAccountingMode: Sendable {
+    case paidUnlimited                          // 月間枠の対象外（singleExportAccess == .unlimited）
+    case freeMonthlyConsume                     // 月間枠を1消費
+    case freeMonthlyReexport                    // 24時間以内の再書き出し
+    case batchTrial(consumesTrialCredit: Bool)
 }
 ```
 
@@ -2772,14 +2785,17 @@ sealed interface ExportAccountingMode {
 
 ##### 台帳更新は直列化する
 
-```kotlin
-data class LedgerTransaction<R>(
-    val ledger: UsageLedger,
-    val result: R,
-)
+```swift
+struct LedgerTransaction<R: Sendable>: Sendable {
+    let ledger: UsageLedger
+    let result: R
+}
 
-interface UsageLedgerStore {
-    suspend fun <R> transact(transform: (UsageLedger) -> LedgerTransaction<R>): R
+/// actor にすることで、読み取り・変更・署名・保存が直列化される（4.3）
+actor UsageLedgerStore {
+    func transact<R: Sendable>(
+        _ transform:  (UsageLedger) throws -> LedgerTransaction<R>
+    ) async throws -> R
 }
 ```
 
@@ -2794,24 +2810,24 @@ interface UsageLedgerStore {
 
 一括処理の同時並列数は将来 2 へ増やす設計です（6.5.8）。書き出し処理は並列でも、**台帳のコミットは直列**とします。
 
-##### 同一 `sourceHash` は直列化する
+##### 同一素材 は直列化する
 
-**同じ `sourceHash` の非終端 `ExportCommit` は同時に 1 件だけとします。**
+**同じ素材 の非終端 `ExportCommit` は同時に 1 件だけとします。**
 
 この不変条件がないと、6.2 の所有者方式が壊れます。
 
 1. Export A が grant を作り、`ownerExportID` が A になる
-2. 同じ `sourceHash` の Export B も正常完了する。B は既存 grant を使うので所有者にならない
+2. 同じ素材 の Export B も正常完了する。B は既存 grant を使うので所有者にならない
 3. A のファイル異常でロールバックし、A 所有の grant を削除する
 4. **B は成功しているのに grant が消える**
 
 トライアル台帳でも同じことが起きます。
 
-- 並列処理は異なる `sourceHash` の間だけ許可する
-- 同一 `sourceHash` は直列化する。バッチ内に重複があっても同様
-- **コミット行の削除またはロールバック完了まで**、その `sourceHash` をロックする
+- 並列処理は異なる素材 の間だけ許可する
+- 同一素材 は直列化する。バッチ内に重複があっても同様
+- **コミット行の削除またはロールバック完了まで**、その素材をロックする
 
-ロックを `ReadyToPublish` で解放してはいけません。その保存後、コミット行の削除前にも復旧対象となる区間が残っています（7.4.3 の手順 6〜8）。ここで解放すると、同じ `sourceHash` の次の処理とロールバックが競合します。
+ロックを `ReadyToPublish` で解放してはいけません。その保存後、コミット行の削除前にも復旧対象となる区間が残っています（7.4.3 の手順 6〜8）。ここで解放すると、同じ素材 の次の処理とロールバックが競合します。
 
 この制約を設けない場合、grant とトライアル台帳が複数の成功 `exportID` を保持する必要があり、モデルが複雑になります。v1 では直列化を選びます。
 
@@ -2819,13 +2835,13 @@ interface UsageLedgerStore {
 
 **「同時 1 件」という規則だけでは競合を防げません。** 認可を通ってから `Prepared` を書くまでの間に、別の書き出しが同じ認可を通過できます。認可の**前**にゲートを取ります。
 
-```kotlin
-interface ExportStartGate {
-    suspend fun <R> withPermit(
-        sourceHash: String,
-        requiresMeteredSingleExportGate: Boolean,
-        block: suspend () -> R,
-    ): R
+```swift
+actor ExportStartGate {
+    func withPermit<R: Sendable>(
+        source: SourceIdentity,
+        requiresMeteredSingleExportGate: Bool,
+        _ body:  () async throws -> R
+    ) async throws -> R
 }
 ```
 
@@ -2833,23 +2849,23 @@ interface ExportStartGate {
 
 代わりに、**月間枠の対象となる単体書き出しであること**を条件にゲートを取ります。これは解決済み能力と処理種別だけで決まるため、認可前に判定できます。
 
-```kotlin
-val requiresMeteredSingleExportGate =
-    capabilities.singleExportAccess == SingleExportAccess.Metered && !isBatchExport
+```swift
+let requiresMeteredSingleExportGate =
+    capabilities.singleExportAccess == .metered && !isBatchExport
 ```
 
 **`Plan` からは判定しません。** `plan = Standard` かつ `status = pending` の利用者はゲートを取る必要がありますが、プランだけを見ると素通りします（6.2 の `SingleExportAccess`）。
 
 | 条件 | ゲート |
 | --- | --- |
-| `sourceHash` 単位 | 常に取得する |
+| 素材単位 | 常に取得する |
 | `requiresMeteredSingleExportGate == true` | 月間認可ゲートも取得する |
 | 一括トライアル、`singleExportAccess == Unlimited` | 月間認可ゲートは取得しない |
 
 開始の順序は次のとおりです。
 
 1. 復旧完了ゲートを確認する（7.4.3 の起動順序）
-2. `sourceHash` 単位のゲートを取得する
+2. 素材単位のゲートを取得する
 3. `requiresMeteredSingleExportGate` なら月間認可ゲートも取得する
 4. **その内側で** `UsageLedgerStore.transact` を実行し、`Consume` / `Reexport` / `Blocked` を決める
 5. `Blocked` なら生成せずに終える。ゲートは解放する
@@ -2862,23 +2878,23 @@ val requiresMeteredSingleExportGate =
 
 `OutputRecord` にも `exportID` を持たせ、どのコミットに対応するかを一意にします。
 
-```kotlin
-data class OutputRecord(
-    val exportID: String,
-    val projectID: String,
-    val batchID: String?,
-    val outputFileID: String,      // パスではなく ID。専用ディレクトリ配下で解決する
-    val outputByteSize: Long,      // verifiedOutput からコピー
-    val outputSha256: ByteArray,   // verifiedOutput からコピー
-    val state: OutputState,
-    val generatedAt: Instant,      // ExportCommit.finalizedAt からコピー
-    val expiresAt: Instant,        // finalizedAt + 24.hours
-)
+```swift
+struct OutputRecord: Sendable {
+    let exportID: String
+    let projectID: String
+    let batchID: String?
+    let outputFileID: String     // パスではなく ID。専用ディレクトリ配下で解決する
+    let outputByteSize: Int64    // verifiedOutput からコピー
+    let outputSHA256: Data       // verifiedOutput からコピー
+    let state: OutputState
+    let generatedAt: Date        // ExportCommit.finalizedAt からコピー
+    let expiresAt: Date          // finalizedAt + 24h
+}
 ```
 
 **時刻も `finalizedAt` から導出します。** `OutputRecord` は手順 8 で作られるため、その時点の `finalizedAt` をコピーすれば、公開時刻・消費計上月・24 時間期限の起点がすべて一致します。
 
-**アルゴリズムを名前で固定します。** `outputDigest` のような抽象名にすると、iOS と Android で別のアルゴリズムを選ぶ余地が残ります。両 OS で同じ値を突き合わせる用途なので、SHA-256 に固定します。
+**アルゴリズムを名前で固定します。** `outputDigest` のような抽象名にすると、実装ごとに別のアルゴリズムを選ぶ余地が残ります。記録時と照合時で同じ値を突き合わせる用途なので、SHA-256 に固定します。
 
 **サイズも記録します。** ダイジェストだけでは、手順 7 の「サイズが記録値と一致する」を判定できません。サイズ比較はダイジェスト計算より安く、途中書き込みを先に弾けます。
 
@@ -2956,7 +2972,7 @@ data class OutputRecord(
 | 3 | `OutputRecord` を削除する（存在する場合のみ。手順 8 未到達なら存在しない） | DB |
 | 4 | `outputFileID` のファイルを削除する | ファイルシステム |
 | 5 | `ExportCommit` を削除する | DB |
-| 6 | `sourceHash` ゲートと月間認可ゲートを解放する | メモリ |
+| 6 | 素材ゲートと月間認可ゲートを解放する | メモリ |
 
 規則は次のとおりです。
 
@@ -3029,21 +3045,25 @@ data class OutputRecord(
 
 手順 0 で `Prepared` を先に書くのは、**生成中に落ちたときに孤児となる一時ファイルを起動時に特定するため**です。ジャーナルに記録のない一時ファイルは掃除対象になります。
 
-冪等性の鍵は 2 種類です。**クォータ消費は `exportID`、トライアル消費は `sourceHash`。** 前者は同じ書き出しの再実行、後者は同じ写真の再書き出しを弾くもので、目的が異なります。台帳が集合を保持しているため（6.2）、再適用は自然に無害です。
+冪等性の鍵は 2 種類です。**クォータ消費は `exportID`、トライアル消費は素材の同一性。** 前者は同じ書き出しの再実行、後者は同じ写真の再書き出しを弾くもので、目的が異なります。台帳が集合を保持しているため（6.2）、再適用は自然に無害です。
 
 ##### 署名の対象と再署名
 
 **`ExportCommit` は状態遷移のたびに内容が変わります。** 初回挿入時の署名を残したまま状態だけ更新すると、正規の更新なのに次回起動で検証失敗になります。共通の形式と規則を定めます。
 
-```kotlin
-enum class PayloadType { UsageLedger, SubscriptionState, ExportCommit }
+```swift
+enum PayloadType: UInt32, Sendable {
+    case usageLedger = 1
+    case subscriptionState = 2
+    case exportCommit = 3
+}
 
-data class SignedPayload(
-    val payloadType: PayloadType,
-    val schemaVersion: Int,
-    val canonicalBytes: ByteArray,
-    val signature: ByteArray,
-)
+struct SignedPayload: Sendable {
+    let payloadType: PayloadType
+    let schemaVersion: UInt32
+    let canonicalBytes: Data
+    let signature: Data
+}
 ```
 
 - HMAC の対象は **`signature` 自身を除く全永続フィールド**
@@ -3100,11 +3120,23 @@ v1 の脅威モデルを明記します。
 
 **復旧を終えるまで、新しい書き出しを開始させません。**
 
-1. 未完了 `ExportCommit` をすべて復旧する
-2. 不要な一時ファイルを掃除する
-3. 未受け渡し出力を復元する（6.2.2.1）
-4. 通常画面を表示する
-5. 新しい書き出しを許可する
+順序を固定します。**各手順が前の手順の結果に依存します。**
+
+| 順 | 操作 | 依存 |
+| --- | --- | --- |
+| 1 | `UsageLedger` を読み込み、検証し、必要なら修復する（6.2.5） | — |
+| 2 | `ExportCommit` を読み込み、行ごとの署名を検証する | — |
+| 3 | **有効なコミットに対応しない `trialReservations` を削除する**（孤児予約） | 1・2 の完了 |
+| 4 | 有効な未完了コミットを復旧する（下表） | 1・2・3 の完了 |
+| 5 | `PendingFileDeletion` と孤児ファイルを回収する（8.4.1） | 4 の完了 |
+| 6 | 未受け渡し出力を復元する（6.2.2.1） | 4 の完了 |
+| 7 | 通常画面を表示し、**新しい書き出しを許可する** | 全手順の完了 |
+
+**手順 3 を手順 4 より前に置きます。** 孤児予約はクレジットを占有したままなので、これを回収する前に新しい認可を許可すると、実際には空いているクレジットを「使用中」と判定します。
+
+**署名検証に失敗したコミットに対応する予約は、自動削除しません。** そのコミットが会計済みかどうかを判断できない以上（7.4.3 の「コミット行の改ざん対策」）、予約だけを消すと台帳と食い違います。**復旧エラーが解消されるまで予約を保持します。**
+
+手順 5 を手順 4 の後に置くのは、ロールバックが `PendingFileDeletion` へ行を追加しうるためです。先に GC を走らせると、その回で回収できません。
 
 先に新しい書き出しを許可すると、あとから古いコミットをロールバックした際に、**すでに進んだ現在の台帳まで壊しかねません**。
 
@@ -3147,19 +3179,60 @@ v1 の脅威モデルを明記します。
 
 ```
 consumedExportIds に対象 exportID があれば削除
-grants[sourceHash].ownerExportID == 対象 exportID なら削除
-trialEntries[sourceHash].ownerExportID == 対象 exportID なら削除
-trialReservations[sourceHash] == 対象 exportID なら削除
+grants のうち ownerExportID == 対象 exportID の要素を削除
+trialEntries のうち ownerExportID == 対象 exportID の要素を削除
+trialReservations のうち exportID == 対象 exportID の要素を削除
 別の exportID が作った要素は削除しない
 ```
 
 これなら手順 3 と 4 の間で落ちても、**所有者から正しく判別できます**。既存の grant を再利用しただけの書き出しは `ownerExportID` が一致しないため、以前から存在した権利を巻き添えで消しません。
 
-### 7.5 削除候補の選定
+### 7.5 削除の経路
 
 7.2.3 の容量上限を超えた場合、削除候補は「お気に入りでない」「編集中でない」「処理キューに含まれない」「7.2.4 の保持保証の対象でない」の全条件を満たすもののうち、更新日時が最も古いものとします。
 
 写真ライブラリへ保存済みの出力ファイルは、明示的な確認なしに削除しません。
+
+#### 7.5.1 出力の削除
+
+**「ファイルを消す」だけでは `OutputRecord` が孤児になります。** 実体の無いレコードが残ると、期限判定や復旧案内の枚数（6.2.2.1）が実態と食い違います。
+
+**すべての出力削除を単一の経路へ統一します。**
+
+| 順 | 操作 |
+| --- | --- |
+| 1 | DB トランザクションで `OutputRecord` を削除する |
+| 2 | **同じトランザクション内で** `PendingFileDeletion(outputFileID)` を追加する |
+| 3 | DB のコミット後にファイルを削除する |
+| 4 | 成功したら `PendingFileDeletion` の行を削除する |
+| 5 | 失敗したら起動時 GC で再試行する（8.4.1） |
+
+対象は次のすべてです。**入口ごとに別の順序を実装しません。**
+
+- `Delivered` 状態で完了画面を離れた
+- 利用者が破棄した
+- `Generated` が 24 時間経過した
+- 壊れた出力を復元できなかった（7.4.3 の「コミット削除後にファイルが失われた場合」）
+
+順序の根拠は 8.4.1 と同じです。**失っても復旧できないほうを避けます。** ファイルを先に消して DB が失敗すると、レコードだけが残って実体を指せません。DB を先に更新すれば、残るのは孤児ファイルだけで、GC が回収します。
+
+#### 7.5.2 `ExportRecord` と履歴の削除
+
+`ExportRecord` は「いつ何を書き出したか」の履歴であり、24 時間では消えません（7.4.3）。**そのため、履歴設定の対象になります。**
+
+以前の版では、「履歴を保存しない」設定の例外として `未受け渡し出力` / `UsageLedger` / `未完了 ExportCommit` の 3 つを挙げていましたが、`ExportRecord` の扱いが抜けていました。この状態では**履歴を保存しない設定でも書き出し記録が残ります。**
+
+| 保存期間の設定 | `ExportRecord` の扱い |
+| --- | --- |
+| 履歴を保存しない | **完了画面を離れた時点で削除する** |
+| 7 日 / 30 日 | 期限で削除する |
+| 保存期限なし | 容量上限に達したら古いものから削除する |
+
+**`ExportRecord` は、対応する `Project` または `Batch` と同じトランザクションで削除します。** 別々に消すと、履歴一覧に「プロジェクトはあるが書き出し記録が無い」または「書き出し記録はあるがプロジェクトが無い」が生じます。
+
+**完了済みのキュー項目（`ExportQueueItem`）も同じ扱いです。** 履歴を残さない設定では、バッチ完了時に削除します。残すと、バッチの成功件数（キューからの導出値。7.4.3）だけが履歴として残ります。
+
+未完了のキュー項目は削除しません。処理中のバッチを失うことになります。
 
 ### 7.6 メタデータ
 
@@ -3175,7 +3248,7 @@ EXIF の撮影日時を一律に削除すると、加工後の写真がすべて
 | EXIF の撮影日時を保持 | ON | 可（OFF にすると日時も削除） |
 | **写真ライブラリの登録日時を元画像から引き継ぐ** | **常時 ON** | **不可** |
 
-最後の 1 行が要点です。iOS の `PHAssetCreationRequest.creationDate` と Android MediaStore の `DATE_TAKEN` は保存時に明示指定できるため、**EXIF から日時を消しても、ライブラリ側の日時を引き継げば並び順は保たれます**。
+最後の 1 行が要点です。`PHAssetCreationRequest.creationDate` は保存時に明示指定できるため、**EXIF から日時を消しても、ライブラリ側の日時を引き継げば並び順は保たれます**。
 
 これにより、プライバシーを最優先して EXIF 日時を削除した利用者でも、写真アプリ内の並び順は崩れません。外部へファイルを共有した場合のみ日時が失われます。
 
@@ -3185,9 +3258,9 @@ EXIF の撮影日時を一律に削除すると、加工後の写真がすべて
 
 履歴サムネイルを加工後にしても、**OS のタスクスイッチャには編集中の未加工画面がそのまま残ります**。プライバシー保護アプリとして最も目につく穴であるため、対策を必須とします。
 
-編集画面がフォアグラウンドから外れる際にプライバシーオーバーレイを表示します（iOS は `sceneWillResignActive`、Android は `onPause`）。
+編集画面がフォアグラウンドから外れる際にプライバシーオーバーレイを表示します（`scenePhase` が `.inactive` へ遷移した時点）。
 
-Android の `FLAG_SECURE` による全面禁止は採りません。利用者自身のスクリーンショットまで塞ぐためです。
+スクリーンショットの全面禁止は採りません。利用者自身が結果を記録する手段まで塞ぐためです。
 
 ---
 
@@ -3200,7 +3273,7 @@ Standard および Pro で利用可能とします（仕様 12.4）。
 | 項目 | 仕様 |
 | --- | --- |
 | 取り込み元 | 写真ライブラリ、およびファイルアプリ（`FilePicker`） |
-| 対応形式 | PNG、JPEG、HEIF / HEIC、WebP（Android） |
+| 対応形式 | PNG、JPEG、HEIF / HEIC |
 | 透過 PNG | 透過状態を維持する |
 | 非透過画像 | 円形または角丸マスクで切り抜く |
 | 自動背景除去 | **v1 では行わない** |
@@ -3210,7 +3283,7 @@ Standard および Pro で利用可能とします（仕様 12.4）。
 
 ファイルアプリからの取り込みを含める理由は、透過 PNG を確実に扱うためです。写真ライブラリ経由では透過が失われる経路があります。
 
-自動背景除去を v1 で行わない理由は、iOS には Vision の前景マスク生成があるのに対し Android に等価な標準機能がなく、両 OS で品質差が出るためです（仕様 12.5 とも一致）。
+自動背景除去を v1 で行わない理由は、Vision の前景マスク生成の品質が素材に大きく依存し、失敗時の利用者への説明が難しいためです（仕様 12.5 とも一致）。v1.x では Android に等価機能が無いことを理由にしていましたが、iOS 単独になったため理由を差し替えます。
 
 ### 8.2 登録上限
 
@@ -3349,14 +3422,14 @@ PNG で原寸のまま 100 個保存すると数十 MB から 100MB を超えま
 
 Logger が自由文字列を受け取らない設計とします。
 
-```kotlin
-sealed interface LogEvent {
-    val code: String
-    val fields: Map<String, LogValue>
+```swift
+protocol LogEvent: Sendable {
+    var code: String { get }
+    var fields: [String: LogValue] { get }
 }
 
 // LogValue は列挙値・区分値・数値のみ。任意の String を受け付けない
-fun log(event: LogEvent)   // log(String) は存在しない
+func log(_ event: some LogEvent)   // log(String) は存在しない
 ```
 
 これにより、仕様 22.5 が禁じるファイル名、パス、顔座標、EXIF、ユーザー入力文字列が **型として渡せなくなります**。レビューでの目視チェックに依存しません。
@@ -3433,7 +3506,7 @@ Sentry KMP SDK はメジャーバージョン前のため、`domain` が定義�
 | `GET /v1/config` | Free 月間書き出し数、一括処理上限、トライアルクレジット数、トリアージ閾値、履歴の容量上限、カスタムスタンプの保存解像度、有効なスタンプパック、広告表示頻度、最低サポートアプリバージョン、障害中の機能停止フラグ |
 | `POST /v1/diagnostics` | ユーザーが明示的に同意した場合のみ受信 |
 
-仕様 21.5 の `POST /v1/installations` は実装しません。匿名インストール ID は RevenueCat の App User ID と兼用します。仕様 21.4 の要件（Keychain / Keystore への保存、広告 ID を利用者 ID として使わない、ハードウェア識別子を収集しない）は満たされます。
+仕様 21.5 の `POST /v1/installations` は実装しません。匿名インストール ID は RevenueCat の App User ID と兼用します。仕様 21.4 の要件（Keychain への保存、広告 ID を利用者 ID として使わない、ハードウェア識別子を収集しない）は満たされます。
 
 `POST /v1/entitlements/apple/verify` と `POST /v1/entitlements/google/verify` は RevenueCat が担うため実装しません。
 
@@ -3472,7 +3545,70 @@ pub struct DiagnosticsContext {
 
 9.4.1 のクライアント側フィルタと、この型定義の**両方**で防ぎます。片方だけでは、もう片方の実装ミスを吸収できません。
 
-### 11.3 障害時
+#### 11.2.1 診断エンドポイントの運用制約
+
+型制約に加えて、運用面の上限を定めます。**型が正しくても、量と保持期間が無制限なら別の問題になります。**
+
+| 項目 | 規約 |
+| --- | --- |
+| リクエストサイズ上限 | **8KB**。超過は 413 |
+| レート制限 | **IP 単位で 10 件 / 分**。超過は 429 |
+| 保存期間 | **30 日**。Sentry の無料枠と揃える（9.4） |
+| 自動削除 | 保存期間を過ぎた行を日次で削除する |
+| 同意撤回後 | **送信しない。** 撤回時点でクライアント側の送信キューも破棄する |
+| サーバーログ | **リクエスト本文を出力しない。** アクセスログはメソッド・パス・ステータス・所要時間のみ |
+
+**サーバーログへ本文を出さないことを明記します。** アプリ側で許可フィールドだけに絞っても、サーバーが本文をそのままログへ流せば、そのログが第 2 の収集経路になります。ログ基盤の保持期間はアプリの設計と無関係に決まるため、ここで塞ぎます。
+
+**同意撤回後にキューを破棄するのは、送信前のデータが端末に残るためです。** オフライン時に貯めた診断を、撤回後にオンラインになった時点で送るのは同意の趣旨に反します。
+
+### 11.3 リモート設定の検証とキャッシュ
+
+**`/v1/config` は静的 JSON と ETag だけでは不十分です。** この JSON は無料枠、トライアル枚数、一括処理上限、並列数、トリアージ閾値、広告頻度、最低バージョン、機能停止フラグを変更できます。**壊れた値や古い値をそのまま適用すると、アプリ更新なしで全利用者を壊せます。**
+
+##### エンベロープ
+
+```swift
+struct RemoteConfigEnvelope: Sendable, Decodable {
+    let schemaVersion: Int
+    let configVersion: Int64
+    let issuedAt: Date
+    let expiresAt: Date
+    let payload: RemoteConfig
+}
+```
+
+##### クライアント側の規則
+
+| 状況 | 扱い |
+| --- | --- |
+| `schemaVersion` が未知 | **設定全体を拒否する** |
+| 数値がアプリ内の許容範囲外 | **その設定全体を拒否する**（該当項目だけ捨てない） |
+| enum に未知の値がある | **設定全体を拒否する** |
+| `configVersion` が保存済みより小さい | **拒否する**（ロールバック攻撃と配信事故の両方を防ぐ） |
+| 取得失敗 | 最後に検証成功した設定（last-known-good）を使う |
+| last-known-good も無い | **バンドル済みの既定値**を使う |
+| `expiresAt` を過ぎた設定 | **機能停止フラグ以外をバンドル既定値へ戻す** |
+
+**部分的に採用しません。** 「この項目だけ範囲外だから既定値で埋める」を許すと、配信された設定の一部と既定値が混ざった、テストされていない組み合わせが動きます。全体を拒否すれば、動くのは「配信された設定」か「既定値」のどちらかだけです。
+
+**期限切れで機能停止フラグだけを残すのは、それが障害対応の手段だからです。** サーバーが落ちている間に機能停止を解除してしまうと、止めたかった機能が動きます。逆に上限値や閾値は、古い値を使い続けるより既定値のほうが安全です。
+
+##### リモート設定で変更できないこと
+
+**次はリモート設定から無効化できません。** 安全性の中核であり、サーバー側の事故や侵害で外せる状態にしません。
+
+- 6.5.3 の確認画面（`ReviewRequired` の解消なしに書き出せない）
+- 6.1 の全顔初期マスク
+- 7.4.1 のファイル検証（サイズ・SHA-256・デコード）
+- 7.4.3 のコミットジャーナルと最終確定境界
+- 5.1.2 の未解決 `bitmapID` によるエラー
+
+これらに対応する設定キー自体を `RemoteConfig` に持たせません。「フラグはあるが既定で有効」ではなく、**フラグを存在させない**という形にします。
+
+**一括処理の同時並列数は、アプリが対応を宣言した最大値を超えません。** リモートで 8 を指定されても、アプリ側の上限（v1 は 2）でクランプします。並列数は実装が想定するメモリ使用量と直結するため、サーバーから引き上げられる形にしません。
+
+### 11.4 障害時
 
 リモート設定の取得に失敗した場合はアプリ内の安全な既定値を使用します。バックエンド障害で編集処理を停止させません（仕様 21.6）。
 
@@ -3536,7 +3672,7 @@ pub struct DiagnosticsContext {
 - 共有結果が `Completed` のときだけ `Delivered` へ遷移すること。`Unknown` では維持されること（7.4.2）
 - 確認段階から設定へ戻っても検出結果が保持されること。この経路で写真の選択を変更できないこと（6.5.3）
 - `ExportGrant` が能力を問わず作成されること（6.2.0）
-- 同一 `sourceHash` の再書き出しで `firstSuccessAt` が更新されないこと（6.2.0）
+- 同一素材 の再書き出しで `firstSuccessAt` が更新されないこと（6.2.0）
 - 端末時刻を過去へ戻しても 24 時間の窓が延びないこと。`effectiveNow` が後退しないこと（6.2.2.5）
 - `domain` の時間判定が `now` ではなく `effectiveNow` だけを受け取ること（6.2.2.5）
 - 未受け渡し出力の削除期限が端末時刻の変更で延びないこと（6.2.2.5）
@@ -3574,13 +3710,13 @@ pub struct DiagnosticsContext {
 - `RenderRegion.bounds` が出力キャンバス基準へ変換されること（5.2）
 - `sourceCrop` の不変条件違反が例外になり、クランプで黙って直されないこと（5.2）
 - `Manual` の領域が `Auto` より後の `order` になること（5.2.1）
-- `domain` が `StampRasterizer` ポートのみを持ち、Compose Canvas を参照しないこと（5.1.1）
+- `Domain` が `StampRasterizer` プロトコルのみを持ち、`CoreGraphics` を参照しないこと（4.1 / 5.1.1）
 - `StampRasterRequest` に位置・回転・不透明度・形状が含まれないこと（5.1.1）
-- `sourceHash` が長さ前置き・ビッグエンディアン・UTC epoch ms で計算されること（6.2.4）
+- `contentFingerprint` が長さ前置き・ビッグエンディアン・UTC epoch ms で計算されること（6.2.4）
 - 64KB 未満のファイルで先頭・末尾チャンクが重複しても正しく計算されること（6.2.4）
 - 撮影日時が無い場合に長さ 0 のフィールドとして扱われること（6.2.4）
 - 撮影日時の優先順位がライブラリ → EXIF → `null` であること。更新日時を使わないこと（6.2.4）
-- `representation` が `sourceHash` の入力に含まれないこと（6.2.4）
+- `representation` が `contentFingerprint` の入力に含まれないこと（6.2.4）
 - 設定ハッシュが `Map` のキー順・`Float` のビット表現・内容ハッシュ参照で正準化され、DB ID に依存しないこと（6.2.4）
 - プロジェクト設定ハッシュの一致判定により、Free の「変更せず再書き出し」が許可されること（6.7）
 - キーフレーム補間（v2 機能だが仕様確定のため v1 で実装・テスト。5.5）
@@ -3611,11 +3747,11 @@ pub struct DiagnosticsContext {
 - 失効時、`Prepared` 以降の写真は完了し `waiting` の写真は開始しないこと（7.4.3）
 - 月間枠の対象となる単体書き出しが同時に 1 件までに制限されること（7.4.3）
 - 開始ゲートが `requiresMeteredSingleExportGate` で取得され、認可前に決定できること（7.4.3）
-- 開始ゲートにより、認可から `Prepared` までの間に同一 `sourceHash` の別書き出しが割り込めないこと（7.4.3）
-- 同一 `sourceHash` の非終端コミットが同時に 1 件までに制限されること（7.4.3）
-- `sourceHash` のロックがコミット行削除まで保持されること（7.4.3）
+- 開始ゲートにより、認可から `Prepared` までの間に同一素材 の別書き出しが割り込めないこと（7.4.3）
+- 同一素材 の非終端コミットが同時に 1 件までに制限されること（7.4.3）
+- 素材のロックがコミット行削除まで保持されること（7.4.3）
 - 並列書き出し時も `UsageLedgerStore.transact` が直列化され、更新が失われないこと（7.4.3）
-- クォータ消費が `exportID`、トライアル消費が `sourceHash` で冪等であること（7.4.3）
+- クォータ消費が `exportID`、トライアル消費が素材の同一性で冪等であること（7.4.3）
 - 検証済みファイルが手順 8 の完了まで UI・`MediaSaver`・`SharePresenter` へ公開されないこと（7.4.1）
 - `FileVerified` で落ちた場合、`verifiedOutput` と実体を突き合わせて復旧できること（7.4.3）
 - 手順 8 のサイズ・SHA-256 が `verifiedOutput` からのコピーであり、再計算でないこと（7.4.3）
@@ -3625,11 +3761,11 @@ pub struct DiagnosticsContext {
 - コミット行削除後にファイルを失っても、月間枠・grant・トライアルが戻らないこと（7.4.3）
 - コミット削除済みの Export A のファイル欠損で、同一素材を再書き出しした Export B の grant が消えないこと（7.4.3）
 - 生成完了後の異常終了では消費が戻らないこと（6.2.1）
-- 残 1 枚で異なる `sourceHash` の 2 件が並行認可されても、両方が `BatchTrial(true)` にならないこと（6.5.6.1）
+- 残 1 枚で異なる素材 の 2 件が並行認可されても、両方が `BatchTrial(true)` にならないこと（6.5.6.1）
 - 予約が手順 −2 で作られ、手順 4 の台帳トランザクション内で `trialEntries` へ移ること（6.5.6.1）
 - 手順 0 の `Prepared` 保存失敗で、補償トランザクションが予約を削除すること（6.5.6.1）
-- 同じ `sourceHash` が `trialEntries` と `trialReservations` の両方に存在しないこと（6.5.6.1）
-- 同じ `sourceHash` の再書き出しでトライアルクレジットが二重に減らないこと（6.5.6.1）
+- 同じ素材 が `trialEntries` と `trialReservations` の両方に存在しないこと（6.5.6.1）
+- 同じ素材 の再書き出しでトライアルクレジットが二重に減らないこと（6.5.6.1）
 - トライアルクレジットが成功枚数分だけ減り、失敗と中止では減らないこと（6.5.6）
 - `UsageLedger` の署名検証失敗時、修復済み台帳が作られ、翌月に月間枠が再開しトライアルは封じられたままであること（6.2.5）
 - 修復済み台帳の `trialReservations` が空であること（6.2.5）
@@ -3751,7 +3887,7 @@ iOS の `VNFaceObservation.confidence` は、この回帰監視でのみ参考�
 
 ### 13.3 動画の扱い
 
-**v1 では動画を一切露出させません。** ピッカーは画像限定とします（iOS は `PHPickerFilter.images`、Android Photo Picker は画像のみ）。
+**v1 では動画を一切露出させません。** ピッカーは画像限定とします（`PHPickerFilter.images`）。
 
 理由は 4 点です。
 
@@ -3855,7 +3991,7 @@ Web モックである以上、以下は本書の記述どおりには再現で�
 
 | 項目 | モック | 実装 |
 | --- | --- | --- |
-| 顔検出・加工・保存・課金 | ダミーデータと固定の座標 | Vision / ML Kit、Core Image / OpenGL ES、PhotoKit / MediaStore、RevenueCat |
+| 顔検出・加工・保存・課金 | ダミーデータと固定の座標 | Vision、Core Image、PhotoKit、RevenueCat |
 | 時間経過に依存する判定 | 24 時間の窓、月初リセット、保存期限は経過を再現しない | `effectiveNow` による判定（6.2.2.5 / 6.2.3 / 7.2.3） |
 | 台帳の永続化と署名 | React の状態として保持。HMAC も改ざん検知もない | `UsageLedger` を `ProtectedBlobStore` へ署名付きで保存（6.2 / 6.2.5） |
 | 書き出しの耐久性 | 中断・復旧の概念がない | `ExportCommit` によるコミットジャーナルと起動時の復旧（7.4.3） |
@@ -3897,14 +4033,14 @@ Web モックである以上、以下は本書の記述どおりには再現で�
 | --- | --- | --- |
 | 商品 ID | 仕様 27.1 の商品 ID は暫定。ストア登録時に確定 | ストア登録時 |
 | カスタムスタンプのバックアップ方針 | 仕様 20.4 が初期リリース前の決定としている | v1 実装中 |
-| プライバシーポリシーの記載 | トライアル台帳（`sourceHash`）を期限なく端末内へ保持することを記載し、7.2.3 の例外と整合させる | ストア申請前 |
+| プライバシーポリシーの記載 | トライアル台帳（`SourceIdentity`）を期限なく端末内へ保持することを記載し、7.2.3 の例外と整合させる | ストア申請前 |
 | 共有結果 `Unknown` 後の利用者操作 | `Generated` を維持するため、共有後に画面を離れると「保存していない写真があります」が出る。「共有できましたか？」と明示確認して `Delivered` にするか、`Generated` のまま保存・再共有・破棄を選ばせるか。OS 結果の写像だけでなく、その後の操作まで定義が必要（7.4.2） | 実装計画で確定 |
 | 基本スタンプの意匠 | ベクターで自作する 12〜20 種の具体的な図案 | v1 実装中 |
 | `ExtremePose` の角度閾値 | yaw / pitch の絶対値が何度を超えたら警告するか。検出品質テストの結果から決定（6.5.2） | v1 実装中 |
 | 履歴の使用容量上限 | 初期値 200MB は暫定。加工後サムネイルの実サイズを計測して確定 | v1 実装中 |
 | カスタムスタンプの保存解像度 | 長辺 1,024px は暫定。顔が大きく写る素材での見え方を実機で確認して確定（8.5） | v1 実機検証時 |
 | トライアルのクレジット数 | 5 枚は暫定。転換率を見て調整可能な設定値とする | リリース後 |
-| 一括処理の同時並列数 | 写真のみのため 2 まで許容可能だが、初期値は 1。両 OS の実機計測後に判断 | v1 実機検証時 |
+| 一括処理の同時並列数 | 写真のみのため 2 まで許容可能だが、初期値は 1。実機計測後に判断 | v1 実機検証時 |
 
 ---
 
