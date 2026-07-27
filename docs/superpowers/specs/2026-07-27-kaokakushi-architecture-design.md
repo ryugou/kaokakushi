@@ -3,7 +3,7 @@
 | 項目 | 内容 |
 | --- | --- |
 | 文書名 | かおかくし 技術スタックおよびアーキテクチャ設計 |
-| バージョン | 1.14 |
+| バージョン | 1.15 |
 | 作成日 | 2026-07-27 |
 | 対象 | 写真・動画向け顔匿名化アプリ（iOS / Android） |
 | 上位文書 | 写真・動画向け顔匿名化アプリ 仕様書 v0.1 |
@@ -252,6 +252,7 @@ fun expand(face: NormalizedRect, effect: EffectSetting): NormalizedRect
 | `ImageEffectRenderer` | RenderPlan の 4 プリミティブ実行 | Core Image | OpenGL ES 2.0 |
 | `ImageEncoder` | JPEG / PNG エンコード、メタデータ除去 | Image I/O | Bitmap.compress + ExifInterface |
 | `MediaSaver` | 写真ライブラリ保存、登録日時の指定 | PhotoKit | MediaStore |
+| `SharePresenter` | OS 共有シートの提示と結果の返却 | UIActivityViewController | `Intent.ACTION_SEND` |
 | `SecureStore` | 匿名 ID、権限キャッシュ、HMAC 鍵 | Keychain | Keystore |
 | `AdPresenter` | バナー・全画面広告 | GADBannerView | AdView |
 | `PrivacyShield` | 画面スナップショット対策（7.7） | `sceneWillResignActive` | `onPause` |
@@ -402,7 +403,9 @@ fun evaluate(
 
 #### 6.2.2 未保存出力の保持
 
-消費を確定した以上、**利用者が完成物を受け取れないまま失う経路を作りません。**
+消費を確定した以上、**生成直後の失敗や異常終了によって利用者が成果物を失う経路を作りません。**
+
+ただし未受け渡し出力の保持は無期限ではなく、**24 時間で削除します。** 「失わせない」と「永久に持ち続ける」は別です。「あとで保存」を選ぶ場面では、この期限を明示します。
 
 **保存や共有が 1 回成功しても、その場では削除しません。** 7.4.2 が「何度実行しても追加消費しない」と定める以上、1 回目の受け渡しでファイルを消すと、共有したあとに写真ライブラリへも保存する、という操作が成立しなくなります。
 
@@ -535,16 +538,23 @@ Pro は 1 バッチ 50 枚のため、高解像度写真の完成物が数百 MB
 
 仕様 14.4 の「端末時刻が過去へ戻された場合、最後に確認した年月より前へ戻さない」を、期間の単調増加を強制することで実現します。
 
+**月初にリセットするのは `consumed` だけです。`grants` は月をまたいで保持します。**
+
 ```kotlin
 fun rollPeriod(ledger: QuotaLedger, now: Instant, zone: TimeZone): QuotaLedger {
     val current = now.toLocalDateTime(zone).yearMonth
+    // 24時間を過ぎた権利だけを落とす。月の境界とは無関係
+    val activeGrants = ledger.grants.filter { now - it.firstSuccessAt < 24.hours }
+
     return if (current > ledger.period) {
-        QuotaLedger(current, consumed = 0, grants = emptyList())
+        ledger.copy(period = current, consumed = 0, grants = activeGrants)
     } else {
-        ledger   // 同一または過去 → リセットしない
+        ledger.copy(grants = activeGrants)   // 同一または過去 → 期間はリセットしない
     }
 }
 ```
+
+`grants` を月初に空にすると、**7 月 31 日 23:59 に書き出して 8 月 1 日 00:01 に再書き出しした場合、2 分しか経っていないのに `FreeReexport` になりません。** 24 時間の窓は月の境界と無関係であり、両者を連動させる理由はありません。
 
 タイムゾーンを西へ移動して月をまたぎ戻しても、端末時計を手動で戻しても、`period` は後退しません。
 
@@ -739,25 +749,37 @@ data class BatchReviewState(val overviewConfirmed: Boolean)
 
 **判定は設定名の列挙ではなく、原則で行います。** 設定項目を数え上げる形にすると、項目が増えたときに漏れます（背景処理がその例でした）。
 
-> **加工後画像の見た目または構図に影響する変更**が行われた場合、その変更の影響を受ける写真を `Unreviewed` へ戻し、`overviewConfirmed` を `false` にする。
+> **匿名化結果または構図に影響する変更**が行われた場合、その変更の影響を受ける写真を `Unreviewed` へ戻し、`overviewConfirmed` を `false` にする。
+
+基準を「見た目」ではなく「匿名化結果」とします。圧縮品質を上げ下げすれば見た目は厳密には変わりますが、**顔が隠れているかどうかの確認をやり直す必要はありません。** 確認の目的は匿名化の妥当性であり、画質の良し悪しではないためです。
 
 | 変更 | 写真の `ReviewStatus` | `overviewConfirmed` |
 | --- | --- | --- |
-| 見た目・構図に影響する変更（個別） | その写真だけ `Unreviewed` | `false` |
-| 見た目・構図に影響する変更（共通） | 影響を受ける写真を `Unreviewed`。`hasOverride` の写真は共通設定の影響を受けないため維持（6.5.9） | `false` |
+| 匿名化結果・構図に影響する変更（個別） | その写真だけ `Unreviewed` | `false` |
+| 匿名化結果・構図に影響する変更（共通） | 影響を受ける写真を `Unreviewed`。`hasOverride` の写真は共通設定の影響を受けないため維持（6.5.9） | `false` |
 | 写真を削除 | 残った写真は維持 | `false` |
-| 見た目・構図に影響しない変更 | 維持 | 維持 |
+| 影響しない変更 | 維持 | 維持 |
 
-**見た目・構図に影響する変更**の例です。
+**影響する変更**の例です。
 
 - 顔のエフェクト、エフェクト強度、スタンプ
 - 顔領域の追加・移動・削除
-- 縦横比、切り抜き位置
+- 縦横比、切り抜き位置（構図が変わり、隠すべき顔が枠外へ出うる）
 - 背景ぼかしなどの背景処理
 
 **影響しない変更**の例です。位置情報の削除、撮影日時の保持、圧縮品質。
 
 写真の追加は表に含めません。確認状態が存在するのは検出が終わったあと、すなわち実行開始後であり、6.5.8 のとおり v1 では実行開始後のバッチへ写真を追加できないためです。実行中の追加を実装する際に、この行を戻します。
+
+##### 設定へ戻る経路
+
+**確認段階から設定段階へ戻れます。検出結果は保持し、再検出は行いません。**
+
+共通設定を変える手段は設定段階の 1 か所だけとし、確認画面に別の設定 UI を置きません。同じ設定が 2 か所にあると、どちらが正かという問題が生まれます。
+
+戻って設定を変更した場合、上の解除規則を適用します。変更せずに戻ってきた場合は確認状態を維持します。写真の選択を変えた場合のみ、その写真の検出をやり直します。
+
+「選びなおす」（バッチ全体の破棄）とは別の操作です。前者は検出結果を保ちますが、後者は選択ごと初期化します。
 
 `overviewConfirmed` は写真の増減と見た目の変化で必ず落とします。一覧で見渡した内容と書き出す内容が一致しない状態を作らないためです。
 
@@ -1225,10 +1247,33 @@ Pro を必要とするのは、バッチという単位に対する操作だけ�
 
 #### 7.4.2 第 2 段階: 利用者への受け渡し
 
-- 写真ライブラリへ保存する
-- OS 共有へ渡す
+- 写真ライブラリへ保存する（`MediaSaver`）
+- OS 共有へ渡す（`SharePresenter`）
 
 いずれも任意であり、何度実行しても追加消費しません（6.2.1）。保存または共有に失敗した場合は、生成済み出力を保持したまま再試行できます（6.2.2）。再書き出しは不要です。
+
+##### 共有結果の扱い
+
+「共有シートを開いた」ことは受け渡しの成功ではありません。**どの結果で `Delivered` へ遷移するかを明示します。**
+
+```kotlin
+interface SharePresenter {
+    suspend fun share(file: OutputFile): ShareResult
+}
+
+enum class ShareResult { Completed, Canceled, Unknown, Failed }
+```
+
+| 結果 | 出力状態 | 扱い |
+| --- | --- | --- |
+| `Completed` | `Generated` → **`Delivered`** | 受け渡し成功 |
+| `Canceled` | `Generated` を維持 | 利用者が取りやめた |
+| `Failed` | `Generated` を維持 | 再試行できる |
+| `Unknown` | **`Generated` を維持** | 安全側へ倒す |
+
+`Unknown` は、共有先アプリが完了を返さない場合に生じます。ここで `Delivered` にすると、実際には渡っていない写真を「保存済み」として一時ファイルを消しかねません。**受け取れていない可能性がある側へ倒します。**
+
+各 OS が何を `Completed` として返すかは、契約テスト（12.1）で両 OS の挙動を突き合わせて確定します。
 
 ### 7.5 削除候補の選定
 
@@ -1471,6 +1516,10 @@ Rust + Axum。`/v1/config` は静的 JSON と ETag による配信とします�
 - バッチ内の 1 枚を単体編集するとき `requiredPlan` に従うこと（6.7）
 - 降格後の再書き出しでも `FreeReexport` が成立し、24 時間以内なら消費しないこと（6.7）
 - 顔 0 件の案内が `QuotaDecision` で分岐すること（6.1.1）
+- 月末の初回成功から 24 時間以内なら、月をまたいでも `FreeReexport` になること（6.2.3）
+- `rollPeriod` が `consumed` だけをリセットし、`grants` を月境界で捨てないこと（6.2.3）
+- 共有結果が `Completed` のときだけ `Delivered` へ遷移すること。`Unknown` では維持されること（7.4.2）
+- 確認段階から設定へ戻っても検出結果が保持されること（6.5.3）
 - 背景処理の変更で `Reviewed` が解除されること。メタデータ設定の変更では解除されないこと（6.5.3）
 - `review_required` の導出がモードで異なること。1 枚ずつ確認では `Normal` の未確認写真も含むこと（6.5.8）
 - `requiredPlan` が設定内容から導かれ、作成時のプランに依存しないこと（6.7）
@@ -1734,7 +1783,7 @@ Web モックである以上、以下は本書の記述どおりには再現で�
 
 1. プロジェクト基盤（KMP + CMP の骨格、CI、lint、テスト実行基盤）
 2. ドメイン層（`QuotaPolicy`、`EntitlementResolver`、`BatchTriagePolicy`、`RenderPlan` 生成、トラック関連付け、キーフレーム補間、`ExportQueue`）
-3. メディア境界（10 契約の両 OS 実装と契約テスト）
+3. メディア境界（11 契約の両 OS 実装と契約テスト）
 4. 編集フロー UI（detect / effect / export / processing / done）
 5. 課金と権限（RevenueCat、Paywall、復元）
 6. 広告

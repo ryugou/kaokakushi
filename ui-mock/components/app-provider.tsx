@@ -84,6 +84,19 @@ export const RETENTION_LABELS: Record<Retention, string> = {
   "no-expiry": "保存期限なし",
 }
 
+/**
+ * OS共有の結果。共有シートを開いただけでは受け渡し成功ではない。
+ * Completed 以外は安全側に倒し、未受け渡しのまま保持する。
+ */
+export type ShareOutcome = "completed" | "canceled" | "unknown" | "failed"
+
+export const SHARE_OUTCOME_LABELS: Record<ShareOutcome, string> = {
+  completed: "共有できた",
+  canceled: "キャンセルされた",
+  unknown: "結果が分からない",
+  failed: "失敗した",
+}
+
 /** いま書き出したときの無料枠の扱い */
 export type QuotaDecision = "unlimited" | "free-reexport" | "consume" | "blocked"
 
@@ -353,6 +366,10 @@ type AppContextValue = {
   cancelBatch: () => void
   retryBatchErrors: () => void
   resetBatch: () => void
+  /** 検出結果を保ったまま設定へ戻る */
+  backToSetup: () => void
+  /** 設定を変えずに確認へ戻る */
+  backToReview: () => void
   overrideCount: number
   applyCommonSettings: (mode: "keep" | "overwrite") => void
   /** 共通の見た目設定を変えたときに呼ぶ */
@@ -362,6 +379,8 @@ type AppContextValue = {
   freeSpaceMb: number
   lowStorage: boolean
   setLowStorage: (value: boolean) => void
+  shareOutcome: ShareOutcome
+  setShareOutcome: (value: ShareOutcome) => void
 }
 
 const AppContext = React.createContext<AppContextValue | null>(null)
@@ -381,6 +400,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [lowStorage, setLowStorage] = React.useState(false)
   // デモ用に上限を下げると、容量超過による削除を確認できる
   const [historyLimitMb, setHistoryLimitMb] = React.useState(HISTORY_LIMIT_MB)
+  const [shareOutcome, setShareOutcome] = React.useState<ShareOutcome>("completed")
 
   const [mediaId, setMediaId] = React.useState<string | null>(null)
   const [manualFaces, setManualFaces] = React.useState<FaceBox[]>([])
@@ -650,7 +670,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [lowStorage])
 
   const savePending = React.useCallback(() => markDelivered(), [markDelivered])
-  const sharePending = React.useCallback(() => markDelivered(), [markDelivered])
+  // 共有シートを開いただけでは成功ではない。Completed のときだけ Delivered にする
+  const sharePending = React.useCallback(() => {
+    if (shareOutcome !== "completed") {
+      setUnsavedPromptOpen(false)
+      setRecoveryOpen(false)
+      return
+    }
+    markDelivered()
+  }, [markDelivered, shareOutcome])
 
   const discardPending = React.useCallback(() => {
     setPendingOutput((current) => {
@@ -1132,6 +1160,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setBatchRunning(true)
   }, [])
 
+  /**
+   * 確認段階から設定段階へ戻る。検出結果は保持し、再検出しない。
+   * 共通設定を変える手段は設定画面の1か所だけにする。
+   */
+  const backToSetup = React.useCallback(() => {
+    setBatchStage("setup")
+  }, [])
+
+  /** 設定を変えずに確認へ戻る。再検出しない */
+  const backToReview = React.useCallback(() => {
+    setBatchStage("review")
+  }, [])
+
   const resetBatch = React.useCallback(() => {
     summaryHandled.current = false
     setBatchItems([])
@@ -1253,12 +1294,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     cancelBatch,
     retryBatchErrors,
     resetBatch,
+    backToSetup,
+    backToReview,
     overrideCount,
     applyCommonSettings,
     onCommonVisualChanged,
     freeSpaceMb,
     lowStorage,
     setLowStorage,
+    shareOutcome,
+    setShareOutcome,
   }
 
   return (

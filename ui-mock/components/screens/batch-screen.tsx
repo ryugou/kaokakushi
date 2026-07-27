@@ -99,7 +99,16 @@ function SetupStage() {
     openUnsavedPrompt,
     requestUpgrade,
     canUsePremiumStamps,
+    batchItems,
+    backToReview,
+    onCommonVisualChanged,
   } = useApp()
+
+  // 検出後に共通設定を変えたら、影響を受ける写真の確認状態を解除する
+  const changeCommon = (run: () => void) => {
+    run()
+    if (batchItems.length > 0) onCommonVisualChanged()
+  }
 
   // 通常の一括処理もお試しクレジットも使えない場合
   if (!canBatchFull && !canBatchTrial) {
@@ -176,6 +185,21 @@ function SetupStage() {
 
         <section className="flex flex-col gap-2">
           <SectionTitle>すすめかた</SectionTitle>
+          {batchItems.length > 0 ? (
+            <div className="flex flex-col gap-2 rounded-2xl bg-secondary px-3 py-2.5">
+              <p className="text-[11px] leading-relaxed text-secondary-foreground">
+                検出結果は保持しています。設定を変えると、変更の影響を受ける写真だけ確認し直しになります。個別に調整した写真は共通設定の影響を受けません。
+              </p>
+              <Button
+                size="sm"
+                variant="secondary"
+                className="h-9 self-start rounded-xl text-[11px] font-bold"
+                onClick={backToReview}
+              >
+                確認へもどる
+              </Button>
+            </div>
+          ) : null}
           <div className="grid grid-cols-2 gap-2">
             <ModeCard
               active={batchMode === "auto"}
@@ -248,7 +272,7 @@ function SetupStage() {
               <button
                 key={t}
                 type="button"
-                onClick={() => setEffect((prev) => ({ ...prev, type: t }))}
+                onClick={() => changeCommon(() => setEffect((prev) => ({ ...prev, type: t })))}
                 className={cn(
                   "h-12 rounded-2xl text-xs font-bold transition-colors",
                   effect.type === t
@@ -275,7 +299,7 @@ function SetupStage() {
                     <button
                       key={s.id}
                       type="button"
-                      onClick={() => setEffect((prev) => ({ ...prev, stampId: s.id }))}
+                      onClick={() => changeCommon(() => setEffect((prev) => ({ ...prev, stampId: s.id })))}
                       className="flex w-14 shrink-0 flex-col items-center gap-1"
                     >
                       <span
@@ -311,7 +335,7 @@ function SetupStage() {
               <button
                 key={r.id}
                 type="button"
-                onClick={() => updateExport({ ratio: r.id })}
+                onClick={() => changeCommon(() => updateExport({ ratio: r.id }))}
                 className={cn(
                   "h-11 rounded-2xl text-[11px] font-bold transition-colors",
                   exportSettings.ratio === r.id
@@ -355,7 +379,7 @@ function SetupStage() {
           onClick={startBatchDetection}
         >
           <Layers data-icon="inline-start" />
-          {batchSelection.length}枚の顔を検出する
+          {batchItems.length > 0 ? `枚を検出しなおす` : `枚の顔を検出する`}
         </Button>
       </div>
     </>
@@ -450,7 +474,7 @@ function ReviewStage() {
     reviewedIds,
     markReviewed,
     overrideCount,
-    resetBatch,
+    backToSetup,
   } = useApp()
 
   const [onlyReview, setOnlyReview] = React.useState(false)
@@ -496,7 +520,7 @@ function ReviewStage() {
       <>
         <ScreenHeader
           title="1枚ずつ確認"
-          onBack={resetBatch}
+          onBack={backToSetup}
           subtitle={`${doneCount} / ${batchItems.length}枚を確認しました`}
         />
         <div className="flex flex-1 flex-col gap-4 px-4 py-4">
@@ -583,7 +607,7 @@ function ReviewStage() {
     <>
       <ScreenHeader
         title="仕上がりを確認"
-        onBack={resetBatch}
+        onBack={backToSetup}
         subtitle={`${batchItems.length}枚 ・ 要確認${reviewCount}枚`}
       />
 
