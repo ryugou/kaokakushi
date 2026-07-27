@@ -3,7 +3,7 @@
 | 項目 | 内容 |
 | --- | --- |
 | 文書名 | 顔かくし 技術スタックおよびアーキテクチャ設計 |
-| バージョン | 1.26 |
+| バージョン | 1.27 |
 | 作成日 | 2026-07-27 |
 | 対象 | 写真・動画向け顔匿名化アプリ（iOS / Android） |
 | 上位文書 | 写真・動画向け顔匿名化アプリ 仕様書 v0.1 |
@@ -40,8 +40,8 @@
 | --- | --- |
 | 共有基盤 | Kotlin Multiplatform (KMP) |
 | 共有 UI | Compose Multiplatform (CMP) |
-| iOS ネイティブ | Swift（メディア層のみ） |
-| Android ネイティブ | Kotlin（メディア層のみ） |
+| iOS プラットフォームアダプタ | Swift |
+| Android プラットフォームアダプタ | Kotlin |
 | ローカル DB | Room KMP |
 | DI | Koin |
 | 課金 | RevenueCat KMP SDK (`purchases-kmp`) |
@@ -50,7 +50,7 @@
 | バックエンド | Rust + Axum（リモート設定と診断のみ） |
 | 対応 OS | iOS 17 以降 / Android 10 (API 29) 以降 |
 
-### 2.2 iOS メディア層
+### 2.2 iOS プラットフォームアダプタ
 
 | 用途 | 採用 API |
 | --- | --- |
@@ -64,7 +64,7 @@
 | 署名付きデータの保管 | アプリ専用ディレクトリ上のファイル（HMAC 付き） |
 | 動画（次リリース） | AVFoundation / AVAssetWriter |
 
-### 2.3 Android メディア層
+### 2.3 Android プラットフォームアダプタ
 
 | 用途 | 採用 API |
 | --- | --- |
@@ -199,10 +199,10 @@ v1 では全画面を Compose で実装します。iOS の特定画面を SwiftU
 ドメイン    拡張率適用（上 25% / 下 15% / 左右 15%）
             形状決定（楕円 / 円 / 矩形 / 角丸）
             強度の相対値 → 絶対値換算
-            スタンプは StampRenderSpec として記述するだけ
+            スタンプは StampRasterRequest として記述するだけ
     ↓
-アプリ層    StampRasterizer で StampRenderSpec をビットマップ化
-            → bitmapId を得る
+アプリ層    StampRasterizer でスタンプ画像をビットマップ化
+            → RasterizedStampRef（bitmapId）を得る
     ↓
 ドメイン    bitmapId を差し込んで RenderPlan を生成
     ↓
@@ -216,32 +216,74 @@ v1 では全画面を Compose で実装します。iOS の特定画面を SwiftU
 
 **ラスタライズは Compose Canvas を使うため、`domain` の責務にできません。** 4.1 の「`domain` は Compose の型を使わない」と直接矛盾します。
 
-`domain` が扱うのは記述だけです。
+**幾何情報は `RenderRegion` だけに持たせます。** ラスタライズ側にも `bounds` / `rotationDegrees` / `opacity` を持たせると、ラスタライズ時とネイティブ描画時に**二重適用**されます。`StampRasterizer` は「スタンプ画像そのものを、指定ピクセルサイズで作る」ことだけを行います。
 
 ```kotlin
 // domain — プラットフォーム非依存
-data class StampRenderSpec(
-    val stampId: String,
-    val bounds: NormalizedRect,
-    val rotationDegrees: Float,
-    val opacity: Float,
+data class StampRasterRequest(
+    val stampAssetId: String,
+    val rasterSize: PixelSize,
 )
 
-// rendering adapter — composeApp または shared/rendering
+data class RasterizedStampRef(
+    val bitmapId: String,
+    val pixelSize: PixelSize,
+)
+
+// domain がポートを定義し、composeApp が実装する
 interface StampRasterizer {
-    suspend fun rasterize(spec: StampRenderSpec, size: PixelSize): RasterizedStamp
+    suspend fun rasterize(request: StampRasterRequest): RasterizedStampRef
 }
 ```
 
+`StampRasterizer` が**行わないこと**を明示します。
+
+| 項目 | 適用場所 |
+| --- | --- |
+| 画面上の位置 | `RenderRegion.bounds` |
+| 回転 | `RenderRegion.rotationDegrees` |
+| 不透明度 | `RenderOp.Stamp.opacity` |
+| 顔領域の形状 | `RenderRegion.shape` |
+
+いずれも `RenderPlan` 側で**1 回だけ**適用します。
+
 `RenderOp.Stamp(bitmapId)` を組み立てる順序は次のとおりです。
 
-1. `domain` が `StampRenderSpec` を生成する
-2. アプリケーション層が `StampRasterizer` でラスタライズし、`bitmapId` を得る
+1. `domain` が必要なスタンプと出力サイズから `StampRasterRequest` を生成する
+2. アプリケーション層が `StampRasterizer` でラスタライズし、`RasterizedStampRef` を得る
 3. その `bitmapId` を渡して `domain` が `RenderPlan` を生成する
 
 `domain` はポート（`StampRasterizer`）を定義するだけで、実装を持ちません。4.1 の依存の向きと一致します。
 
 スタンプをベクターで自作する方針の利点は変わりません。ネイティブ側は「画像を貼る」1 プリミティブで全スタンプを処理でき、スタンプの種類が増えてもネイティブコードは増えません。ラスタライズが Compose 側にあることで、**両 OS で同じ描画結果**になる点も維持されます。
+
+#### 5.1.2 ラスタ画像の受け渡し契約
+
+**`bitmapId` だけでは、モジュール境界を越えて実体へ到達できません。** `ImageEffectRenderer` がその ID をどう解決するかを定義します。
+
+```kotlin
+interface ImageEffectRenderer {
+    suspend fun render(
+        source: ImageSource,
+        plan: RenderPlan,
+        rasterAssets: Map<String, RasterizedStampRef>,   // bitmapId → 実体参照
+    ): RenderedImage
+}
+```
+
+レンダリング呼び出し時にアセット参照を明示的に渡します。グローバルなレジストリを暗黙に共有する構成にしません。呼び出しごとに必要な集合が閉じているため、寿命の管理が呼び出し元に閉じます。
+
+| 項目 | 規約 |
+| --- | --- |
+| ピクセル形式 | RGBA8888、**straight alpha**、sRGB（5.2.1） |
+| 寿命 | `render` の呼び出し開始から復帰までの間、`rasterAssets` の全要素が有効であること |
+| 解放 | `render` の成功・失敗にかかわらず、復帰後に呼び出し元が解放する |
+| 再利用 | 同じ `stampAssetId` と `rasterSize` の組に対しては同一の `bitmapId` を返し、1 回の `render` 内で複数の `RenderRegion` から参照してよい |
+| 未解決 ID | `plan` が参照する `bitmapId` が `rasterAssets` に無い場合は描画を開始せず、エラーを返す（無視して描き飛ばさない） |
+
+**未解決 ID を無視しません。** スタンプが 1 つ欠けたまま書き出すと、顔が隠れていない出力が完成扱いになります。これは 6.1 の安全側の既定と同じ思想です。
+
+再利用の単位を `stampAssetId` と `rasterSize` の組にするのは、同じスタンプでも顔の大きさが異なれば必要な解像度が変わるためです。1 枚に同じスタンプを 10 個置く場合、サイズが揃っていればラスタライズは 1 回で済みます。
 
 ### 5.2 RenderPlan
 
@@ -267,10 +309,64 @@ data class RenderRegion(
 sealed interface RenderOp {
     data class Mosaic(val cellRatio: Float) : RenderOp    // 領域短辺に対するセル比
     data class Blur(val sigmaRatio: Float) : RenderOp     // 領域短辺に対する σ 比
-    data class Solid(val color: Long, val opacity: Float) : RenderOp
+    data class Solid(val color: SrgbArgb8888, val opacity: Float) : RenderOp
     data class Stamp(val bitmapId: String, val opacity: Float) : RenderOp
 }
 ```
+
+#### 5.2.1 座標・回転・色の共通規約
+
+**同じ `RenderPlan` を両 OS へ渡してゴールデン画像テストで一致させる以上、数値の解釈を規約として固定します。** 未定義のままだと、OS アダプタがそれぞれ独自に解釈し、同じ数値でも位置・回転・色・境界がずれます。
+
+##### `NormalizedRect`
+
+| 項目 | 規約 |
+| --- | --- |
+| 原点 | **向き正規化後**の画像の左上 |
+| +X | 右方向 |
+| +Y | **下方向** |
+| 値域 | 0.0〜1.0（画像外へのはみ出しは許容。5.3 でクランプしない） |
+| `left` / `top` | 含む（inclusive） |
+| `right` / `bottom` | **含まない（exclusive）** |
+
+原点を「向き正規化後」と明記するのは、EXIF の回転を適用する前後で左上の位置が変わるためです。`ImageLoader` が向きを正規化したあとの画像が、すべての座標の基準です。
+
+##### `rotationDegrees`
+
+| 項目 | 規約 |
+| --- | --- |
+| 正方向 | **時計回り** |
+| 範囲 | `-180.0` 以上 `180.0` 未満へ正規化する |
+| 回転中心 | 画像中心ではなく、**その `RenderRegion` の中心** |
+
+回転中心を領域中心にするのは、顔ごとに独立して傾きを合わせるためです。画像中心を基準にすると、領域の位置によって見え方が変わります。
+
+##### 色
+
+```kotlin
+@JvmInline
+value class SrgbArgb8888(
+    val value: UInt,    // 0xAARRGGBB
+)
+```
+
+| 項目 | 規約 |
+| --- | --- |
+| 色空間 | sRGB |
+| ビット配置 | `0xAARRGGBB` |
+| アルファ | **straight alpha**（premultiplied ではない） |
+| `opacity` の乗算 | **レンダラーが 1 回だけ**乗算する。ドメインは色へ焼き込まない |
+| premultiplied への変換 | Core Image / OpenGL が必要とする場合、**OS アダプタ側で**変換する |
+
+`Long` ではなく専用の value class にするのは、符号やビット幅の解釈をアダプタ任せにしないためです。
+
+`opacity` を「1 回だけ」と定めるのは、`SrgbArgb8888` のアルファと `RenderOp.Solid.opacity` の両方があるためです。前者は色そのものの不透明度、後者はエフェクト全体の適用強度で、レンダラーが両方を掛け合わせます。ドメイン側で事前に畳み込みません。
+
+##### `FaceDetector` の変換責務
+
+**両 OS の実装は、OS API の座標系と角度をこの規約へ変換してから `DetectedFace` を返します。**
+
+Vision は左下原点の正規化座標を返し、ML Kit は左上原点のピクセル座標を返します。角度の符号も一致しません。この差を吸収するのはアダプタの責務であり、ドメインへ持ち込みません。契約テストで両 OS の変換結果が一致することを検証します（12.1）。
 
 エフェクト強度をすべて **領域サイズに対する相対値** で保持します（仕様 11.1）。これにより低解像度プレビューと原寸書き出しで見た目が一致し、ゴールデン画像テストが成立します。
 
@@ -470,7 +566,7 @@ data class QuotaEvaluation(
 
 fun evaluate(
     ledger: UsageLedger,
-    plan: Plan,
+    access: SingleExportAccess,       // Plan ではない。6.3 が解決した能力を受け取る
     sourceHash: String,
     effectiveNow: Instant,            // 6.2.2.5 で正規化済み。端末時刻を直接渡さない
     zone: TimeZone,
@@ -479,11 +575,40 @@ fun evaluate(
 
 **判定結果だけでなく更新後の台帳も返します。** `QuotaDecision` しか返さないと、`lastObservedAt` の前進、月次更新、期限切れ `grant` の削除を永続化できません。
 
+##### `Plan` を直接受け取らない
+
+6.3 は「権限は `plan` と `status` から導出し、`plan` から直接導出しない」と定めています。特に `pending`（支払い保留）では有料機能を付与しません。
+
+**`QuotaPolicy` が `Plan` を受け取ると、この規則を迂回します。** `plan = Standard` かつ `status = pending` でも `plan != Free` が成立し、`Unlimited` になります。
+
+`EntitlementResolver` が確定した能力を渡します。
+
+```kotlin
+enum class SingleExportAccess {
+    Metered,      // 月間枠の対象
+    Unlimited,    // 月間枠の対象外
+}
+
+data class ResolvedCapabilities(
+    val singleExportAccess: SingleExportAccess,
+    val canUsePremiumStamps: Boolean,
+    val canUseCustomStamps: Boolean,
+    val canUseProBatch: Boolean,
+    val shouldShowAds: Boolean,
+)
+
+fun resolveCapabilities(entitlement: Entitlement): ResolvedCapabilities
+```
+
+`Plan` を参照してよいのは `resolveCapabilities` の内側だけです。`QuotaPolicy`、`AdFrequencyPolicy`、開始ゲート、UI はすべて `ResolvedCapabilities` を見ます。
+
+**購入状態を確認できない場合、`Metered` へ暗黙に降格させません。** 6.3 の「購入状態を確認できません」として保留し、再試行と購入の復元を提示します。降格として扱うと、支払い済みの利用者が黙って無料枠の判定に入ります。
+
 判定順序は以下とします。
 
 1. `lastObservedAt` を `effectiveNow` へ前進させる
 2. 期間更新と期限切れ `grant` の整理を適用する（6.2.3）
-3. `plan != Free` なら `Unlimited`
+3. `access == Unlimited` なら `Unlimited`
 4. **`monthlyBlockedPeriod == period` なら `Blocked(LedgerIntegrityFailure)`**（6.2.5）
 5. `grants[sourceHash]` があり `effectiveNow - it.firstSuccessAt < 24h` なら `FreeReexport`
 6. `consumed >= limit` なら `Blocked(MonthlyLimitReached, limit)`
@@ -501,7 +626,7 @@ fun evaluate(
 
 | 動作 | 条件 |
 | --- | --- |
-| `grants` へ `sourceHash` を追加する | 利用可能な出力の生成が正常に完了した時点（7.4.1）。プランを問わない |
+| `grants` へ `sourceHash` を追加する | 利用可能な出力の生成が正常に完了した時点＝コミット手順 8 の完了（7.4.3）。プランを問わない |
 | `consumedExportIds` へ `exportId` を追加する | `QuotaDecision` が `Consume` のときだけ |
 | `firstSuccessAt` を更新する | しない。同一 `sourceHash` の有効な grant があれば、そのまま維持する |
 
@@ -523,7 +648,9 @@ grant がなければ `FreeReexport` にならず枠を 1 枚消費します。�
 
 仕様 14.2 は消費条件を「書き出し処理が正常終了した」「出力ファイルが生成された」「**保存処理または共有可能な状態になった**」と定めています。写真ライブラリ保存を確定条件にすると、加工済み画像を生成して保存せずに OS 共有から他アプリへ渡す経路で無料枠を回避できてしまい、仕様の文言にも反します。
 
-確定点は 7.4.1 の第 4 手順、すなわち一時パスへの生成・整合性確認・デコード確認を通過し、保存または共有が可能な完成済み出力として公開された時点とします。**写真ライブラリへの保存は含みません**（7.4.2）。その後の操作は追加消費しません。
+確定点は **7.4.3 のコミット手順 8 が完了した時点**とします。一時パスへの生成・サイズと SHA-256 の確認・デコード確認（7.4.1）を通過し、会計を台帳へ適用し、コミット行を削除して成果物を公開できる状態になった時点です。**写真ライブラリへの保存は含みません**（7.4.2）。その後の操作は追加消費しません。
+
+手順 8 より前は成果物を公開せず、ロールバックが可能です（7.4.1 の「確定点は 1 つだけ」）。
 
 - 写真ライブラリへ保存する
 - OS 共有から他アプリへ渡す
@@ -847,7 +974,7 @@ data class Entitlement(
 
 要件は 3 点です。
 
-- **`pending`（支払い保留）では有料機能を付与しません**（仕様 5.4）。個々の権限フラグ（追加スタンプ、カスタムスタンプ、一括処理、広告非表示）はすべて `Entitlement` から導出し、`plan` から直接導出しません
+- **`pending`（支払い保留）では有料機能を付与しません**（仕様 5.4）。個々の権限フラグ（追加スタンプ、カスタムスタンプ、一括処理、広告非表示、月間枠の対象か）はすべて `Entitlement` から導出し、`plan` から直接導出しません。導出結果は `ResolvedCapabilities`（6.2）として 1 箇所にまとめ、**下流のポリシーへ `Plan` を渡しません**
 - **オフライン耐性**（仕様 25.3 / 27.3）。最後に検証成功した `Entitlement` を `lastVerifiedAt` とともに ProtectedBlobStore へ保存します。ネットワーク不通時はこのキャッシュで有料機能を維持し、復元失敗を理由に Free へ強制降格させません。失効が明示的に確認された場合のみ剥奪します
 - **バックエンド障害で編集を止めません**（仕様 21.6）。リモート設定が取得できない場合はアプリ内の安全な既定値を使用します
 
@@ -1535,13 +1662,35 @@ Pro を必要とするのは、バッチという単位に対する操作だけ�
 #### 7.4.1 第 1 段階: 加工済み出力の生成
 
 1. アプリ専用の一時パスへ書き出す
-2. ファイル整合性を確認する
+2. サイズと SHA-256 を計算する
 3. デコードできることを簡易確認する
-4. 正常な場合のみ、**保存または共有が可能な完成済み出力として公開する**
+4. **検証済み出力（`VerifiedOutput`）としてコミット処理へ渡す**
 
-**この第 4 手順を通過した時点で、6.2.1 のクォータ消費が確定します。**
+**第 4 手順は利用者への公開ではありません。** コミット処理への引き渡しです。
 
-いずれかの手順で失敗した場合、不完全な出力を公開せず、クォータも消費しません。
+いずれかの手順で失敗した場合、コミット処理へ渡さず、クォータも消費しません。
+
+##### 確定点は 1 つだけ
+
+以前の版では「第 4 手順で消費確定」「コミット手順 8 で最終確定」の 2 つが並存していました。これは 2 つの問題を生みます。
+
+- **どちらが確定点か決まらない。** 手順 7 の検証失敗では会計をロールバックできるため、第 4 手順は確定点ではありません
+- **公開済みファイルを抱えたままロールバックする時間差が生じる。** 第 4 手順で利用者へ公開すると、その後の手順 7 失敗で会計を戻す間に、利用者がファイルを取得できてしまいます
+
+境界を 1 本にします。
+
+> **検証済みファイルは、コミット手順 8 が完了するまで UI・`MediaSaver`・`SharePresenter` へ公開しません。**
+>
+> 手順 3 で台帳へ会計を暫定適用し、**手順 8 のコミット行削除で最終確定します。**
+>
+> 本書における「利用可能な出力の生成が正常に完了した時点」とは、**コミット手順 8 まで完了した時点**を指します。
+
+| 区間 | 性質 |
+| --- | --- |
+| 手順 8 より前 | 復旧またはロールバックが可能。成果物は非公開 |
+| 手順 8 以降 | 成果物を利用者へ公開する。会計は戻さない |
+
+6.2.1 の「消費は利用可能な加工済み出力の生成が正常に完了した時点で確定する」は、この定義のもとで手順 8 を指します。仕様 14.2 の「保存処理または共有可能な状態になった」とも一致します。手順 8 の完了が、まさに保存・共有が可能になる時点だからです。
 
 #### 7.4.2 第 2 段階: 利用者への受け渡し
 
@@ -1584,7 +1733,7 @@ enum class ShareResult { Completed, Canceled, Unknown, Failed }
 
 #### 7.4.3 コミットジャーナル
 
-7.4.1 の第 4 手順で確定する事柄は、**保存先が 3 つに分かれています。**
+書き出しの完了で確定する事柄は、**保存先が 3 つに分かれています。**
 
 | 更新対象 | 保存先 |
 | --- | --- |
@@ -1780,7 +1929,7 @@ sealed interface ExportAccountingMode {
 
 処理中の 1 枚は最後まで終わり、残りは停止します。
 
-**Free の単体書き出しは同時に 1 件までとします。** 「クォータを消費する書き出し」を条件にできない理由は開始ゲートの項で述べます。消費するかどうかは認可の結果であり、ゲートを取る時点では未確定です。並列に走らせると、開始時の判定が両方 `Consume` になり上限を超えます。
+**月間枠の対象となる単体書き出しは同時に 1 件までとします。** 「クォータを消費する書き出し」を条件にできない理由は開始ゲートの項で述べます。消費するかどうかは認可の結果であり、ゲートを取る時点では未確定です。並列に走らせると、開始時の判定が両方 `Consume` になり上限を超えます。
 
 ##### 会計内容はファイル検証後に確定する
 
@@ -1851,7 +2000,7 @@ interface UsageLedgerStore {
 interface ExportStartGate {
     suspend fun <R> withPermit(
         sourceHash: String,
-        isFreeSingleExport: Boolean,
+        requiresMeteredSingleExportGate: Boolean,
         block: suspend () -> R,
     ): R
 }
@@ -1859,19 +2008,26 @@ interface ExportStartGate {
 
 **ゲートの引数を「月間枠を消費するか」にはできません。** その書き出しが `FreeMonthlyConsume` / `FreeMonthlyReexport` / `Blocked` のどれになるかは、後続の `UsageLedgerStore.transact` で初めて決まります。認可の前にゲートを取る以上、その時点で判明していない値を引数にはできません。
 
-代わりに、**Free の単体書き出しであること**を条件にゲートを取ります。これはプランと処理種別だけで決まるため、認可前に判定できます。
+代わりに、**月間枠の対象となる単体書き出しであること**を条件にゲートを取ります。これは解決済み能力と処理種別だけで決まるため、認可前に判定できます。
+
+```kotlin
+val requiresMeteredSingleExportGate =
+    capabilities.singleExportAccess == SingleExportAccess.Metered && !isBatchExport
+```
+
+**`Plan` からは判定しません。** `plan = Standard` かつ `status = pending` の利用者はゲートを取る必要がありますが、プランだけを見ると素通りします（6.2 の `SingleExportAccess`）。
 
 | 条件 | ゲート |
 | --- | --- |
 | `sourceHash` 単位 | 常に取得する |
-| `isFreeSingleExport == true` | 月間認可ゲートも取得する |
-| 一括トライアル、Standard / Pro | 月間認可ゲートは取得しない |
+| `requiresMeteredSingleExportGate == true` | 月間認可ゲートも取得する |
+| 一括トライアル、`singleExportAccess == Unlimited` | 月間認可ゲートは取得しない |
 
 開始の順序は次のとおりです。
 
 1. 復旧完了ゲートを確認する（7.4.3 の起動順序）
 2. `sourceHash` 単位のゲートを取得する
-3. `isFreeSingleExport` なら月間認可ゲートも取得する
+3. `requiresMeteredSingleExportGate` なら月間認可ゲートも取得する
 4. **その内側で** `UsageLedgerStore.transact` を実行し、`Consume` / `Reexport` / `Blocked` を決める
 5. `Blocked` なら生成せずに終える。ゲートは解放する
 6. `ExportCommit(Prepared)` を保存する
@@ -1939,6 +2095,39 @@ data class OutputRecord(
 | 簡易デコードが成功する | 画像として開ける |
 
 いずれかが不成立なら削除せず、そのコミットをロールバック対象として扱います。この時点ではジャーナルが残っているため、会計を正しく戻せます。
+
+###### ロールバックの手順と順序
+
+**「ロールバック対象として扱う」だけでは実装できません。** 何をどの順序で削除するかを固定します。
+
+| 順 | 操作 | 保存先 |
+| --- | --- | --- |
+| 1 | `UsageLedgerStore.transact` で、この `exportId` が所有する会計要素を**冪等に**取り消す | ProtectedBlobStore |
+| 2 | 台帳の保存が成功したことを確認する | ProtectedBlobStore |
+| 3 | `OutputRecord` を削除する | Room |
+| 4 | `outputFileId` のファイルを削除する | ファイルシステム |
+| 5 | `ExportCommit` を削除する | Room |
+| 6 | `sourceHash` ゲートと月間認可ゲートを解放する | メモリ |
+
+規則は次のとおりです。
+
+- **手順 1 が失敗した場合、2 以降を実行しません。** コミットとファイルを残したまま復旧エラーとします。台帳を戻せていないのにジャーナルを消すと、消費だけが残って根拠が失われます
+- **手順 1 の完了後に落ちても、再起動時に同じロールバックを冪等に再実行できます。** 取り消しは集合からの削除であり、二重実行は無害です
+- **`ExportCommit` の削除後にのみゲートを解放します。** 解放が早いと、ロールバック途中の台帳を次の認可が読みます（開始ゲートの項）
+- 取り消してよいのは、台帳の `ownerExportId` がこの `exportId` と一致する要素だけです（6.2）
+
+###### 状態別のロールバック経路
+
+**コミット行が最終的に消えるまでの経路を、状態ごとに定めます。**
+
+| 状態 | 台帳への適用 | ロールバック経路 |
+| --- | --- | --- |
+| `Prepared` | なし | 手順 3〜6 のみ。台帳操作は不要（`OutputRecord` も未作成なので実質はファイルとコミットの削除） |
+| `FileVerified` | 未適用または適用途中 | 手順 1〜6。`intent` の内容を `ownerExportId` と突き合わせて取り消す |
+| `AccountingCommitted` | 適用済み | 手順 1〜6。`applied` ではなく台帳の `ownerExportId` を根拠にする |
+| `Completed` | 適用済み | 手順 7 の健全性確認に合格すればコミット行を削除して完了。不合格なら手順 1〜6 |
+
+`FileVerified` で `applied` を根拠にできない理由は、`AccountingApplied` を Room へ書く前に落ちる可能性があるためです（コミットジャーナルの項）。台帳側の `ownerExportId` が唯一の判断材料です。
 
 ###### 会計の最終確定境界
 
@@ -2365,7 +2554,22 @@ Rust + Axum。`/v1/config` は静的 JSON と ETag による配信とします�
 - **`SubscriptionState` の署名不正時、オフラインで有料権限が新規付与されず、カスタムスタンプと履歴が削除されないこと**（6.3）
 - **0 バイト・破損・ダイジェスト不一致の出力ファイルで、`Completed` のコミット行が削除されないこと**（7.4.3 手順 7）
 - **`OutputRecord` の実体解決が `outputFileId` 経由であり、パス文字列の改変で専用ディレクトリ外を削除できないこと**（7.4.3）
-- 開始ゲートが `isFreeSingleExport` で取得され、認可前に決定できること（7.4.3）
+- 開始ゲートが `requiresMeteredSingleExportGate` で取得され、認可前に決定できること（7.4.3）
+- **`plan = Standard` かつ `status = pending` で `singleExportAccess == Metered` になり、`Unlimited` にならないこと**（6.2 / 6.3）
+- **`QuotaPolicy` と開始ゲートが `Plan` を参照せず `ResolvedCapabilities` のみを受け取ること**（6.2）
+- **購入状態を確認できない場合に `Metered` へ暗黙降格せず、保留として提示されること**（6.3）
+- **検証済みファイルがコミット手順 8 の完了まで UI・`MediaSaver`・`SharePresenter` へ公開されないこと**（7.4.1）
+- **手順 7 の失敗時、ロールバックが台帳 → `OutputRecord` → ファイル → コミット → ゲートの順で実行されること**（7.4.3）
+- **ロールバック手順 1 が失敗した場合、コミットとファイルが残り復旧エラーになること**（7.4.3）
+- **ロールバック手順 1 の完了後に落ちても、再起動時の再実行が冪等であること**（7.4.3）
+- **`Prepared` / `FileVerified` / `AccountingCommitted` / `Completed` のいずれからもコミット行が最終的に消えること**（7.4.3）
+- **`StampRasterizer` が位置・回転・不透明度・形状を適用せず、二重適用が起きないこと**（5.1.1）
+- **`plan` が参照する `bitmapId` が `rasterAssets` に無い場合、描画を開始せずエラーになること**（5.1.2）
+- **同一 `stampAssetId` かつ同一 `rasterSize` のラスタライズが 1 回で済み、複数領域から再利用されること**（5.1.2）
+- **`NormalizedRect` の `right` / `bottom` が排他的境界として両 OS で一致すること**（5.2.1）
+- **`rotationDegrees` が時計回り正・領域中心基準として両 OS で一致すること**（5.2.1）
+- **`opacity` がレンダラーで 1 回だけ乗算され、ドメイン側で色へ焼き込まれないこと**（5.2.1）
+- **Vision と ML Kit の座標系・角度の差がアダプタで吸収され、`DetectedFace` が一致すること**（5.2.1）
 - 開始ゲートにより、認可から `Prepared` までの間に同一 `sourceHash` の別書き出しが割り込めないこと（7.4.3）
 - `sourceHash` のロックがコミット行削除まで保持されること（7.4.3）
 - Pro 失効時、`Prepared` 以降の写真は完了し `waiting` の写真は開始しないこと（7.4.3）
@@ -2473,9 +2677,11 @@ iOS の `VNFaceObservation.confidence` は、この回帰監視でのみ参考�
 
 ### 13.2 v1 に含めないもの
 
-- 動画に関する一切の機能
+- **利用者向けの動画選択・編集・書き出し機能**
 - 4K 出力（写真は仕様 13.6 で元解像度維持のため、そもそも差別化要因にならない）
 - カスタムスタンプの自動背景除去
+
+**「動画に関する一切の機能」とは書きません。** 5.5 のとおり、v1 では動画用のモデル・契約・補間関数を内部実装します（実装するのは定義のみで、OS 実装は v2）。除外するのは利用者から見える機能です。
 
 ### 13.3 動画の扱い
 
