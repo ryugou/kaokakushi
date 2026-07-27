@@ -120,6 +120,11 @@ export const BATCH_STATUS_LABELS: Record<BatchItemStatus, string> = {
  */
 export type ReviewResolution = "accepted-as-is" | "manual-region-added" | "unmasked-export-confirmed"
 
+/** その写真の全警告に判断が記録されているか */
+export function isDecided(item: { reasons: ReviewReason[]; decisions: Partial<Record<ReviewReason, ReviewResolution>> }) {
+  return item.reasons.every((r) => item.decisions[r])
+}
+
 export const RESOLUTION_LABELS: Record<ReviewResolution, string> = {
   "accepted-as-is": "このままでよいと判断",
   "manual-region-added": "手動で範囲を追加",
@@ -130,10 +135,11 @@ export type BatchItem = {
   mediaId: string
   status: BatchItemStatus
   reasons: ReviewReason[]
-  /** 要確認をユーザーが確認したか */
-  resolved: boolean
-  /** 確認した場合、どう扱うと決めたか。reasons は変化しない */
-  resolution: ReviewResolution | null
+  /**
+   * 警告理由ごとの判断。reasons は変化しない。
+   * 1枚に複数の警告が付くため、写真に対して1つだけでは表現できない。
+   */
+  decisions: Partial<Record<ReviewReason, ReviewResolution>>
   /** 共通設定とは別に個別編集したか */
   hasOverride: boolean
   /** 加工後サムネイルの生成が終わったか */
@@ -298,7 +304,7 @@ type AppContextValue = {
   /** 「1枚ずつ確認」で個別に確認を終えた写真 */
   reviewedIds: string[]
   markReviewed: (mediaId: string) => void
-  resolveItem: (mediaId: string, resolution?: ReviewResolution) => void
+  resolveReason: (mediaId: string, reason: ReviewReason, resolution: ReviewResolution) => void
   resolveGroup: (reason: ReviewReason) => void
   markOverride: (mediaId: string) => void
   startBatchDetection: () => void
@@ -384,7 +390,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const canUsePremiumStamps = plan === "standard" || plan === "pro"
   const canUseCustomStamps = plan === "standard" || plan === "pro"
   const canBatchFull = plan === "pro"
-  const canBatchTrial = trialCredits > 0
+  // クレジット0でも、消費済み台帳に写真があれば再処理できる
+  const canBatchTrial = trialCredits > 0 || trialChargedIds.length > 0
   const hasAds = plan === "free"
   // トライアルは「総枚数5枚まで」「新規写真は残クレジットまで」の2条件。
   // 総枚数だけで絞ると、残0枚のとき消費済みの写真すら選べなくなる。
@@ -718,7 +725,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     (id: string) => {
       setReviewedIds((prev) => prev.filter((x) => x !== id))
       setBatchItems((prev) =>
-        prev.map((item) => (item.mediaId === id ? { ...item, resolved: false, resolution: null } : item)),
+        prev.map((item) => (item.mediaId === id ? { ...item, decisions: {} } : item)),
       )
       dropOverview()
     },
@@ -731,7 +738,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const affected = prev.filter((i) => !i.hasOverride).map((i) => i.mediaId)
       setReviewedIds((ids) => ids.filter((x) => !affected.includes(x)))
       return prev.map((item) =>
-        item.hasOverride ? item : { ...item, resolved: false, resolution: null },
+        item.hasOverride ? item : { ...item, decisions: {} },
       )
     })
     dropOverview()
@@ -771,7 +778,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         if (!canBatchFull && !trialChargedIds.includes(id)) {
           const freshSelected = prev.filter((x) => !trialChargedIds.includes(x)).length
           if (freshSelected >= trialCredits) {
-            setUpgrade({ reason: "batch-size" })
+            // 新しい写真が残クレジットを超えた。総枚数上限(batch-size)とは原因が異なる
+            setUpgrade({ reason: "batch-credit" })
             return prev
           }
         }
@@ -794,8 +802,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         mediaId: id,
         status: "detecting" as BatchItemStatus,
         reasons: triage(findMedia(id)),
-        resolved: false,
-        resolution: null,
+        decisions: {},
         hasOverride: false,
         thumbReady: false,
         willFail: DEMO_ERROR_IDS.includes(id),
@@ -830,7 +837,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [batchStage, batchItems])
 
   const allThumbsReady = batchItems.length > 0 && batchItems.every((i) => i.thumbReady)
-  const unresolvedCount = batchItems.filter((i) => i.reasons.length > 0 && !i.resolved).length
+  const unresolvedCount = batchItems.filter((i) => !isDecided(i)).length
   const reviewCount = batchItems.filter((i) => i.reasons.length > 0).length
   const overrideCount = batchItems.filter((i) => i.hasOverride).length
 
@@ -854,31 +861,31 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setGridConfirmed(true)
   }, [canConfirmGrid])
 
-  /** 警告は消さず、どう扱うと決めたかを記録する */
-  const resolveItem = React.useCallback((id: string, resolution: ReviewResolution = "accepted-as-is") => {
-    setBatchItems((prev) =>
-      prev.map((item) =>
-        item.mediaId === id
-          ? { ...item, resolved: true, resolution, status: "waiting" as BatchItemStatus }
-          : item,
-      ),
-    )
-  }, [])
+  /** 警告は消さず、理由ごとにどう扱うと決めたかを記録する */
+  const resolveReason = React.useCallback(
+    (id: string, reason: ReviewReason, resolution: ReviewResolution) => {
+      setBatchItems((prev) =>
+        prev.map((item) => {
+          if (item.mediaId !== id) return item
+          const decisions = { ...item.decisions, [reason]: resolution }
+          const done = item.reasons.every((r) => decisions[r])
+          return { ...item, decisions, status: (done ? "waiting" : "review") as BatchItemStatus }
+        }),
+      )
+    },
+    [],
+  )
 
   /** 理由ごとの一括確認。「顔が検出されませんでした」は対象外 */
   const resolveGroup = React.useCallback((reason: ReviewReason) => {
     if (reason === "no-face") return
     setBatchItems((prev) =>
-      prev.map((item) =>
-        item.reasons.includes(reason) && !item.reasons.includes("no-face")
-          ? {
-              ...item,
-              resolved: true,
-              resolution: "accepted-as-is" as ReviewResolution,
-              status: "waiting" as BatchItemStatus,
-            }
-          : item,
-      ),
+      prev.map((item) => {
+        if (!item.reasons.includes(reason) || item.reasons.includes("no-face")) return item
+        const decisions = { ...item.decisions, [reason]: "accepted-as-is" as ReviewResolution }
+        const done = item.reasons.every((r) => decisions[r])
+        return { ...item, decisions, status: (done ? "waiting" : "review") as BatchItemStatus }
+      }),
     )
   }, [])
 
@@ -1106,7 +1113,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     reviewCount,
     reviewedIds,
     markReviewed,
-    resolveItem,
+    resolveReason,
     resolveGroup,
     markOverride,
     startBatchDetection,

@@ -67,11 +67,12 @@ function buildCopy(reason: UpgradeReason): Copy {
           "失敗した写真だけあとから再試行できます",
         ],
       }
+    // お試し枠で「新しい写真」を選べる数を超えた
     case "batch-credit":
       return {
         target: "pro",
-        title: "お試しの一括処理クレジットを使い切りました",
-        body: `Proなら最大${BATCH_MAX_ITEMS}枚までまとめて処理できます。`,
+        title: "お試しで選べる新しい写真の上限です",
+        body: `お試しでは新しい写真を合計${TRIAL_CREDITS}枚まで処理できます。一度試した写真は、クレジットを使わず何度でも処理できます。`,
         primary: "Proを確認する",
         benefits: [
           `1回の一括処理で最大${BATCH_MAX_ITEMS}枚`,
@@ -79,16 +80,17 @@ function buildCopy(reason: UpgradeReason): Copy {
           "一括設定プリセットとバッチ履歴",
         ],
       }
+    // Pro が 1 バッチの上限を超えた。課金訴求ではなく仕様上の通知
     case "batch-size":
       return {
         target: "pro",
         title: "選べる枚数の上限です",
-        body: `現在のお試しでは最大${TRIAL_CREDITS}枚まで選べます。Proなら最大${BATCH_MAX_ITEMS}枚までまとめて処理できます。`,
-        primary: "Proを確認する",
+        body: `1回の一括処理では最大${BATCH_MAX_ITEMS}枚まで選べます。`,
+        primary: "とじる",
         benefits: [
-          `1回の一括処理で最大${BATCH_MAX_ITEMS}枚`,
-          "要確認の写真だけを抽出して確認",
-          "成功件数と失敗件数のサマリ",
+          "残りの写真は次のバッチとして処理できます",
+          "処理キューで進みぐあいを確認できます",
+          "失敗した写真だけあとから再試行できます",
         ],
       }
     case "edit-locked":

@@ -31,6 +31,7 @@ import { EFFECT_LABELS, type EffectType } from "@/components/face-mask"
 import {
   BATCH_MAX_ITEMS,
   BATCH_STATUS_LABELS,
+  isDecided,
   RESOLUTION_LABELS,
   useApp,
   type BatchItem,
@@ -109,6 +110,9 @@ function SetupStage() {
               <Crown className="size-6 text-foreground" aria-hidden />
             </span>
             <p className="font-rounded text-sm font-bold">お試しクレジットを使い切りました</p>
+            <p className="text-[11px] leading-relaxed text-muted-foreground text-pretty">
+              新しい写真をまとめて処理するにはProが必要です。一度お試しした写真があれば、その写真は引き続きまとめて処理できます。
+            </p>
             <p className="text-[11px] leading-relaxed text-muted-foreground text-pretty">
               Proなら最大{BATCH_MAX_ITEMS}枚までまとめて処理できます。一覧で仕上がりを見渡し、注意が必要な写真だけを開いて直せます。
             </p>
@@ -438,7 +442,7 @@ function ReviewStage() {
     confirmGrid,
     canConfirmGrid,
     startBatchExport,
-    resolveItem,
+    resolveReason,
     resolveGroup,
     markOverride,
     reviewedIds,
@@ -473,13 +477,13 @@ function ReviewStage() {
   const groupable = React.useMemo(() => {
     const map = new Map<ReviewReason, number>()
     batchItems.forEach((item) => {
-      if (item.resolved || item.reasons.includes("no-face")) return
+      if (isDecided(item) || item.reasons.includes("no-face")) return
       item.reasons.forEach((r) => map.set(r, (map.get(r) ?? 0) + 1))
     })
     return [...map.entries()]
   }, [batchItems])
 
-  const noFaceItems = batchItems.filter((i) => i.reasons.includes("no-face") && !i.resolved)
+  const noFaceItems = batchItems.filter((i) => i.reasons.includes("no-face") && !isDecided(i))
 
   if (batchMode === "one-by-one") {
     const item = batchItems[step]
@@ -508,7 +512,7 @@ function ReviewStage() {
                 <StatusBadge item={item} reviewed={reviewedIds.includes(item.mediaId)} />
               </div>
 
-              {item.reasons.length > 0 && !item.resolved ? (
+              {item.reasons.length > 0 && !isDecided(item) ? (
                 <ReasonList reasons={item.reasons} />
               ) : null}
 
@@ -527,7 +531,7 @@ function ReviewStage() {
                   size="lg"
                   className="h-12 rounded-2xl text-sm font-bold"
                   onClick={() => {
-                    if (item.reasons.length > 0) resolveItem(item.mediaId)
+                    item.reasons.forEach((r) => resolveReason(item.mediaId, r, "accepted-as-is"))
                     markReviewed(item.mediaId)
                     setStep((s) => Math.min(batchItems.length - 1, s + 1))
                   }}
@@ -634,7 +638,7 @@ function ReviewStage() {
         <div className="grid grid-cols-3 gap-2">
           {shown.map((item) => {
             const media = findMedia(item.mediaId)
-            const needsAction = item.reasons.length > 0 && !item.resolved
+            const needsAction = item.reasons.length > 0 && !isDecided(item)
             return (
               <button
                 key={item.mediaId}
@@ -722,9 +726,8 @@ function ReviewStage() {
       <PreviewDialog
         item={preview}
         onClose={() => setPreview(null)}
-        onResolve={(id, resolution) => {
-          resolveItem(id, resolution)
-          setPreview(null)
+        onResolve={(id, reason, resolution) => {
+          resolveReason(id, reason, resolution)
         }}
         onOverride={(id) => {
           markOverride(id)
@@ -776,7 +779,7 @@ function StatusBadge({ item, compact, reviewed }: { item: BatchItem; compact?: b
       ? reviewed
         ? { label: "確認済み", className: "bg-primary text-primary-foreground" }
         : { label: "通常", className: "bg-card/90 text-muted-foreground" }
-      : item.resolved
+      : isDecided(item)
         ? { label: "確認済み", className: "bg-primary text-primary-foreground" }
         : { label: "要確認", className: "bg-chart-3 text-background" }
 
@@ -801,12 +804,12 @@ function PreviewDialog({
 }: {
   item: BatchItem | null
   onClose: () => void
-  onResolve: (mediaId: string, resolution: ReviewResolution) => void
+  onResolve: (mediaId: string, reason: ReviewReason, resolution: ReviewResolution) => void
   onOverride: (mediaId: string) => void
 }) {
   const { effect } = useApp()
   const media = item ? findMedia(item.mediaId) : null
-  const needsAction = item ? item.reasons.length > 0 && !item.resolved : false
+  const needsAction = item ? item.reasons.length > 0 && !isDecided(item) : false
 
   return (
     <Dialog open={item !== null} onOpenChange={(open) => (!open ? onClose() : undefined)}>
@@ -828,41 +831,50 @@ function PreviewDialog({
               className="aspect-square"
             />
 
-            {needsAction ? <ReasonList reasons={item.reasons} /> : null}
-
-            {/* 警告は消さず、どう扱うと決めたかを記録する */}
-            <div className="flex flex-col gap-2">
+            {/* 警告は消さず、理由ごとにどう扱うと決めたかを記録する */}
+            <div className="flex flex-col gap-3">
+              {item.reasons.map((reason) => {
+                const decided = item.decisions[reason]
+                return (
+                  <div key={reason} className="flex flex-col gap-1.5 rounded-2xl bg-chart-3/15 p-3">
+                    <p className="flex items-center gap-1.5 text-[11px] font-bold text-foreground">
+                      <AlertTriangle className="size-3.5 shrink-0" aria-hidden />
+                      {REVIEW_REASON_LABELS[reason]}
+                    </p>
+                    {decided ? (
+                      <p className="text-[11px] leading-relaxed text-foreground">
+                        判断：{RESOLUTION_LABELS[decided]}（警告の記録は残ります）
+                      </p>
+                    ) : (
+                      <div className="flex flex-col gap-1.5">
+                        {(
+                          [
+                            ["accepted-as-is", "見たうえで、このままでよい"],
+                            ["manual-region-added", "手動で隠す範囲を追加した"],
+                            ["unmasked-export-confirmed", "顔を隠さずそのまま保存する"],
+                          ] as [ReviewResolution, string][]
+                        ).map(([value, label]) => (
+                          <Button
+                            key={value}
+                            size="sm"
+                            variant={value === "unmasked-export-confirmed" ? "outline" : "secondary"}
+                            className={cn(
+                              "h-9 rounded-xl text-[11px] font-bold",
+                              value === "unmasked-export-confirmed" && "text-destructive",
+                            )}
+                            onClick={() => onResolve(item.mediaId, reason, value)}
+                          >
+                            {label}
+                          </Button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
               {needsAction ? (
-                <>
-                  <p className="text-[11px] font-bold text-muted-foreground">この写真をどうしますか？</p>
-                  <Button
-                    size="lg"
-                    className="h-12 rounded-2xl text-sm font-bold"
-                    onClick={() => onResolve(item.mediaId, "accepted-as-is")}
-                  >
-                    内容を見た。このままでよい
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="lg"
-                    className="h-12 rounded-2xl text-sm font-bold"
-                    onClick={() => onResolve(item.mediaId, "manual-region-added")}
-                  >
-                    手動で隠す範囲を追加した
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="lg"
-                    className="h-12 rounded-2xl text-sm font-bold text-destructive"
-                    onClick={() => onResolve(item.mediaId, "unmasked-export-confirmed")}
-                  >
-                    顔を隠さずそのまま保存する
-                  </Button>
-                </>
-              ) : null}
-              {item.resolution ? (
-                <p className="rounded-xl bg-secondary px-3 py-2 text-[11px] leading-relaxed text-secondary-foreground">
-                  判断：{RESOLUTION_LABELS[item.resolution]}（警告の記録は残ります）
+                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  すべての警告に判断を記録すると、この写真は確認済みになります。
                 </p>
               ) : null}
               <Button
