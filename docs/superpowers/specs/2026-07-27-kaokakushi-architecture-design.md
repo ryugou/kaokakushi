@@ -3,7 +3,7 @@
 | 項目 | 内容 |
 | --- | --- |
 | 文書名 | かおかくし 技術スタックおよびアーキテクチャ設計 |
-| バージョン | 1.19 |
+| バージョン | 1.20 |
 | 作成日 | 2026-07-27 |
 | 対象 | 写真・動画向け顔匿名化アプリ（iOS / Android） |
 | 上位文書 | 写真・動画向け顔匿名化アプリ 仕様書 v0.1 |
@@ -355,15 +355,24 @@ iOS の `confidence` はこのモデルに含めません。Android に対応す
 
 ```kotlin
 data class UsageLedger(
-    val period: YearMonth,                    // 消費を計上している年月
-    val consumedExportIds: Set<String>,       // 計上済みの書き出し
-    val grants: Map<String, Instant>,         // sourceHash → 初回成功時刻
-    val trialSourceHashes: Set<String>,       // 一括処理トライアルの消費済み
-    val lastObservedAt: Instant,              // 後退させない基準時刻（6.2.2.5）
+    val period: YearMonth,                       // 消費を計上している年月
+    val consumedExportIds: Set<String>,          // 計上済みの書き出し
+    val grants: Map<String, GrantEntry>,         // sourceHash → 権利
+    val trialEntries: Map<String, TrialEntry>,   // sourceHash → トライアル消費
+    val lastObservedAt: Instant,                 // 後退させない基準時刻（6.2.2.5）
 )
+
+data class GrantEntry(
+    val firstSuccessAt: Instant,
+    val ownerExportId: String,   // この要素を作った書き出し
+)
+
+data class TrialEntry(val ownerExportId: String)
 
 val UsageLedger.consumed: Int get() = consumedExportIds.size
 ```
+
+**各要素に `ownerExportId` を持たせます。** 7.4.3 のロールバックで「この書き出しが追加したもの」と「以前から存在したもの」を、**台帳そのものから**判別するためです。Room 側の記録だけに頼ると、台帳を書いた直後に落ちた場合に判別できません。
 
 **消費を件数ではなく書き出し ID の集合で持ちます。** 単なる `Int` では、7.4.3 が要求する「同じ `exportId` の再適用を弾く」も「特定の書き出しの消費だけ取り消す」も実装できません。集合にすれば、再適用は自然に冪等になり、ロールバックは該当 ID の削除で済みます。
 
@@ -1002,7 +1011,7 @@ Free および Standard の利用者は、Pro の中核である一括処理を�
 **残クレジット数は保存しません。消費済み台帳から導出します。**
 
 ```kotlin
-val remainingCredits = maxOf(0, configuredCreditCount - consumedSourceHashes.size)
+val remainingCredits = maxOf(0, configuredCreditCount - usageLedger.trialEntries.size)
 ```
 
 残数と台帳の両方を保存すると、更新途中の異常終了で不一致が起こりえます。「残 3 枚なのに台帳は 4 件」という状態からは、どちらが正しいか判断できません。導出にすれば正が 1 つになります。
@@ -1397,52 +1406,81 @@ data class ExportCommit(
     val batchId: String?,
     val sourceHash: String,
     val outputPath: String,
-    val accountingAt: Instant?,          // 会計内容を確定した時刻
-    val accountingPeriod: YearMonth?,    // 計上先の年月
-    val mutation: AccountingMutation?,   // Prepared では null
+    val authorization: ExportAuthorization,   // 開始前に固定する
+    val accountingAt: Instant?,               // 会計内容を確定した時刻
+    val accountingPeriod: YearMonth?,         // 計上先の年月
+    val intent: AccountingIntent?,            // Prepared では null
+    val applied: AccountingApplied?,          // 台帳へ適用したあとに埋まる
     val state: ExportCommitState,
-    val signature: ByteArray,            // Keychain / Keystore の鍵による HMAC
+    val signature: ByteArray,                 // Keychain / Keystore の鍵による HMAC
 )
 
-data class GrantMutation(
-    val sourceHash: String,
-    val firstSuccessAt: Instant,
+data class GrantMutation(val sourceHash: String, val firstSuccessAt: Instant)
+
+/** 台帳へ適用しようとする内容。FileVerified で確定する */
+data class AccountingIntent(
+    val consumeExportId: String?,
+    val grantToEnsure: GrantMutation,
+    val trialSourceHashToEnsure: String?,
 )
 
-/**
- * 台帳へ適用した更新。判定そのものは保存しない。
- * 「追加しようとした値」ではなく「実際に新規追加した値」を記録する。
- */
-data class AccountingMutation(
-    val consumeExportId: String?,             // Consume のときだけ非 null
-    val grantInserted: GrantMutation?,        // 新規に追加したときだけ非 null
-    val trialSourceHashInserted: String?,     // 新規に追加したときだけ非 null
+/** 台帳へ実際に適用された結果。AccountingCommitted で確定する */
+data class AccountingApplied(
+    val consumedInserted: Boolean,
+    val grantInsertedByThisExport: Boolean,
+    val trialInsertedByThisExport: Boolean,
 )
 
 enum class ExportCommitState { Prepared, FileVerified, AccountingCommitted, Completed }
 ```
 
-**`QuotaDecision` そのものは保存しません。** `Blocked` を含みうる判定を、すでに生成が始まったコミットへ持たせる意味がありません。保存するのは**実際に適用した更新内容**です。
+**「適用しようとする内容」と「実際に適用された結果」を分けます。** 台帳を更新する前に「実際に新規追加した値」を確定することはできません。前者は `FileVerified` で、後者は `AccountingCommitted` で埋まります。
 
-`grantInserted` と `trialSourceHashInserted` が「追加しようとした値」ではなく「**実際に新規追加した値**」なのは、ロールバックのためです。すでに存在した grant を再利用しただけの場合に `null` としておかないと、取り消し時に**以前から存在した権利まで削除します**。
+ただし `AccountingApplied` を Room へ書く前に落ちる可能性があるため、**これだけを根拠にロールバックできません。** 台帳側の `ownerExportId`（6.2）が最終的な判断材料です。
+
+##### 書き出し開始前に権限を固定する
+
+**`Blocked` になりうる評価を、生成が終わったあとに行いません。**
+
+```kotlin
+data class ExportAuthorization(
+    val entitlementSnapshot: Entitlement,
+    val quotaDecision: AllowedQuotaDecision,
+    val authorizedAt: Instant,
+)
+
+sealed interface AllowedQuotaDecision {
+    data object Unlimited : AllowedQuotaDecision
+    data object FreeReexport : AllowedQuotaDecision
+    data object Consume : AllowedQuotaDecision
+}
+```
+
+書き出し開始時点で利用権限とクォータ可否を確定し、その書き出しについて固定します。`Blocked` なら `ExportCommit` を作らず、生成も開始しません。型に `Blocked` を含めないことで、検証済みファイルを抱えたまま上限超過で破棄する経路を**表現できなくします**。
+
+開始後に次が起きても、その書き出しは開始時の権限で完了させます。
+
+- 有料契約が失効した
+- 月間上限へ達した
+- リモート設定で上限が下がった
+
+**Free でクォータを消費する書き出しは同時に 1 件までとします。** 並列に走らせると、開始時の判定が両方 `Consume` になり上限を超えます。
 
 ##### 会計内容はファイル検証後に確定する
 
-**`Prepared` では `mutation` を `null` にします。** 生成中に次が起こりうるためです。
-
-- 月をまたぐ
-- `ExportGrant` の 24 時間期限をまたぐ
-- プラン状態が変わる
-- アプリが長時間バックグラウンドへ入る
+**`Prepared` では `intent` を `null` にします。** 生成中に月や 24 時間期限をまたぐこと、アプリが長時間バックグラウンドへ入ることがあるためです。
 
 7 月 31 日に検証まで終わり、会計反映前に落ちて 8 月に復旧した場合、`Prepared` 時点の内容で計上すると**どちらの月へ載せるべきか決まりません**。
 
 | 状態 | 会計フィールド |
 | --- | --- |
-| `Prepared` | `accountingAt` / `accountingPeriod` / `mutation` はすべて `null` |
-| `FileVerified` 以降 | 3 つとも必須。検証完了時点の `effectiveNow` と最新の `UsageLedger` から確定する |
+| `Prepared` | `accountingAt` / `accountingPeriod` / `intent` / `applied` はすべて `null` |
+| `FileVerified` | 前 3 つが必須。検証完了時点の `effectiveNow` と最新の `UsageLedger` から確定する |
+| `AccountingCommitted` 以降 | `applied` も必須 |
 
-復旧が翌月になった場合、**過去月の `consumeExportId` を現在月へ加算しません。** `accountingPeriod` が現在の `period` と異なる消費は、月次リセットで既に流れたものとして扱います。`grant` とトライアル台帳は月に紐づかないため、本来の規則どおり適用します。
+`quotaDecision` は `authorization` に固定されているため、ここで再評価するのは**計上先の年月と grant の時刻だけ**です。
+
+復旧が翌月になった場合、**過去月の `consumeExportId` を現在月へ加算しません。** `accountingPeriod` が現在の `period` と異なる消費は、月次リセットで既に流れたものとして扱います。grant とトライアル台帳は月に紐づかないため、本来の規則どおり適用します。
 
 ##### 台帳更新は直列化する
 
@@ -1474,11 +1512,12 @@ data class OutputRecord(
 
 | 順 | 操作 | 保存先 |
 | --- | --- | --- |
-| 0 | `ExportCommit(Prepared)` を保存（`mutation` は `null`） | Room |
+| −1 | 権限とクォータ可否を確定する。`Blocked` なら以降へ進まない | メモリ |
+| 0 | `ExportCommit(Prepared)` を保存（`intent` は `null`） | Room |
 | 1 | 一時ファイルを生成し、整合性とデコードを検証 | ファイルシステム |
-| 2 | 会計内容を確定し `ExportCommit(FileVerified)` を保存 | Room |
-| 3 | `UsageLedger` を冪等に置き換え | SecureStore |
-| 4 | `ExportCommit(AccountingCommitted)` を保存 | Room |
+| 2 | `intent` を確定し `ExportCommit(FileVerified)` を保存 | Room |
+| 3 | `UsageLedger` を冪等に置き換える（要素へ `ownerExportId` を付与） | SecureStore |
+| 4 | `applied` を埋めて `ExportCommit(AccountingCommitted)` を保存 | Room |
 | 5 | `OutputRecord(Generated)` を `exportId` を主キーに upsert | Room |
 | 6 | `ExportCommit(Completed)` を保存 | Room |
 
@@ -1493,6 +1532,23 @@ data class OutputRecord(
 `ExportCommit` は Room にありますが、その内容が SecureStore の台帳更新を駆動します。**Room を書き換えれば台帳を任意に操作できてしまう**ため、コミット行にも Keychain / Keystore の鍵で HMAC を付けます（6.2.5 と同じ方式）。
 
 **署名検証に失敗した行を自動破棄しません。** 破棄すると、すでに反映済みの `UsageLedger` だけが残る可能性があります。会計済みかどうかを判断できない以上、**復旧エラーとして扱い**、新規書き出しをブロックしたうえで利用者へ提示します。ファイルも自動削除しません。
+
+##### 復旧エラーの解消
+
+**ブロックしたまま解除手段がないと、破損したコミット 1 件でアプリが永久に書き出し不能になります。** 利用者が抜け出せる操作を用意します。
+
+> 処理情報が破損しているため、この書き出しを復元できません。
+
+選択肢は「もう一度試す」と「破損した処理を破棄して続ける」の 2 つです。
+
+「破棄して続ける」の挙動は次のとおりです。
+
+- **現在の署名済み `UsageLedger` は変更しない**
+- クォータやトライアルクレジットを払い戻さない
+- 該当の `ExportCommit`、出力ファイル、`OutputRecord` を削除する
+- 復旧エラーを解除し、新規書き出しを許可する
+
+払い戻さないため利用者に不利になりえますが、**破損した Room の情報を根拠に権利を増やす方が危険**です。改ざんによる枠の水増しに直結します。アプリが永久に使用不能になる状態も同時に避けられます。
 
 ##### 起動時の順序
 
@@ -1526,7 +1582,16 @@ data class OutputRecord(
 | 欠損・破損 | **このコミットが実際に追加した会計要素だけ**を取り消す |
 | 取り消し不能 | 復旧エラーとして新規書き出しをブロックする。自動削除しない |
 
-取り消しの対象は `AccountingMutation` の非 `null` フィールドだけです。`grantInserted` が `null`（既存の grant を再利用しただけ）なら、その grant は残します。**以前から存在した権利を巻き添えで消さない**ためにフィールドを「実際に追加したか」で持っています。
+**取り消しの判断材料は台帳側の `ownerExportId` です**（6.2）。`AccountingApplied` は Room へ書く前に落ちうるため、単独では根拠になりません。
+
+```
+consumedExportIds に対象 exportId があれば削除
+grants[sourceHash].ownerExportId == 対象 exportId なら削除
+trialEntries[sourceHash].ownerExportId == 対象 exportId なら削除
+別の exportId が作った要素は削除しない
+```
+
+これなら手順 3 と 4 の間で落ちても、**所有者から正しく判別できます**。既存の grant を再利用しただけの書き出しは `ownerExportId` が一致しないため、以前から存在した権利を巻き添えで消しません。
 
 ### 7.5 削除候補の選定
 
@@ -1783,7 +1848,12 @@ Rust + Axum。`/v1/config` は静的 JSON と ETag による配信とします�
 - 手順3と4の間で中断しても、状態が FileVerified のまま台帳更新を再適用できること（7.4.3）
 - 月末に FileVerified まで進み翌月に復旧した場合、過去月の消費を現在月へ加算しないこと（7.4.3）
 - `AccountingCommitted` からの復旧でファイル欠損時、実際に追加した会計要素だけが取り消されること（7.4.3）
-- 既存 grant を再利用しただけのコミットのロールバックで、その grant が削除されないこと（7.4.3）
+- 既存 grant を再利用しただけのコミットのロールバックで、その grant が削除されないこと。判定が台帳の `ownerExportId` で行われること（7.4.3）
+- 手順3の直後（`applied` 未保存）に落ちても、`ownerExportId` から正しくロールバックできること（7.4.3）
+- 書き出し開始前に `Blocked` なら `ExportCommit` を作らないこと（7.4.3）
+- 開始後に契約が失効しても、その書き出しは開始時の権限で完了すること（7.4.3）
+- Free でクォータを消費する書き出しが同時に1件までに制限されること（7.4.3）
+- 復旧エラーを「破棄して続ける」で解除でき、台帳が変更されないこと（7.4.3）
 - 並列書き出し時も `UsageLedgerStore.update` が直列化され、更新が失われないこと（7.4.3）
 - `evaluate` が更新後の `UsageLedger` を返し、Unlimited でも時刻更新と grant 整理が行われること（6.2）
 - `domain` の時間判定が `now` ではなく `effectiveNow` だけを受け取ること（6.2.2.5）
