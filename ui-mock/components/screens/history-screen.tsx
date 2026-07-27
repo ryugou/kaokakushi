@@ -6,6 +6,8 @@ import { AlertTriangle, ChevronDown, Clock, Layers, Lock, Trash2, Users } from "
 import { cn } from "@/lib/utils"
 import { findMedia, type BatchHistoryItem, type SingleHistoryItem } from "@/lib/mock-data"
 import { RETENTION_LABELS, useApp } from "@/components/app-provider"
+import { EFFECT_LABELS, type EffectType } from "@/components/face-mask"
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { MediaThumb } from "@/components/media-canvas"
 import { AdSlot, PrivacyNote, ScreenHeader } from "@/components/app-bits"
 import { Badge } from "@/components/ui/badge"
@@ -79,10 +81,13 @@ function SingleRow({
   priority?: boolean
   onResume: () => void
 }) {
-  const { removeHistory, startReexport, startLockedView, guardNewWork, startEditing, plan } = useApp()
+  const { removeHistory, startReexport, startLockedView, duplicateAsFree, guardNewWork, startEditing, effectivePlan } =
+    useApp()
+  const [duplicating, setDuplicating] = React.useState(false)
   const media = findMedia(item.mediaId)
   // 有料スタンプで作った作品は、Freeでも「変更せず再書き出し」だけできる
-  const editLocked = plan === "free" && item.paidFeature !== undefined
+  // 判定は作成時のプランではなく、内容が要求するプラン（requiredPlan）
+  const editLocked = effectivePlan === "free" && item.paidFeature !== undefined
 
   return (
     <article className="flex flex-col gap-2 rounded-2xl bg-card p-3 ring-1 ring-foreground/10">
@@ -122,14 +127,24 @@ function SingleRow({
           </Button>
           {editLocked ? (
             // 閲覧はできる。変更しようとした時点でStandardを案内する
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-7 rounded-xl px-2 text-[10px] text-muted-foreground"
-              onClick={() => guardNewWork("内容を見る", () => startLockedView(item))}
-            >
-              内容を見る
-            </Button>
+            <>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 rounded-xl px-2 text-[10px] text-muted-foreground"
+                onClick={() => guardNewWork("内容を見る", () => startLockedView(item))}
+              >
+                内容を見る
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-7 rounded-xl px-2 text-[10px] text-primary"
+                onClick={() => setDuplicating(true)}
+              >
+                Free版として複製
+              </Button>
+            </>
           ) : (
             <Button
               size="icon"
@@ -143,13 +158,46 @@ function SingleRow({
           )}
         </div>
       </div>
+
+      {/* 置き換え先は利用者に選ばせる。決め打ちすると意図しない見た目になる */}
+      <Dialog open={duplicating} onOpenChange={(open) => (!open ? setDuplicating(false) : undefined)}>
+        <DialogContent className="max-w-[330px] rounded-3xl">
+          <DialogHeader>
+            <DialogTitle className="font-rounded text-base leading-snug">
+              どの隠し方に置き換えますか？
+            </DialogTitle>
+            <DialogDescription className="leading-relaxed">
+              有料スタンプを使っていた部分だけを置き換えた複製を作ります。範囲の位置と大きさ、その他の設定はそのまま引き継ぎます。元の作品は変わりません。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-2 gap-2">
+            {(["mosaic", "blur", "black", "stamp"] as EffectType[]).map((t) => (
+              <Button
+                key={t}
+                size="lg"
+                variant="secondary"
+                className="h-12 rounded-2xl text-sm font-bold"
+                onClick={() => {
+                  setDuplicating(false)
+                  guardNewWork("Free版として複製", () => duplicateAsFree(item, t))
+                }}
+              >
+                {t === "stamp" ? "基本スタンプ" : EFFECT_LABELS[t]}
+              </Button>
+            ))}
+          </div>
+          <Button variant="ghost" size="lg" className="h-11 rounded-2xl" onClick={() => setDuplicating(false)}>
+            やめる
+          </Button>
+        </DialogContent>
+      </Dialog>
     </article>
   )
 }
 
 /** 一括処理はバッチ単位で1件にまとめる */
 function BatchRow({ item, onResume }: { item: BatchHistoryItem; onResume: () => void }) {
-  const { removeHistory } = useApp()
+  const { removeHistory, guardNewWork, startEditing } = useApp()
   const [open, setOpen] = React.useState(false)
 
   return (
@@ -200,15 +248,28 @@ function BatchRow({ item, onResume }: { item: BatchHistoryItem; onResume: () => 
       </div>
 
       {open ? (
-        <div className="grid grid-cols-4 gap-2 border-t pt-2">
-          {item.mediaIds.map((id) => (
-            <MediaThumb
-              key={id}
-              media={findMedia(id)}
-              effect={item.effect}
-              className="aspect-square w-full ring-1 ring-foreground/10"
-            />
-          ))}
+        <div className="flex flex-col gap-2 border-t pt-2">
+          {/* バッチ内の1枚を開く操作は単体編集なので requiredPlan に従う */}
+          <p className="text-[10px] leading-relaxed text-muted-foreground">
+            写真をタップすると、1枚だけ選んで編集し直せます。
+          </p>
+          <div className="grid grid-cols-4 gap-2">
+            {item.mediaIds.map((id) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => guardNewWork("この写真を編集", () => startEditing(id))}
+                className="transition-transform active:scale-95"
+              >
+                <MediaThumb
+                  media={findMedia(id)}
+                  effect={item.effect}
+                  className="aspect-square w-full ring-1 ring-foreground/10"
+                />
+                <span className="sr-only">{findMedia(id).title}を編集する</span>
+              </button>
+            ))}
+          </div>
         </div>
       ) : null}
     </article>

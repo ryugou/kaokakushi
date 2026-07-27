@@ -31,6 +31,8 @@ import { EFFECT_LABELS, type EffectType } from "@/components/face-mask"
 import {
   BATCH_MAX_ITEMS,
   BATCH_STATUS_LABELS,
+  deliveredCount,
+  generatedCount,
   isDecided,
   RESOLUTION_LABELS,
   useApp,
@@ -126,7 +128,7 @@ function SetupStage() {
     )
   }
 
-  const unsavedBatch = pendingOutput?.kind === "batch" && !pendingOutput.delivered
+  const unsavedBatch = pendingOutput?.kind === "batch" && generatedCount(pendingOutput) > 0
   const estimate = estimateBatch(batchSelection)
   const notEnoughSpace = batchSelection.length > 0 && estimate.required > freeSpaceMb
 
@@ -1033,7 +1035,9 @@ function SummaryStage() {
   const doneCount = batchItems.filter((i) => i.status === "done").length
   const errorCount = batchItems.filter((i) => i.status === "error").length
   const canceledCount = batchItems.filter((i) => i.status === "canceled").length
-  const delivered = pendingOutput?.delivered ?? true
+  const pendingNow = generatedCount(pendingOutput)
+  const deliveredNow = deliveredCount(pendingOutput)
+  const delivered = pendingNow === 0
 
   return (
     <>
@@ -1068,10 +1072,20 @@ function SummaryStage() {
           </div>
         ) : null}
 
+        {/* 保存は写真ごとに成否が決まる。部分的に成功した状態を表示する */}
+        {deliveredNow > 0 && !delivered ? (
+          <div className="flex items-start gap-2 rounded-2xl bg-chart-3/20 px-3 py-2.5">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-foreground" aria-hidden />
+            <p className="text-[11px] leading-relaxed text-foreground text-pretty">
+              {deliveredNow}枚を保存しました。残り{pendingNow}枚は保存できていません。空き容量を確認して、もう一度お試しください。
+            </p>
+          </div>
+        ) : null}
+
         {!delivered ? (
           <div className="flex flex-col gap-2">
             <Button size="lg" className="h-13 w-full rounded-2xl font-bold" onClick={savePending}>
-              {doneCount}枚をまとめて保存
+              {pendingNow}枚をまとめて保存
             </Button>
             <Button
               variant="outline"

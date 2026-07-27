@@ -2,7 +2,7 @@
 
 import { AlertTriangle, Download, Share2, Trash2 } from "lucide-react"
 
-import { useApp } from "@/components/app-provider"
+import { generatedCount, useApp } from "@/components/app-provider"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 
@@ -28,7 +28,7 @@ export function UnsavedOutputDialog() {
     retention,
   } = useApp()
 
-  const count = pendingOutput?.kind === "batch" ? pendingOutput.count : 1
+  const count = generatedCount(pendingOutput)
   const canKeepForLater = retention !== "none"
 
   return (
@@ -84,8 +84,8 @@ export function UnsavedOutputDialog() {
 export function DiscardDialog() {
   const { discardPromptOpen, closeDiscard, discardPending, pendingOutput } = useApp()
 
-  const usedTrial = pendingOutput?.kind === "batch" && pendingOutput.usedTrial
-  const count = pendingOutput?.kind === "batch" ? pendingOutput.count : 1
+  const usedTrial = pendingOutput?.usedTrial ?? false
+  const count = generatedCount(pendingOutput)
 
   return (
     <Dialog open={discardPromptOpen} onOpenChange={(open) => (!open ? closeDiscard() : undefined)}>
@@ -128,9 +128,9 @@ export function DiscardDialog() {
  */
 export function RecoveryDialog() {
   const { recoveryOpen, closeRecovery, pendingOutput, savePending, sharePending, askDiscard } = useApp()
-  const count = pendingOutput?.kind === "batch" ? pendingOutput.count : 1
+  const count = generatedCount(pendingOutput)
   // 受け渡し済みの出力では復旧案内を出さない
-  const needsRecovery = pendingOutput !== null && !pendingOutput.delivered
+  const needsRecovery = generatedCount(pendingOutput) > 0
 
   return (
     <Dialog open={recoveryOpen && needsRecovery} onOpenChange={(open) => (!open ? closeRecovery() : undefined)}>

@@ -14,7 +14,7 @@ import {
   type ReviewReason,
   type SingleHistoryItem,
 } from "@/lib/mock-data"
-import { DEFAULT_EFFECT, EFFECT_LABELS, type EffectConfig } from "@/components/face-mask"
+import { DEFAULT_EFFECT, EFFECT_LABELS, type EffectConfig, type EffectType } from "@/components/face-mask"
 import { MY_STAMPS, resolveStampArt, type MyStamp } from "@/lib/stamps"
 import { MyStampsProvider } from "@/components/stamp-art"
 
@@ -33,6 +33,16 @@ export type Screen =
   | "custom-stamp"
 
 export type Plan = "free" | "standard" | "pro"
+
+/** 契約の状態。pending では有料機能を付与しない（仕様 5.4） */
+export type PlanStatus = "active" | "grace" | "pending" | "expired"
+
+export const PLAN_STATUS_LABELS: Record<PlanStatus, string> = {
+  active: "有効",
+  grace: "支払い猶予期間",
+  pending: "支払い確認中",
+  expired: "期限切れ",
+}
 
 export type UpgradeReason =
   | "export-limit"
@@ -78,20 +88,31 @@ export const RETENTION_LABELS: Record<Retention, string> = {
 export type QuotaDecision = "unlimited" | "free-reexport" | "consume" | "blocked"
 
 /**
- * 生成が終わった加工済み写真。
- * delivered が false のあいだは、保存も共有もされていない。
- * 受け渡しに成功したあとも、完了画面を開いているあいだは保持する。
+ * 生成が終わった加工済み写真の状態。
+ * 一括処理では部分的な受け渡しが起きるため、写真ごとに持つ。
+ * バッチ全体の状態は各レコードから集計して導く。
  */
-export type PendingOutput =
-  | { kind: "single"; historyId: string; mediaId: string; usedTrial: false; delivered: boolean }
-  | {
-      kind: "batch"
-      historyId: string
-      mediaIds: string[]
-      count: number
-      usedTrial: boolean
-      delivered: boolean
-    }
+export type OutputState = "generated" | "delivered"
+
+export type OutputRecord = {
+  mediaId: string
+  state: OutputState
+}
+
+export type PendingOutput = {
+  kind: "single" | "batch"
+  historyId: string
+  usedTrial: boolean
+  records: OutputRecord[]
+}
+
+export function generatedCount(output: PendingOutput | null) {
+  return output ? output.records.filter((r) => r.state === "generated").length : 0
+}
+
+export function deliveredCount(output: PendingOutput | null) {
+  return output ? output.records.filter((r) => r.state === "delivered").length : 0
+}
 
 export type BatchStage = "setup" | "detecting" | "review" | "queue" | "summary"
 export type BatchMode = "auto" | "one-by-one"
@@ -162,6 +183,10 @@ export const BATCH_MAX_ITEMS = 50
 export const TRIAL_CREDITS = 5
 /** カスタムスタンプの登録上限（Standard / Pro 共通） */
 export const CUSTOM_STAMP_LIMIT = 100
+/** 履歴1件あたりの想定容量（MB）。加工後サムネイルぶん */
+export const HISTORY_ITEM_MB = 0.35
+/** 履歴の使用容量上限（MB） */
+export const HISTORY_LIMIT_MB = 200
 
 export const PLAN_LABELS: Record<Plan, string> = {
   free: "Free",
@@ -198,10 +223,15 @@ type AppContextValue = {
 
   plan: Plan
   setPlan: (plan: Plan) => void
+  planStatus: PlanStatus
+  setPlanStatus: (status: PlanStatus) => void
+  /** 契約状態を加味した実効プラン */
+  effectivePlan: Plan
   remainingFree: number
   setRemainingFree: (n: number) => void
   trialCredits: number
-  setTrialCredits: (n: number) => void
+  /** デモ用に消費済み台帳の件数を直接いじる */
+  setTrialConsumed: (n: number) => void
 
   canUsePremiumStamps: boolean
   canUseCustomStamps: boolean
@@ -237,6 +267,8 @@ type AppContextValue = {
   reexportOf: SingleHistoryItem | null
   startReexport: (item: SingleHistoryItem) => void
   startLockedView: (item: SingleHistoryItem) => void
+  /** 有料スタンプを基本エフェクトへ置き換えた複製を作る */
+  duplicateAsFree: (item: SingleHistoryItem, replacement: EffectType) => void
   /** 閲覧はできるが変更にはStandardが必要な状態 */
   lockedEdit: boolean
 
@@ -248,6 +280,9 @@ type AppContextValue = {
   removeHistory: (id: string) => void
   retention: Retention
   setRetention: (value: Retention) => void
+  historyStorageMb: number
+  historyLimitMb: number
+  setHistoryLimitMb: (mb: number) => void
 
   myStamps: MyStamp[]
   addMyStamp: (stamp: MyStamp) => void
@@ -340,10 +375,12 @@ export function useApp() {
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [stack, setStack] = React.useState<Screen[]>(["home"])
   const [plan, setPlanState] = React.useState<Plan>("free")
+  const [planStatus, setPlanStatus] = React.useState<PlanStatus>("active")
   const [remainingFree, setRemainingFree] = React.useState(3)
-  const [trialCredits, setTrialCredits] = React.useState(TRIAL_CREDITS)
   const [retention, setRetention] = React.useState<Retention>("30d")
   const [lowStorage, setLowStorage] = React.useState(false)
+  // デモ用に上限を下げると、容量超過による削除を確認できる
+  const [historyLimitMb, setHistoryLimitMb] = React.useState(HISTORY_LIMIT_MB)
 
   const [mediaId, setMediaId] = React.useState<string | null>(null)
   const [manualFaces, setManualFaces] = React.useState<FaceBox[]>([])
@@ -379,6 +416,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   /** すでに枠を消費した元写真。同じ写真の再書き出しでは二重に消費しない */
   const [chargedIds, setChargedIds] = React.useState<string[]>([])
   const [trialChargedIds, setTrialChargedIds] = React.useState<string[]>([])
+  // 残クレジットは保存せず台帳から導出する。正を1つにして不一致を防ぐ
+  const trialCredits = Math.max(0, TRIAL_CREDITS - trialChargedIds.length)
 
   const media = mediaId ? findMedia(mediaId) : null
   const faces = React.useMemo(
@@ -391,22 +430,27 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   /* プラン権限                                                      */
   /* -------------------------------------------------------------- */
 
-  const canUsePremiumStamps = plan === "standard" || plan === "pro"
-  const canUseCustomStamps = plan === "standard" || plan === "pro"
-  const canBatchFull = plan === "pro"
+  // 権限は plan から直接ではなく Entitlement（plan + status）から導く。
+  // pending（支払い保留）では有料機能を付与しない。
+  const entitled = planStatus === "active" || planStatus === "grace"
+  const effectivePlan: Plan = entitled ? plan : "free"
+
+  const canUsePremiumStamps = effectivePlan === "standard" || effectivePlan === "pro"
+  const canUseCustomStamps = effectivePlan === "standard" || effectivePlan === "pro"
+  const canBatchFull = effectivePlan === "pro"
   // クレジット0でも、消費済み台帳に写真があれば再処理できる
   const canBatchTrial = trialCredits > 0 || trialChargedIds.length > 0
-  const hasAds = plan === "free"
+  const hasAds = effectivePlan === "free"
   // トライアルは「総枚数5枚まで」「新規写真は残クレジットまで」の2条件。
   // 総枚数だけで絞ると、残0枚のとき消費済みの写真すら選べなくなる。
   const batchMaxSelectable = canBatchFull ? BATCH_MAX_ITEMS : TRIAL_CREDITS
-  const canExportSingle = plan !== "free" || remainingFree > 0
+  const canExportSingle = effectivePlan !== "free" || remainingFree > 0
   /**
    * いま書き出したときのクォータ判定。
    * 24時間以内の同じ元写真は追加消費しないため、一律に「1枚使います」とは案内できない。
    */
   const quotaDecision: QuotaDecision =
-    plan !== "free"
+    effectivePlan !== "free"
       ? "unlimited"
       : media && chargedIds.includes(media.id)
         ? "free-reexport"
@@ -414,7 +458,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           ? "blocked"
           : "consume"
   // 有料スタンプで作った既存作品は、Freeでも閲覧と再書き出しはできるが変更はできない
-  const lockedEdit = plan === "free" && reexportOf?.paidFeature !== undefined
+  const lockedEdit = effectivePlan === "free" && reexportOf?.paidFeature !== undefined
   const freeSpaceMb = lowStorage ? DEVICE_FREE_MB.low : DEVICE_FREE_MB.normal
 
   const allStamps = React.useMemo(() => [...myStamps, ...retiredStamps], [myStamps, retiredStamps])
@@ -485,6 +529,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [openProject],
   )
 
+  /**
+   * 有料スタンプを基本のかくし方へ置き換えた複製を作る。
+   * 元のプロジェクトは変更しない。Freeでも編集を続けられる逃げ道。
+   */
+  const duplicateAsFree = React.useCallback((item: SingleHistoryItem, replacement: EffectType) => {
+    const source = findMedia(item.mediaId)
+    setMediaId(item.mediaId)
+    setManualFaces([])
+    // 領域の位置と大きさ、その他の出力設定は引き継ぐ
+    setHidden(source.faces.map((f) => f.id))
+    setEffect({ ...item.effect, type: replacement, stampId: "circle" })
+    setReexportOf(null)
+    setStack((prev) => [...prev, "effect"])
+  }, [])
+
   const toggleFace = React.useCallback((id: string) => {
     setHidden((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
   }, [])
@@ -519,7 +578,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
    */
   const completeSingleExport = React.useCallback(() => {
     if (!media) return
-    if (plan === "free" && !chargedIds.includes(media.id)) {
+    if (effectivePlan === "free" && !chargedIds.includes(media.id)) {
       setRemainingFree((n) => Math.max(0, n - 1))
       setChargedIds((prev) => [...prev, media.id])
     }
@@ -543,7 +602,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
 
     if (retention !== "none") setHistory((prev) => [entry, ...prev])
-    setPendingOutput({ kind: "single", historyId, mediaId: media.id, usedTrial: false, delivered: false })
+    setPendingOutput({
+      kind: "single",
+      historyId,
+      usedTrial: false,
+      records: [{ mediaId: media.id, state: "generated" }],
+    })
   }, [allStamps, chargedIds, effect, hidden.length, history.length, media, plan, reexportOf, retention])
 
   /* -------------------------------------------------------------- */
@@ -555,13 +619,27 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
    * 完了画面を開いているあいだは保持し、画面を離れた時点で破棄する。
    * これにより「共有したあとに保存もする」ができる。
    */
+  /**
+   * 受け渡しを試みる。空き容量が足りない状態では一部だけ成功させ、
+   * 「32枚中20枚だけ保存できた」という部分成功を再現する。
+   */
   const markDelivered = React.useCallback(() => {
     setPendingOutput((current) => {
       if (!current) return current
-      setHistory((prev) =>
-        prev.map((h) => (h.id === current.historyId ? ({ ...h, unsaved: false } as HistoryItem) : h)),
+      const pending = current.records.filter((r) => r.state === "generated")
+      const succeeded = lowStorage ? Math.max(1, Math.ceil(pending.length * 0.6)) : pending.length
+      const targets = pending.slice(0, succeeded).map((r) => r.mediaId)
+
+      const records = current.records.map((r) =>
+        targets.includes(r.mediaId) ? { ...r, state: "delivered" as OutputState } : r,
       )
-      return { ...current, delivered: true }
+      const allDone = records.every((r) => r.state === "delivered")
+      if (allDone) {
+        setHistory((prev) =>
+          prev.map((h) => (h.id === current.historyId ? ({ ...h, unsaved: false } as HistoryItem) : h)),
+        )
+      }
+      return { ...current, records }
     })
     setUnsavedPromptOpen(false)
     setDiscardPromptOpen(false)
@@ -569,15 +647,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const intent = intentRef.current
     intentRef.current = null
     if (intent) intent.run()
-  }, [])
+  }, [lowStorage])
 
   const savePending = React.useCallback(() => markDelivered(), [markDelivered])
   const sharePending = React.useCallback(() => markDelivered(), [markDelivered])
 
   const discardPending = React.useCallback(() => {
     setPendingOutput((current) => {
-      if (current && retention !== "none") {
+      if (!current) return null
+      const delivered = current.records.filter((r) => r.state === "delivered")
+      // すでに受け渡した写真は履歴に残す。破棄するのは未受け渡しのぶんだけ
+      if (retention !== "none" && delivered.length === 0) {
         setHistory((prev) => prev.filter((h) => h.id !== current.historyId))
+      } else if (retention !== "none") {
+        setHistory((prev) =>
+          prev.map((h) => (h.id === current.historyId ? ({ ...h, unsaved: false } as HistoryItem) : h)),
+        )
       }
       return null
     })
@@ -611,12 +696,23 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
    * 受け渡し済みの出力は一時ファイルを消すだけで、復旧案内は出さない。
    * すでに保存できているのに「保存していない」と伝えるのは事実と異なるため。
    */
+  const setTrialConsumed = React.useCallback((n: number) => {
+    setTrialChargedIds((prev) => {
+      const next = prev.slice(0, n)
+      while (next.length < n) next.push(`demo-${next.length}`)
+      return next
+    })
+  }, [])
+
   const simulateCrash = React.useCallback(() => {
     setStack(["home"])
     setPendingOutput((current) => {
-      if (current && current.delivered) return null
-      if (current) setRecoveryOpen(true)
-      return current
+      if (!current) return null
+      // 受け渡し済みの写真は一時ファイルを削除し、案内の対象にしない
+      const remaining = current.records.filter((r) => r.state === "generated")
+      if (remaining.length === 0) return null
+      setRecoveryOpen(true)
+      return { ...current, records: remaining }
     })
   }, [])
 
@@ -626,7 +722,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
    */
   const guardNewWork = React.useCallback(
     (label: string, run: () => void) => {
-      if (pendingOutput && !pendingOutput.delivered) {
+      // 受け渡し未完了の写真が1枚でも残っていれば確認する
+      if (generatedCount(pendingOutput) > 0) {
         intentRef.current = { label, run }
         setUnsavedPromptOpen(true)
         return
@@ -719,6 +816,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [isStampReferenced])
 
   // 1個あたり 0.18MB としてざっくり見積もる（長辺1024pxの圧縮画像の目安）
+  // 履歴の使用容量。上限を超えたら古いものから削除する
+  const historyStorageMb = Math.round(history.length * HISTORY_ITEM_MB * 10) / 10
+
+  React.useEffect(() => {
+    if (historyStorageMb <= historyLimitMb) return
+    const keep = Math.max(1, Math.floor(historyLimitMb / HISTORY_ITEM_MB))
+    setHistory((prev) => {
+      if (prev.length <= keep) return prev
+      // 未受け渡しの出力を持つ履歴は残す（7.2.4 のやり直し保証）
+      const protectedId = pendingOutput?.historyId
+      const kept = prev.slice(0, keep)
+      const rescued = prev.find((h) => h.id === protectedId && !kept.includes(h))
+      return rescued ? [...kept.slice(0, keep - 1), rescued] : kept
+    })
+  }, [historyLimitMb, historyStorageMb, pendingOutput])
+
   const stampStorageActiveMb = Math.round(myStamps.length * 0.18 * 10) / 10
   const stampStorageRetainedMb = Math.round(retiredStamps.length * 0.18 * 10) / 10
   const retiredStampCount = retiredStamps.length
@@ -967,7 +1080,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       // 同じ元写真を再書き出ししてもクレジットは二重に消費しない
       const fresh = doneItems.filter((i) => !trialChargedIds.includes(i.mediaId))
       if (fresh.length > 0) {
-        setTrialCredits((n) => Math.max(0, n - fresh.length))
         setTrialChargedIds((prev) => [...prev, ...fresh.map((i) => i.mediaId)])
       }
       setBatchTrialUsed(true)
@@ -991,10 +1103,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setPendingOutput({
       kind: "batch",
       historyId,
-      mediaIds: doneItems.map((i) => i.mediaId),
-      count: doneItems.length,
       usedTrial,
-      delivered: false,
+      records: doneItems.map((i) => ({ mediaId: i.mediaId, state: "generated" as OutputState })),
     })
   }, [batchItems, batchStage, canBatchFull, chargedIds, effect, plan, retention, trialChargedIds])
 
@@ -1039,10 +1149,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     back,
     plan,
     setPlan,
+    planStatus,
+    setPlanStatus,
+    effectivePlan,
     remainingFree,
     setRemainingFree,
     trialCredits,
-    setTrialCredits,
+    setTrialConsumed,
     canUsePremiumStamps,
     canUseCustomStamps,
     canBatchFull,
@@ -1070,6 +1183,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     reexportOf,
     startReexport,
     startLockedView,
+    duplicateAsFree,
     lockedEdit,
     upgrade,
     requestUpgrade,
@@ -1078,6 +1192,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     removeHistory,
     retention,
     setRetention,
+    historyStorageMb,
+    historyLimitMb,
+    setHistoryLimitMb,
     myStamps,
     addMyStamp,
     removeMyStamp,

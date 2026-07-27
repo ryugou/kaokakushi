@@ -2,7 +2,7 @@
 
 import { Camera, CheckCircle2, Download, Home, ImagePlus, Share2, Sparkles } from "lucide-react"
 
-import { useApp } from "@/components/app-provider"
+import { generatedCount, useApp } from "@/components/app-provider"
 import { MediaCanvas } from "@/components/media-canvas"
 import { AdSlot, PrivacyNote } from "@/components/app-bits"
 import { Button } from "@/components/ui/button"
@@ -28,7 +28,7 @@ export function DoneScreen() {
 
   if (!media) return null
 
-  const delivered = pendingOutput?.delivered ?? true
+  const delivered = generatedCount(pendingOutput) === 0
   const meta = exportSettings.metadata
 
   return (

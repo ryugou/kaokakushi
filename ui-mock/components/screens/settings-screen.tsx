@@ -25,10 +25,13 @@ import {
   FREE_MONTHLY_LIMIT,
   PLAN_LABELS,
   PLAN_PRICE_LABELS,
+  HISTORY_LIMIT_MB,
+  PLAN_STATUS_LABELS,
   RETENTION_LABELS,
   TRIAL_CREDITS,
   useApp,
   type Plan,
+  type PlanStatus,
   type Retention,
 } from "@/components/app-provider"
 import { PrivacyNote, ProBadge, ScreenHeader, SectionTitle } from "@/components/app-bits"
@@ -43,10 +46,13 @@ export function SettingsScreen() {
   const {
     plan,
     setPlan,
+    planStatus,
+    setPlanStatus,
+    effectivePlan,
     remainingFree,
     setRemainingFree,
     trialCredits,
-    setTrialCredits,
+    setTrialConsumed,
     canBatchFull,
     canBatchTrial,
     canUseCustomStamps,
@@ -56,6 +62,9 @@ export function SettingsScreen() {
     requestUpgrade,
     retention,
     setRetention,
+    historyStorageMb,
+    historyLimitMb,
+    setHistoryLimitMb,
     history,
     myStamps,
     stampStorageActiveMb,
@@ -69,8 +78,6 @@ export function SettingsScreen() {
   } = useApp()
 
   const [info, setInfo] = React.useState<InfoTopic | null>(null)
-  // 履歴の使用容量は加工後サムネイルぶんをざっくり見積もる
-  const historyStorageMb = Math.round(history.length * 0.35 * 10) / 10
 
   return (
     <div className="flex min-h-full flex-col">
@@ -190,7 +197,11 @@ export function SettingsScreen() {
               </p>
             ) : null}
             <div className="flex flex-col gap-1.5 border-t pt-3">
-              <InfoRow label="履歴の使用容量" value={formatMb(historyStorageMb)} icon={<Database className="size-3.5" aria-hidden />} />
+              <InfoRow
+                label="履歴の使用容量"
+                value={`${formatMb(historyStorageMb)} / ${formatMb(historyLimitMb)}`}
+                icon={<Database className="size-3.5" aria-hidden />}
+              />
             </div>
           </div>
         </section>
@@ -340,17 +351,54 @@ export function SettingsScreen() {
               label="一括処理クレジット"
               value={trialCredits}
               max={TRIAL_CREDITS}
-              onChange={setTrialCredits}
+              onChange={(n) => setTrialConsumed(TRIAL_CREDITS - n)}
             />
+
+            <div className="flex flex-col gap-1.5">
+              <p className="text-[11px] font-bold">契約の状態</p>
+              <div className="grid grid-cols-4 gap-2">
+                {(["active", "grace", "pending", "expired"] as PlanStatus[]).map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => setPlanStatus(s)}
+                    className={
+                      planStatus === s
+                        ? "h-10 rounded-xl bg-primary text-[10px] font-bold text-primary-foreground"
+                        : "h-10 rounded-xl bg-card text-[10px] font-bold text-foreground ring-1 ring-foreground/10"
+                    }
+                  >
+                    {PLAN_STATUS_LABELS[s]}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                支払い確認中と期限切れでは有料機能を付与しません。いまの実効プランは
+                {PLAN_LABELS[effectivePlan]}です。
+              </p>
+            </div>
 
             <label className="flex items-center justify-between gap-3">
               <span className="min-w-0">
                 <span className="block text-[11px] font-bold">空き容量を不足させる</span>
                 <span className="block text-[11px] text-muted-foreground">
-                  一括処理の開始前チェックを確認できます
+                  一括処理の開始前チェックと、保存の部分成功を確認できます
                 </span>
               </span>
               <Switch checked={lowStorage} onCheckedChange={setLowStorage} />
+            </label>
+
+            <label className="flex items-center justify-between gap-3">
+              <span className="min-w-0">
+                <span className="block text-[11px] font-bold">履歴の容量上限を 1MB にする</span>
+                <span className="block text-[11px] text-muted-foreground">
+                  容量超過で古い履歴が削除される挙動を確認できます
+                </span>
+              </span>
+              <Switch
+                checked={historyLimitMb < HISTORY_LIMIT_MB}
+                onCheckedChange={(v) => setHistoryLimitMb(v ? 1 : HISTORY_LIMIT_MB)}
+              />
             </label>
 
             <Button
