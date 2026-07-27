@@ -212,6 +212,9 @@ type AppContextValue = {
   /** 変更せず再書き出しするモード（降格後の既存作品） */
   reexportOf: SingleHistoryItem | null
   startReexport: (item: SingleHistoryItem) => void
+  startLockedView: (item: SingleHistoryItem) => void
+  /** 閲覧はできるが変更にはStandardが必要な状態 */
+  lockedEdit: boolean
 
   upgrade: UpgradeState
   requestUpgrade: (reason: UpgradeReason, detail?: string) => void
@@ -369,6 +372,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const hasAds = plan === "free"
   const batchMaxSelectable = canBatchFull ? BATCH_MAX_ITEMS : Math.max(1, Math.min(trialCredits, TRIAL_CREDITS))
   const canExportSingle = plan !== "free" || remainingFree > 0
+  // 有料スタンプで作った既存作品は、Freeでも閲覧と再書き出しはできるが変更はできない
+  const lockedEdit = plan === "free" && reexportOf?.paidFeature !== undefined
   const freeSpaceMb = lowStorage ? DEVICE_FREE_MB.low : DEVICE_FREE_MB.normal
 
   const allStamps = React.useMemo(() => [...myStamps, ...retiredStamps], [myStamps, retiredStamps])
@@ -417,15 +422,27 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setStack((prev) => [...prev, "detect"])
   }, [])
 
-  const startReexport = React.useCallback((item: SingleHistoryItem) => {
+  const openProject = React.useCallback((item: SingleHistoryItem, target: Screen) => {
     const source = findMedia(item.mediaId)
     setMediaId(item.mediaId)
     setManualFaces([])
     setHidden(source.faces.map((f) => f.id))
     setEffect(item.effect)
     setReexportOf(item)
-    setStack((prev) => [...prev, "export"])
+    setStack((prev) => [...prev, target])
   }, [])
+
+  /** 変更せずそのまま書き出す */
+  const startReexport = React.useCallback(
+    (item: SingleHistoryItem) => openProject(item, "export"),
+    [openProject],
+  )
+
+  /** 内容の確認だけを許す。変更しようとした時点でStandardを案内する */
+  const startLockedView = React.useCallback(
+    (item: SingleHistoryItem) => openProject(item, "effect"),
+    [openProject],
+  )
 
   const toggleFace = React.useCallback((id: string) => {
     setHidden((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
@@ -548,9 +565,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const closeDiscard = React.useCallback(() => setDiscardPromptOpen(false), [])
   const closeRecovery = React.useCallback(() => setRecoveryOpen(false), [])
 
+  /**
+   * 異常終了後の起動を再現する。
+   * 受け渡し済みの出力は一時ファイルを消すだけで、復旧案内は出さない。
+   * すでに保存できているのに「保存していない」と伝えるのは事実と異なるため。
+   */
   const simulateCrash = React.useCallback(() => {
     setStack(["home"])
-    setRecoveryOpen(true)
+    setPendingOutput((current) => {
+      if (current && current.delivered) return null
+      if (current) setRecoveryOpen(true)
+      return current
+    })
   }, [])
 
   /**
@@ -945,6 +971,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     completeSingleExport,
     reexportOf,
     startReexport,
+    startLockedView,
+    lockedEdit,
     upgrade,
     requestUpgrade,
     closeUpgrade,

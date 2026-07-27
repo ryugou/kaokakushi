@@ -32,7 +32,17 @@ export function EffectScreen() {
     canUseCustomStamps,
     requestUpgrade,
     myStamps,
+    lockedEdit,
   } = useApp()
+
+  // 降格後の既存作品は、内容を見ることはできるが変更しようとした時点で案内する
+  const changeEffect: typeof setEffect = (updater) => {
+    if (lockedEdit) {
+      requestUpgrade("edit-locked")
+      return
+    }
+    setEffect(updater)
+  }
 
   if (!media) return null
 
@@ -58,6 +68,12 @@ export function EffectScreen() {
           className="aspect-square"
         />
 
+        {lockedEdit ? (
+          <p className="rounded-2xl bg-secondary px-3 py-2.5 text-[11px] leading-relaxed text-secondary-foreground text-pretty">
+            このプロジェクトはそのまま書き出せます。編集するにはStandardが必要です。
+          </p>
+        ) : null}
+
         <div className="-mx-4 flex gap-2 overflow-x-auto px-4 py-1">
           {METHODS.map(({ type, icon: Icon }) => {
             const active = effect.type === type
@@ -65,7 +81,7 @@ export function EffectScreen() {
               <button
                 key={type}
                 type="button"
-                onClick={() => setEffect((prev) => ({ ...prev, type }))}
+                onClick={() => changeEffect((prev) => ({ ...prev, type }))}
                 className={cn(
                   "flex h-20 w-20 shrink-0 flex-col items-center justify-center gap-1.5 rounded-2xl text-xs font-bold transition-colors",
                   active
@@ -92,7 +108,7 @@ export function EffectScreen() {
               max={100}
               step={1}
               onValueChange={(v) =>
-                setEffect((prev) => ({ ...prev, strength: Array.isArray(v) ? v[0] : v }))
+                changeEffect((prev) => ({ ...prev, strength: Array.isArray(v) ? v[0] : v }))
               }
               className="py-2"
             />
@@ -120,7 +136,7 @@ export function EffectScreen() {
                   <button
                     key={stamp.id}
                     type="button"
-                    onClick={() => setEffect((prev) => ({ ...prev, stampId: stamp.id }))}
+                    onClick={() => changeEffect((prev) => ({ ...prev, stampId: stamp.id }))}
                     className={cn(
                       "flex flex-col items-center gap-1 rounded-2xl p-2 transition-colors",
                       active ? "bg-accent" : "hover:bg-muted",
@@ -151,7 +167,7 @@ export function EffectScreen() {
                     onClick={() =>
                       locked
                         ? requestUpgrade("premium-stamp", `「${stamp.name}」は追加スタンプです。`)
-                        : setEffect((prev) => ({ ...prev, stampId: stamp.id }))
+                        : changeEffect((prev) => ({ ...prev, stampId: stamp.id }))
                     }
                     className={cn(
                       "relative flex flex-col items-center gap-1 rounded-2xl p-2 transition-colors",
@@ -191,7 +207,7 @@ export function EffectScreen() {
                         onClick={() =>
                           locked
                             ? requestUpgrade("custom-stamp", `「${stamp.name}」はマイスタンプです。`)
-                            : setEffect((prev) => ({ ...prev, stampId: stamp.id }))
+                            : changeEffect((prev) => ({ ...prev, stampId: stamp.id }))
                         }
                         className={cn(
                           "relative flex flex-col items-center gap-1 rounded-2xl p-2 transition-colors",

@@ -129,9 +129,11 @@ export function DiscardDialog() {
 export function RecoveryDialog() {
   const { recoveryOpen, closeRecovery, pendingOutput, savePending, sharePending, askDiscard } = useApp()
   const count = pendingOutput?.kind === "batch" ? pendingOutput.count : 1
+  // 受け渡し済みの出力では復旧案内を出さない
+  const needsRecovery = pendingOutput !== null && !pendingOutput.delivered
 
   return (
-    <Dialog open={recoveryOpen && pendingOutput !== null} onOpenChange={(open) => (!open ? closeRecovery() : undefined)}>
+    <Dialog open={recoveryOpen && needsRecovery} onOpenChange={(open) => (!open ? closeRecovery() : undefined)}>
       <DialogContent className="max-w-[330px] rounded-3xl">
         <DialogHeader>
           <span className="flex size-11 items-center justify-center rounded-2xl bg-primary/12 text-primary">

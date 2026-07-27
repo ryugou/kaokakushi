@@ -79,7 +79,7 @@ function SingleRow({
   priority?: boolean
   onResume: () => void
 }) {
-  const { removeHistory, startReexport, guardNewWork, startEditing, plan, requestUpgrade } = useApp()
+  const { removeHistory, startReexport, startLockedView, guardNewWork, startEditing, plan } = useApp()
   const media = findMedia(item.mediaId)
   // 有料スタンプで作った作品は、Freeでも「変更せず再書き出し」だけできる
   const editLocked = plan === "free" && item.paidFeature !== undefined
@@ -121,13 +121,14 @@ function SingleRow({
             {editLocked ? "再書き出し" : "もう一度"}
           </Button>
           {editLocked ? (
+            // 閲覧はできる。変更しようとした時点でStandardを案内する
             <Button
               size="sm"
               variant="ghost"
               className="h-7 rounded-xl px-2 text-[10px] text-muted-foreground"
-              onClick={() => requestUpgrade("edit-locked")}
+              onClick={() => guardNewWork("内容を見る", () => startLockedView(item))}
             >
-              編集する
+              内容を見る
             </Button>
           ) : (
             <Button
