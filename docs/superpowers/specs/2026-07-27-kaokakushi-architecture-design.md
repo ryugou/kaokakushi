@@ -3,7 +3,7 @@
 | 項目 | 内容 |
 | --- | --- |
 | 文書名 | かおかくし 技術スタックおよびアーキテクチャ設計 |
-| バージョン | 1.21 |
+| バージョン | 1.22 |
 | 作成日 | 2026-07-27 |
 | 対象 | 写真・動画向け顔匿名化アプリ（iOS / Android） |
 | 上位文書 | 写真・動画向け顔匿名化アプリ 仕様書 v0.1 |
@@ -253,7 +253,8 @@ fun expand(face: NormalizedRect, effect: EffectSetting): NormalizedRect
 | `ImageEncoder` | JPEG / PNG エンコード、メタデータ除去 | Image I/O | Bitmap.compress + ExifInterface |
 | `MediaSaver` | 写真ライブラリ保存、登録日時の指定 | PhotoKit | MediaStore |
 | `SharePresenter` | OS 共有シートの提示と結果の返却 | UIActivityViewController | `Intent.ACTION_SEND` |
-| `SecureStore` | 匿名 ID、権限キャッシュ、HMAC 鍵 | Keychain | Keystore |
+| `CryptoKeyStore` | HMAC 鍵の生成と保持 | Keychain | Android Keystore |
+| `ProtectedBlobStore` | 署名済み状態の原子的な読み書き | Keychain または保護ファイル | Proto DataStore または原子的置換ファイル |
 | `AdPresenter` | バナー・全画面広告 | GADBannerView | AdView |
 | `PrivacyShield` | 画面スナップショット対策（7.7） | `sceneWillResignActive` | `onPause` |
 
@@ -343,7 +344,9 @@ iOS の `confidence` はこのモデルに含めません。Android に対応す
 - **書き出し前に加工後プレビューを必ず表示します**（仕様 10.4）
 - **「自動検出に失敗したので何も隠さずに保存」という経路を持ちません**
 
-#### 6.1.1 顔が 1 つも検出されない場合
+#### 6.1.1 単体処理で顔が 1 つも検出されない場合
+
+**この節は単体処理に限ります。** 一括処理の顔 0 件は `NoFaceDetected`（6.5.2）と、トライアルを含む勘定の規則（7.4.3）に従います。文言をここで共通化すると、月間枠を使わない一括トライアルの写真に「今月の無料枠を 1 枚使用します」と誤表示します。
 
 利用不可にはしません。以下から選べるようにします。
 
@@ -375,6 +378,8 @@ data class UsageLedger(
     val grants: Map<String, GrantEntry>,         // sourceHash → 権利
     val trialEntries: Map<String, TrialEntry>,   // sourceHash → トライアル消費
     val lastObservedAt: Instant,                 // 後退させない基準時刻（6.2.2.5）
+    val monthlyBlockedPeriod: YearMonth?,        // 破損修復により当月を封じた場合の年月
+    val trialIntegrityLocked: Boolean,           // 破損修復によりトライアルを封じたか
 )
 
 data class GrantEntry(
@@ -393,7 +398,7 @@ val UsageLedger.consumed: Int get() = consumedExportIds.size
 
 `grants` を `Map<sourceHash, GrantEntry>` にしたのも同じ理由です。同一 `sourceHash` への追記が上書きにならず、`firstSuccessAt` を維持できます（6.2.0）。
 
-3 つを別々の SecureStore 値として更新すると、片方だけ書けた状態が生じます。1 つの署名済みオブジェクトなら、置き換えは全部か無かです。
+3 つを別々の ProtectedBlobStore 値として更新すると、片方だけ書けた状態が生じます。1 つの署名済みオブジェクトなら、置き換えは全部か無かです。
 
 ##### 判定
 
@@ -690,17 +695,31 @@ sealed interface UsageLedgerLoadResult {
 
 **空の `UsageLedger` を作り直しません。** 台帳は消費件数だけでなく、どの `sourceHash` が grant を持ちトライアルを消費したかを保持しています。空にすると**無料枠もトライアルも全回復**し、改ざんの動機になります。
 
-`IntegrityFailure` のときの規則は以下とします。
+**`IntegrityFailure` を一時的な読み取り結果のままにしません。保守的に修復した永続状態へ変換します。**
 
-| 対象 | 扱い |
+読み取り失敗のたびに判断すると、正しい `lastObservedAt` を失っているため `effectiveNow` を算出できず、「当月だけ `Blocked`」を翌月に解除する手立てもなく、Standard / Pro が成功しても grant を書き込む先がありません。
+
+検出した時点で、次の内容の**新しい署名済み台帳**を作ります。
+
+| フィールド | 値 |
 | --- | --- |
-| Free の月間書き出し | 当月は `Blocked` |
-| 一括処理トライアル | 利用不可 |
-| Standard / Pro の通常書き出し | **許可**（月間枠に依存しないため） |
-| grant | 利用不可。`FreeReexport` は成立しない |
-| `lastObservedAt` | 現在の `effectiveNow` から再構築する |
+| `lastObservedAt` | **署名失敗を検出した時点の端末時刻**。正しいアンカーを失っているため、ここを新しい基準時刻とする |
+| `monthlyBlockedPeriod` | 現在月 |
+| `trialIntegrityLocked` | `true` |
+| `grants` | 空 |
+| `consumedExportIds` | 空 |
+| `trialEntries` | 空 |
+| `period` | 現在月 |
 
-**改ざんされた値を根拠に枠やクレジットを付与しません。** 有料利用者は台帳に依存しないので影響を受けません。
+結果として次のようになります。
+
+- **現在月の Free 単体書き出しは不可。翌月になれば月間枠は再開する**（`monthlyBlockedPeriod != period` になるため）
+- **一括処理トライアルは再インストールまで不可**（`trialIntegrityLocked` は解除しない）
+- Standard / Pro の通常書き出しは許可。月間枠に依存しない
+- 成功した書き出しの grant は、この修復済み台帳へ通常どおり追加できる
+- `FreeReexport` は grant が空なので当面成立しない
+
+**改ざんされた値を根拠に枠やクレジットを付与しません。** 空の台帳をそのまま作ると無料枠もトライアルも全回復するため、封じるフラグを同時に立てます。
 
 再インストールで枠が戻ることは仕様 14.5 が明示的に許容しているため、追跡しません。
 
@@ -722,7 +741,7 @@ data class Entitlement(
 要件は 3 点です。
 
 - **`pending`（支払い保留）では有料機能を付与しません**（仕様 5.4）。個々の権限フラグ（追加スタンプ、カスタムスタンプ、一括処理、広告非表示）はすべて `Entitlement` から導出し、`plan` から直接導出しません
-- **オフライン耐性**（仕様 25.3 / 27.3）。最後に検証成功した `Entitlement` を `lastVerifiedAt` とともに SecureStore へ保存します。ネットワーク不通時はこのキャッシュで有料機能を維持し、復元失敗を理由に Free へ強制降格させません。失効が明示的に確認された場合のみ剥奪します
+- **オフライン耐性**（仕様 25.3 / 27.3）。最後に検証成功した `Entitlement` を `lastVerifiedAt` とともに ProtectedBlobStore へ保存します。ネットワーク不通時はこのキャッシュで有料機能を維持し、復元失敗を理由に Free へ強制降格させません。失効が明示的に確認された場合のみ剥奪します
 - **バックエンド障害で編集を止めません**（仕様 21.6）。リモート設定が取得できない場合はアプリ内の安全な既定値を使用します
 
 Pro は月単位で契約と解約を繰り返す利用者が一定数いると想定します。継続率の中心は Standard です。この前提から、**解約や降格によってカスタムスタンプと一括設定プリセットを失わせません**（仕様 12.6 をプリセットへ拡張）。再契約時にそのまま再利用できます。
@@ -1058,7 +1077,7 @@ val remainingCredits = maxOf(0, configuredCreditCount - usageLedger.trialEntries
 
 付与数（`configuredCreditCount`）はリモート設定で変更できます（11.1）。導出にしておけば、5 枚から増減しても挙動が自動的に決まります。残数を保存していると、既存利用者の残数を移行する処理が必要になります。
 
-台帳は `sourceHash` の集合として SecureStore へ保持します（6.2.5 の HMAC 署名つき）。新しく追加した写真だけが消費対象になります。
+台帳は `Map<sourceHash, TrialEntry>` として `UsageLedger` 内に保持します（6.2）。新しく追加した写真だけが消費対象になります。
 
 この規則により、5 クレジットは「最大 5 回の書き出し」ではなく **「最大 5 枚を試す権利」** として機能します。
 
@@ -1270,7 +1289,9 @@ Pro を必要とするのは、バッチという単位に対する操作だけ�
 | `Batch` | 新規。バッチ単位の履歴（7.2.6） |
 | `BatchPreset` | 新規。一括設定プリセット（6.5.8） |
 
-以下は DB ではなく SecureStore へ保存します。改ざんで権限や枠を書き換えられないようにするためです（6.2.5 の HMAC 署名つき）。
+以下は DB ではなく **`ProtectedBlobStore`** へ保存します。改ざんで権限や枠を書き換えられないようにするためです（6.2.5 の HMAC 署名つき）。
+
+**鍵の保管とデータの保管を分けます。** Android Keystore が保持できるのは暗号鍵であり、任意のデータを置くストレージではありません。鍵は `CryptoKeyStore`（Android Keystore / Keychain）、署名済みデータ本体は `ProtectedBlobStore`（Proto DataStore などトランザクション型の更新手段を持つもの / Keychain または保護ファイル）とします。
 
 - `SubscriptionState`（6.3 の `Entitlement` キャッシュ）
 - `UsageLedger`（6.2）。通常クォータ・grant・トライアル台帳・基準時刻を1つの署名済みオブジェクトとして原子的に置き換える。残クレジットは保存せず台帳から導出する
@@ -1311,8 +1332,8 @@ Pro を必要とするのは、バッチという単位に対する操作だけ�
 例外は 4 つです。
 
 - **未受け渡しの出力ファイル**（6.2.2）。利用者がまだ受け取っていない成果物であり、履歴とは性質が異なります。保存・共有・破棄のいずれかで解消します
-- **`UsageLedger` の `sourceHash` と初回成功時刻**（6.2）。無料枠の判定に必要な最小限であり、SecureStore 側に保持します。画像の内容を復元できる情報を含みません
-- **一括処理トライアルの消費済み素材識別値**（6.5.6.1）。5 枚分のトライアル対象を判定するために、`sourceHash` を SecureStore へ **期限なく** 保持します。こちらも画像の内容を復元できる情報を含みません
+- **`UsageLedger` の `sourceHash` と初回成功時刻**（6.2）。無料枠の判定に必要な最小限であり、ProtectedBlobStore 側に保持します。画像の内容を復元できる情報を含みません
+- **一括処理トライアルの消費済み素材識別値**（6.5.6.1）。5 枚分のトライアル対象を判定するために、`sourceHash` を ProtectedBlobStore へ **期限なく** 保持します。こちらも画像の内容を復元できる情報を含みません
 - **未完了の `ExportCommit` と、それが参照する検証済み出力ファイル**（7.4.3）。書き出しの整合性を回復するための運用データであり、コミット完了またはロールバック後に削除します
 
 3 つ目は保持期間が無期限である点が他と異なります。設定画面での個別説明までは要しませんが、**プライバシーポリシーの記載と整合させる必要があります**（16 節の未決事項）。
@@ -1426,8 +1447,8 @@ enum class ShareResult { Completed, Canceled, Unknown, Failed }
 | --- | --- |
 | 完成済みファイルの公開 | ファイルシステム |
 | `OutputRecord` = `Generated` | Room |
-| Free 枠の消費、`ExportGrant` の作成 | SecureStore |
-| 一括トライアル台帳への `sourceHash` 追加 | SecureStore |
+| Free 枠の消費、`ExportGrant` の作成 | ProtectedBlobStore |
+| 一括トライアル台帳への `sourceHash` 追加 | ProtectedBlobStore |
 
 **単一トランザクションで更新できません。** 異常終了の位置によって次が起こります。
 
@@ -1504,15 +1525,19 @@ sealed interface ExportAccountingMode {
 
 | 勘定 | 月間枠 | トライアル台帳 | grant |
 | --- | --- | --- | --- |
-| `PaidUnlimited` | 使わない | 使わない | 作る |
-| `FreeMonthlyConsume` | **1 消費** | 使わない | 作る |
-| `FreeMonthlyReexport` | 使わない | 使わない | 既存を維持 |
-| `BatchTrial(true)` | **使わない** | **1 消費** | 作る |
-| `BatchTrial(false)` | 使わない | 使わない | 既存を維持 |
+| `PaidUnlimited` | 使わない | 使わない | ensure |
+| `FreeMonthlyConsume` | **1 消費** | 使わない | ensure |
+| `FreeMonthlyReexport` | 使わない | 使わない | ensure |
+| `BatchTrial(true)` | **使わない** | **1 消費** | ensure |
+| `BatchTrial(false)` | 使わない | 使わない | ensure |
 
 **月間クォータを使うのは Free の単体処理だけです。** Free / Standard の一括トライアルは月間枠を参照しません。したがって **Free 利用者が月 5 枚を使い切っていても、クレジットが残っていれば一括トライアルを実行できます。**
 
-すべての正常生成で grant を作る点は共通です（6.2.0）。
+**grant の規則はすべての勘定で同じ「ensure」です。**
+
+> 正常生成時に有効な grant が存在すれば、既存の `firstSuccessAt` を維持する。存在しなければ、`accountingAt` を `firstSuccessAt` とする新しい grant を作る。
+
+`BatchTrial(false)` が意味するのは「その写真のトライアルクレジットを**過去に**消費済み」であって、「いま有効な 24 時間 grant が存在する」ではありません。1 週間前にトライアルした写真を再処理する場合、クレジットは消費しませんが、**新しい正常生成として grant は作る必要があります**。両者を混同すると、再処理直後の再書き出しが有料になります。
 
 開始後に次が起きても、その書き出しは開始時の権限で完了させます。
 
@@ -1543,7 +1568,7 @@ sealed interface ExportAccountingMode {
 | `FileVerified` | 前 3 つが必須。検証完了時点の `effectiveNow` と最新の `UsageLedger` から確定する |
 | `AccountingCommitted` 以降 | `applied` も必須 |
 
-`quotaDecision` は `authorization` に固定されているため、ここで再評価するのは**計上先の年月と grant の時刻だけ**です。
+`accountingMode` は `authorization` に固定されているため、ここで再評価するのは**計上先の年月と grant の時刻だけ**です。
 
 復旧が翌月になった場合、**過去月の `consumeExportId` を現在月へ加算しません。** `accountingPeriod` が現在の `period` と異なる消費は、月次リセットで既に流れたものとして扱います。grant とトライアル台帳は月に紐づかないため、本来の規則どおり適用します。
 
@@ -1586,9 +1611,34 @@ interface UsageLedgerStore {
 
 - 並列処理は異なる `sourceHash` の間だけ許可する
 - 同一 `sourceHash` は直列化する。バッチ内に重複があっても同様
-- `Prepared` から `Completed` または破棄まで、その `sourceHash` をロックする
+- **コミット行の削除またはロールバック完了まで**、その `sourceHash` をロックする
+
+ロックを `Completed` で解放してはいけません。`Completed` の保存後、コミット行の削除前にも復旧対象となる区間が残っています（7.4.3 の手順 6〜8）。ここで解放すると、同じ `sourceHash` の次の処理とロールバックが競合します。
 
 この制約を設けない場合、grant とトライアル台帳が複数の成功 `exportId` を保持する必要があり、モデルが複雑になります。v1 では直列化を選びます。
+
+##### 開始ゲート
+
+**「同時 1 件」という規則だけでは競合を防げません。** 認可を通ってから `Prepared` を書くまでの間に、別の書き出しが同じ認可を通過できます。認可の**前**にゲートを取ります。
+
+```kotlin
+interface ExportStartGate {
+    suspend fun <R> withPermit(
+        sourceHash: String,
+        requiresFreeMonthlySlot: Boolean,
+        block: suspend () -> R,
+    ): R
+}
+```
+
+開始の順序は次のとおりです。
+
+1. 復旧完了ゲートを確認する（7.4.3 の起動順序）
+2. `sourceHash` 単位のゲートを取得する
+3. Free の月間枠を消費するなら、月間消費ゲートも取得する
+4. `UsageLedgerStore.transact` で認可する
+5. `ExportCommit(Prepared)` を保存する
+6. 処理を開始する
 
 `OutputRecord` にも `exportId` を持たせ、どのコミットに対応するかを一意にします。
 
@@ -1608,15 +1658,15 @@ data class OutputRecord(
 
 ##### 手順と書き込み順
 
-保存先が Room と SecureStore にまたがるため、**書き込み順を固定します。**
+保存先が Room と ProtectedBlobStore にまたがるため、**書き込み順を固定します。**
 
 | 順 | 操作 | 保存先 |
 | --- | --- | --- |
-| −1 | `transact` 内で時刻正規化・月次更新・期限切れ grant の整理を**永続化**し、その結果として `ExportAuthorization` を得る。`Blocked` なら以降へ進まない | SecureStore |
+| −1 | `transact` 内で時刻正規化・月次更新・期限切れ grant の整理を**永続化**し、その結果として `ExportAuthorization` を得る。`Blocked` なら以降へ進まない | ProtectedBlobStore |
 | 0 | `ExportCommit(Prepared)` を保存（`intent` は `null`） | Room |
 | 1 | 一時ファイルを生成し、整合性とデコードを検証 | ファイルシステム |
 | 2 | `intent` を確定し `ExportCommit(FileVerified)` を保存 | Room |
-| 3 | `UsageLedger` を冪等に置き換える（要素へ `ownerExportId` を付与） | SecureStore |
+| 3 | `UsageLedger` を冪等に置き換える（要素へ `ownerExportId` を付与） | ProtectedBlobStore |
 | 4 | `applied` を埋めて `ExportCommit(AccountingCommitted)` を保存 | Room |
 | 5 | `OutputRecord(Generated)` を `exportId` を主キーに upsert | Room |
 | 6 | `ExportCommit(Completed)` を保存 | Room |
@@ -1631,9 +1681,29 @@ data class OutputRecord(
 
 冪等性の鍵は 2 種類です。**クォータ消費は `exportId`、トライアル消費は `sourceHash`。** 前者は同じ書き出しの再実行、後者は同じ写真の再書き出しを弾くもので、目的が異なります。台帳が集合を保持しているため（6.2）、再適用は自然に無害です。
 
+##### 署名の対象と再署名
+
+**`ExportCommit` は状態遷移のたびに内容が変わります。** 初回挿入時の署名を残したまま状態だけ更新すると、正規の更新なのに次回起動で検証失敗になります。共通の形式と規則を定めます。
+
+```kotlin
+data class SignedPayload(
+    val schemaVersion: Int,
+    val canonicalBytes: ByteArray,
+    val signature: ByteArray,
+)
+```
+
+- HMAC の対象は **`signature` 自身を除く全永続フィールド**
+- シリアライズ順序を固定する（正準形）
+- **スキーマバージョンを署名対象へ含める**
+- `ExportCommit` の insert / update の**たびに再署名する**
+- `UsageLedgerStore.transact` の保存時にも必ず再署名する
+- 検証はバイト列の**定数時間比較**で行う
+- マイグレーション時は旧形式で検証してから新形式で再署名する
+
 ##### コミット行の改ざん対策
 
-`ExportCommit` は Room にありますが、その内容が SecureStore の台帳更新を駆動します。**Room を書き換えれば台帳を任意に操作できてしまう**ため、コミット行にも Keychain / Keystore の鍵で HMAC を付けます（6.2.5 と同じ方式）。
+`ExportCommit` は Room にありますが、その内容が ProtectedBlobStore の台帳更新を駆動します。**Room を書き換えれば台帳を任意に操作できてしまう**ため、コミット行にも Keychain / Keystore の鍵で HMAC を付けます（6.2.5 と同じ方式）。
 
 **署名検証に失敗した行を自動破棄しません。** 破棄すると、すでに反映済みの `UsageLedger` だけが残る可能性があります。会計済みかどうかを判断できない以上、**復旧エラーとして扱い**、新規書き出しをブロックしたうえで利用者へ提示します。ファイルも自動削除しません。
 
@@ -1965,9 +2035,13 @@ Rust + Axum。`/v1/config` は静的 JSON と ETag による配信とします�
 - 同一 `sourceHash` の非終端コミットが同時に1件までに制限されること（7.4.3）
 - `Completed` のコミット行が、`OutputRecord` と出力ファイルの確認後に削除されること（7.4.3）
 - `OutputRecord` が `ExportCommit` 削除後も単独で期限判定できること（7.4.3）
-- `UsageLedger` の署名検証失敗時、Free と トライアルが不可になり Standard/Pro は許可されること（6.2.5）
+- `UsageLedger` の署名検証失敗時、修復済み台帳が作られ、翌月に月間枠が再開しトライアルは封じられたままであること（6.2.5）
+- `ExportCommit` が状態遷移のたびに再署名され、正規の更新で検証失敗しないこと（7.4.3）
+- `BatchTrial(false)` でも grant が ensure されること（7.4.3）
+- 開始ゲートにより、認可から `Prepared` までの間に同一 `sourceHash` の別書き出しが割り込めないこと（7.4.3）
+- `sourceHash` のロックがコミット行削除まで保持されること（7.4.3）
 - Pro 失効時、`Prepared` 以降の写真は完了し `waiting` の写真は開始しないこと（7.4.3）
-- 並列書き出し時も `UsageLedgerStore.update` が直列化され、更新が失われないこと（7.4.3）
+- 並列書き出し時も `UsageLedgerStore.transact` が直列化され、更新が失われないこと（7.4.3）
 - `evaluate` が更新後の `UsageLedger` を返し、Unlimited でも時刻更新と grant 整理が行われること（6.2）
 - `domain` の時間判定が `now` ではなく `effectiveNow` だけを受け取ること（6.2.2.5）
 - クォータ消費が `exportId`、トライアル消費が `sourceHash` で冪等であること（7.4.3）
@@ -2234,8 +2308,8 @@ Web モックである以上、以下は本書の記述どおりには再現で�
 本設計の承認後、`superpowers:writing-plans` により実装計画を作成します。サブプロジェクトへの分解単位は以下を想定します。
 
 1. プロジェクト基盤（KMP + CMP の骨格、CI、lint、テスト実行基盤）
-2. ドメイン層（`QuotaPolicy`、`EntitlementResolver`、`BatchTriagePolicy`、`RenderPlan` 生成、トラック関連付け、キーフレーム補間、`ExportQueue`）
-3. メディア境界（11 契約の両 OS 実装と契約テスト）。`SharePresenter` は OS ごとの結果写像を先に定義してから実装する（7.4.2）
+2. ドメイン層（`QuotaPolicy`、`EntitlementResolver`、`BatchTriagePolicy`、`RenderPlan` 生成、キーフレーム補間、`ExportQueue`）
+3. メディア境界（12 契約の両 OS 実装と契約テスト）。`SharePresenter` は OS ごとの結果写像を先に定義してから実装する（7.4.2）
 4. 編集フロー UI（detect / effect / export / processing / done）
 5. 課金と権限（RevenueCat、Paywall、復元）
 6. 広告
