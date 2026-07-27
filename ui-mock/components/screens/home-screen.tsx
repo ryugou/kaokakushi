@@ -46,7 +46,7 @@ export function HomeScreen() {
           <span className="grid size-9 place-items-center rounded-2xl bg-primary text-primary-foreground">
             <Sparkles className="size-5" aria-hidden />
           </span>
-          <p className="font-rounded text-lg font-extrabold tracking-tight">かおかくし</p>
+          <p className="font-rounded text-lg font-extrabold tracking-tight">顔かくし</p>
         </div>
         <Button variant="ghost" size="icon-lg" className="size-10 rounded-full" onClick={() => go("settings")}>
           <Settings className="size-5" />

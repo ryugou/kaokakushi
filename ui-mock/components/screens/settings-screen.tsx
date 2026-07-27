@@ -420,7 +420,7 @@ export function SettingsScreen() {
         </section>
 
         <PrivacyNote />
-        <p className="pb-2 text-center text-[11px] text-muted-foreground">かおかくし ver 1.0.0</p>
+        <p className="pb-2 text-center text-[11px] text-muted-foreground">顔かくし ver 1.0.0</p>
       </div>
 
       <InfoDialog topic={info} onClose={() => setInfo(null)} />
