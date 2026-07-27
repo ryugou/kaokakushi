@@ -1,0 +1,38 @@
+# OS
+.DS_Store
+
+# Gradle / Kotlin Multiplatform
+build/
+.gradle/
+.kotlin/
+local.properties
+captures/
+
+# IntelliJ / Android Studio
+*.iml
+.idea/*
+!.idea/codeStyles/
+!.idea/inspectionProfiles/
+
+# Xcode
+xcuserdata/
+DerivedData/
+*.xcuserstate
+*.xcscmblueprint
+iosApp/Pods/
+iosApp/*.xcworkspace/xcuserdata/
+
+# Rust
+server/target/
+
+# Node（ui-mock は自前の .gitignore も持つ）
+node_modules/
+
+# 秘匿情報
+*.keystore
+*.jks
+google-services.json
+GoogleService-Info.plist
+.env
+.env.*
+!.env.example

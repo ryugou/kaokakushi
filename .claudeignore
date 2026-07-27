@@ -1,0 +1,27 @@
+# ビルド成果物・依存物。読み取り対象から除外する
+build/
+.gradle/
+.kotlin/
+DerivedData/
+xcuserdata/
+iosApp/Pods/
+server/target/
+node_modules/
+
+# ロックファイル
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+Cargo.lock
+Podfile.lock
+
+# バイナリ素材
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.heic
+*.mp4
+*.mov
+*.keystore
+*.jks
