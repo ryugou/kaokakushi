@@ -3,7 +3,7 @@
 | 項目 | 内容 |
 | --- | --- |
 | 文書名 | かおかくし 技術スタックおよびアーキテクチャ設計 |
-| バージョン | 1.20 |
+| バージョン | 1.21 |
 | 作成日 | 2026-07-27 |
 | 対象 | 写真・動画向け顔匿名化アプリ（iOS / Android） |
 | 上位文書 | 写真・動画向け顔匿名化アプリ 仕様書 v0.1 |
@@ -268,7 +268,22 @@ fun expand(face: NormalizedRect, effect: EffectSetting): NormalizedRect
 | `PreviewRenderer` | エフェクト適用済みテクスチャ出力 | MTKView | GLSurfaceView |
 | `VideoExporter` | 書き出し | AVAssetWriter | Media3 Transformer |
 
-`domain` 側の顔トラック関連付け、キーフレーム補間、平滑化、シーン切替判定は **v1 の時点で実装とテストまで完了させます**。いずれも純粋関数であり、動画の実物なしにテストできます。これにより v2 での手戻りを防ぎます。
+##### v1 で先取りする範囲
+
+当初は顔トラック関連付け・平滑化・シーン切替判定まで v1 で実装する方針でしたが、**絞ります。**
+
+| 対象 | v1 | 理由 |
+| --- | --- | --- |
+| 動画用データモデル（`FaceKeyframe` 等） | **実装する** | スキーマを後から足すより安い |
+| 5.5 の 4 契約のインターフェース定義 | **実装する** | 境界を先に切る意味がある |
+| キーフレーム補間 | **実装する** | 仕様 10.3 で挙動が確定している純粋関数 |
+| 顔トラック関連付け | v2 | 実際の検出結果の特性に依存する |
+| 平滑化 | v2 | 同上 |
+| シーン切替判定 | v2 | 同上 |
+
+**検出結果の特性に依存するものを、実物なしに作るのは YAGNI に反します。** 「テストできる」ことと「正しく作れる」ことは別です。閾値やヒューリスティクスは実際の `VideoFrameSource` の出力を見ないと決まらず、先に作れば v2 で作り直す確率が高くなります。
+
+先取りするのは、仕様が確定していて後から足すコストが高いものだけに限ります。
 
 ### 5.6 プレビューと書き出しの一致
 
@@ -376,7 +391,7 @@ val UsageLedger.consumed: Int get() = consumedExportIds.size
 
 **消費を件数ではなく書き出し ID の集合で持ちます。** 単なる `Int` では、7.4.3 が要求する「同じ `exportId` の再適用を弾く」も「特定の書き出しの消費だけ取り消す」も実装できません。集合にすれば、再適用は自然に冪等になり、ロールバックは該当 ID の削除で済みます。
 
-`grants` を `Map<sourceHash, Instant>` にしたのも同じ理由です。同一 `sourceHash` への追記が上書きにならず、`firstSuccessAt` を維持できます（6.2.0）。
+`grants` を `Map<sourceHash, GrantEntry>` にしたのも同じ理由です。同一 `sourceHash` への追記が上書きにならず、`firstSuccessAt` を維持できます（6.2.0）。
 
 3 つを別々の SecureStore 値として更新すると、片方だけ書けた状態が生じます。1 つの署名済みオブジェクトなら、置き換えは全部か無かです。
 
@@ -411,7 +426,7 @@ fun evaluate(
 1. `lastObservedAt` を `effectiveNow` へ前進させる
 2. 期間更新と期限切れ `grant` の整理を適用する（6.2.3）
 3. `plan != Free` なら `Unlimited`
-4. `grants[sourceHash]` があり `effectiveNow - it < 24h` なら `FreeReexport`
+4. `grants[sourceHash]` があり `effectiveNow - it.firstSuccessAt < 24h` なら `FreeReexport`
 5. `consumed >= limit` なら `Blocked`
 6. それ以外は `Consume`
 
@@ -632,7 +647,7 @@ fun observeTime(now: Instant, anchor: TimeAnchor): ObservedTime {
 fun rollPeriod(ledger: UsageLedger, effectiveNow: Instant, zone: TimeZone): UsageLedger {
     val current = effectiveNow.toLocalDateTime(zone).yearMonth
     // 24時間を過ぎた権利だけを落とす。月の境界とは無関係
-    val activeGrants = ledger.grants.filterValues { effectiveNow - it < 24.hours }
+    val activeGrants = ledger.grants.filterValues { effectiveNow - it.firstSuccessAt < 24.hours }
 
     return if (current > ledger.period) {
         ledger.copy(period = current, consumedExportIds = emptySet(), grants = activeGrants)
@@ -660,7 +675,32 @@ fun rollPeriod(ledger: UsageLedger, effectiveNow: Instant, zone: TimeZone): Usag
 
 `UsageLedger` を平文で DB に保存すると、DB を書き換えるだけで無料枠が無制限になります。一方で仕様 14.5 は、不正利用防止のためだけに端末固有識別子や過剰な個人情報を収集することを禁じています。
 
-折衷案として、Keychain / Keystore の鍵で `UsageLedger` に HMAC 署名を付与し、検証失敗時は「消費済み」側へ倒します。サーバー照合も端末識別子の収集も行いません。
+折衷案として、Keychain / Keystore の鍵で `UsageLedger` に HMAC 署名を付与します。サーバー照合も端末識別子の収集も行いません。
+
+##### 検証失敗時の扱い
+
+読み込み結果を明示的な状態として持ちます。
+
+```kotlin
+sealed interface UsageLedgerLoadResult {
+    data class Valid(val ledger: UsageLedger) : UsageLedgerLoadResult
+    data object IntegrityFailure : UsageLedgerLoadResult
+}
+```
+
+**空の `UsageLedger` を作り直しません。** 台帳は消費件数だけでなく、どの `sourceHash` が grant を持ちトライアルを消費したかを保持しています。空にすると**無料枠もトライアルも全回復**し、改ざんの動機になります。
+
+`IntegrityFailure` のときの規則は以下とします。
+
+| 対象 | 扱い |
+| --- | --- |
+| Free の月間書き出し | 当月は `Blocked` |
+| 一括処理トライアル | 利用不可 |
+| Standard / Pro の通常書き出し | **許可**（月間枠に依存しないため） |
+| grant | 利用不可。`FreeReexport` は成立しない |
+| `lastObservedAt` | 現在の `effectiveNow` から再構築する |
+
+**改ざんされた値を根拠に枠やクレジットを付与しません。** 有料利用者は台帳に依存しないので影響を受けません。
 
 再インストールで枠が戻ることは仕様 14.5 が明示的に許容しているため、追跡しません。
 
@@ -1445,24 +1485,49 @@ enum class ExportCommitState { Prepared, FileVerified, AccountingCommitted, Comp
 ```kotlin
 data class ExportAuthorization(
     val entitlementSnapshot: Entitlement,
-    val quotaDecision: AllowedQuotaDecision,
+    val accountingMode: ExportAccountingMode,
     val authorizedAt: Instant,
 )
 
-sealed interface AllowedQuotaDecision {
-    data object Unlimited : AllowedQuotaDecision
-    data object FreeReexport : AllowedQuotaDecision
-    data object Consume : AllowedQuotaDecision
+/** どの勘定を使う書き出しか。Blocked は含めない */
+sealed interface ExportAccountingMode {
+    data object PaidUnlimited : ExportAccountingMode         // Standard / Pro の通常書き出し
+    data object FreeMonthlyConsume : ExportAccountingMode    // Free の単体処理。月間枠を1消費
+    data object FreeMonthlyReexport : ExportAccountingMode   // 24時間以内の再書き出し
+    data class BatchTrial(val consumesTrialCredit: Boolean) : ExportAccountingMode
 }
 ```
 
-書き出し開始時点で利用権限とクォータ可否を確定し、その書き出しについて固定します。`Blocked` なら `ExportCommit` を作らず、生成も開始しません。型に `Blocked` を含めないことで、検証済みファイルを抱えたまま上限超過で破棄する経路を**表現できなくします**。
+書き出し開始時点で利用権限と勘定を確定し、その書き出しについて固定します。`Blocked` なら `ExportCommit` を作らず、生成も開始しません。型に `Blocked` を含めないことで、検証済みファイルを抱えたまま上限超過で破棄する経路を**表現できなくします**。
+
+**勘定を用途で分けます。** 単一の `QuotaDecision` だと、Free 利用者の一括トライアルが月間枠を消費したり、月間枠を使い切っているだけで `Blocked` になったりします。6.5.6 の「トライアルは月間枠とは別勘定」と矛盾します。
+
+| 勘定 | 月間枠 | トライアル台帳 | grant |
+| --- | --- | --- | --- |
+| `PaidUnlimited` | 使わない | 使わない | 作る |
+| `FreeMonthlyConsume` | **1 消費** | 使わない | 作る |
+| `FreeMonthlyReexport` | 使わない | 使わない | 既存を維持 |
+| `BatchTrial(true)` | **使わない** | **1 消費** | 作る |
+| `BatchTrial(false)` | 使わない | 使わない | 既存を維持 |
+
+**月間クォータを使うのは Free の単体処理だけです。** Free / Standard の一括トライアルは月間枠を参照しません。したがって **Free 利用者が月 5 枚を使い切っていても、クレジットが残っていれば一括トライアルを実行できます。**
+
+すべての正常生成で grant を作る点は共通です（6.2.0）。
 
 開始後に次が起きても、その書き出しは開始時の権限で完了させます。
 
 - 有料契約が失効した
 - 月間上限へ達した
 - リモート設定で上限が下がった
+
+**認可の粒度は写真ごとの `exportId` です。** バッチ単位ではありません。この粒度により、6.7 の「契約終了時に未完了バッチを `paused` にする」と両立します。
+
+| Pro 失効時点の状態 | 扱い |
+| --- | --- |
+| `Prepared` 以降へ進んでいる写真 | 開始時の認可で**完了させる** |
+| まだ認可されていない `waiting` の写真 | 開始しない。バッチを `paused` にする |
+
+処理中の 1 枚は最後まで終わり、残りは停止します。
 
 **Free でクォータを消費する書き出しは同時に 1 件までとします。** 並列に走らせると、開始時の判定が両方 `Consume` になり上限を超えます。
 
@@ -1485,14 +1550,45 @@ sealed interface AllowedQuotaDecision {
 ##### 台帳更新は直列化する
 
 ```kotlin
+data class LedgerTransaction<R>(
+    val ledger: UsageLedger,
+    val result: R,
+)
+
 interface UsageLedgerStore {
-    suspend fun update(transform: (UsageLedger) -> UsageLedger): UsageLedger
+    suspend fun <R> transact(transform: (UsageLedger) -> LedgerTransaction<R>): R
 }
 ```
 
 オブジェクトの置換が原子的でも、**並列処理が同じ旧台帳を読んで別々に書き戻せば、一方の更新が失われます。** 読み取り・変更・署名・保存を単一の更新口へ通し、Mutex または単一 actor で排他します。
 
+**更新後の台帳だけを返す API では足りません。** 同じ排他区間の中で次も取り出す必要があります。台帳を外側で読んで結果を計算してから `update` すると、競合が再発します。
+
+- 認可時の `ExportAccountingMode`
+- 会計時の `AccountingApplied`
+- 正規化後の `effectiveNow`
+- 月次更新後の `period`
+
 一括処理の同時並列数は将来 2 へ増やす設計です（6.5.8）。書き出し処理は並列でも、**台帳のコミットは直列**とします。
+
+##### 同一 `sourceHash` は直列化する
+
+**同じ `sourceHash` の非終端 `ExportCommit` は同時に 1 件だけとします。**
+
+この不変条件がないと、6.2 の所有者方式が壊れます。
+
+1. Export A が grant を作り、`ownerExportId` が A になる
+2. 同じ `sourceHash` の Export B も正常完了する。B は既存 grant を使うので所有者にならない
+3. A のファイル異常でロールバックし、A 所有の grant を削除する
+4. **B は成功しているのに grant が消える**
+
+トライアル台帳でも同じことが起きます。
+
+- 並列処理は異なる `sourceHash` の間だけ許可する
+- 同一 `sourceHash` は直列化する。バッチ内に重複があっても同様
+- `Prepared` から `Completed` または破棄まで、その `sourceHash` をロックする
+
+この制約を設けない場合、grant とトライアル台帳が複数の成功 `exportId` を保持する必要があり、モデルが複雑になります。v1 では直列化を選びます。
 
 `OutputRecord` にも `exportId` を持たせ、どのコミットに対応するかを一意にします。
 
@@ -1503,8 +1599,12 @@ data class OutputRecord(
     val batchId: String?,
     val outputPath: String,
     val state: OutputState,
+    val generatedAt: Instant,
+    val expiresAt: Instant,     // generatedAt + 24.hours
 )
 ```
+
+**期限を `OutputRecord` 自身が持ちます。** 判定は `effectiveNow >= expiresAt` です（6.2.2.5）。`ExportCommit` は完了後に削除するため、**コミットが消えたあとも単独で期限を判定できる**必要があります。
 
 ##### 手順と書き込み順
 
@@ -1512,7 +1612,7 @@ data class OutputRecord(
 
 | 順 | 操作 | 保存先 |
 | --- | --- | --- |
-| −1 | 権限とクォータ可否を確定する。`Blocked` なら以降へ進まない | メモリ |
+| −1 | `transact` 内で時刻正規化・月次更新・期限切れ grant の整理を**永続化**し、その結果として `ExportAuthorization` を得る。`Blocked` なら以降へ進まない | SecureStore |
 | 0 | `ExportCommit(Prepared)` を保存（`intent` は `null`） | Room |
 | 1 | 一時ファイルを生成し、整合性とデコードを検証 | ファイルシステム |
 | 2 | `intent` を確定し `ExportCommit(FileVerified)` を保存 | Room |
@@ -1520,6 +1620,10 @@ data class OutputRecord(
 | 4 | `applied` を埋めて `ExportCommit(AccountingCommitted)` を保存 | Room |
 | 5 | `OutputRecord(Generated)` を `exportId` を主キーに upsert | Room |
 | 6 | `ExportCommit(Completed)` を保存 | Room |
+| 7 | `OutputRecord` の存在を確認する | Room |
+| 8 | `Completed` の `ExportCommit` を削除する | Room |
+
+**手順 8 を省くと、書き出しのたびにコミット行が永久に蓄積します。** ジャーナルは中断からの復旧のためだけに存在するので、役目を終えたら消します。
 
 **手順 3 と 4 を逆にしてはいけません。** 先に `AccountingCommitted` を書くと、台帳が未反映のまま「反映済み」として復旧されます。この順なら 3 と 4 の間で落ちても状態は `FileVerified` のままなので、台帳更新を冪等に再適用できます。
 
@@ -1569,8 +1673,10 @@ data class OutputRecord(
 | `Prepared` | 一時ファイルを削除しコミットを破棄する。生成未完了なので消費しない（6.2.1） |
 | `FileVerified` | ファイルが健在なら手順 3 から続行。失われていれば破棄し、台帳は変更しない |
 | `AccountingCommitted` | **出力ファイルを再検証してから**手順 5 へ進む（下記） |
-| `Completed` | 何もしない |
+| `Completed` | `OutputRecord` と出力ファイルの存在を確認し、揃っていればコミット行を削除する。欠けていれば復旧エラー |
 | 署名検証に失敗 | 復旧エラー。自動破棄しない |
+
+`Completed` を無条件に削除しません。手順 6 と 7 の間で落ちた可能性があり、**コミット行だけが復旧の手がかり**だからです。
 
 ##### `AccountingCommitted` からの復旧
 
@@ -1854,6 +1960,13 @@ Rust + Axum。`/v1/config` は静的 JSON と ETag による配信とします�
 - 開始後に契約が失効しても、その書き出しは開始時の権限で完了すること（7.4.3）
 - Free でクォータを消費する書き出しが同時に1件までに制限されること（7.4.3）
 - 復旧エラーを「破棄して続ける」で解除でき、台帳が変更されないこと（7.4.3）
+- Free が月間枠を使い切っていても、クレジットが残っていれば一括トライアルを開始できること（7.4.3）
+- `BatchTrial` が月間枠を消費しないこと（7.4.3）
+- 同一 `sourceHash` の非終端コミットが同時に1件までに制限されること（7.4.3）
+- `Completed` のコミット行が、`OutputRecord` と出力ファイルの確認後に削除されること（7.4.3）
+- `OutputRecord` が `ExportCommit` 削除後も単独で期限判定できること（7.4.3）
+- `UsageLedger` の署名検証失敗時、Free と トライアルが不可になり Standard/Pro は許可されること（6.2.5）
+- Pro 失効時、`Prepared` 以降の写真は完了し `waiting` の写真は開始しないこと（7.4.3）
 - 並列書き出し時も `UsageLedgerStore.update` が直列化され、更新が失われないこと（7.4.3）
 - `evaluate` が更新後の `UsageLedger` を返し、Unlimited でも時刻更新と grant 整理が行われること（6.2）
 - `domain` の時間判定が `now` ではなく `effectiveNow` だけを受け取ること（6.2.2.5）
@@ -1892,7 +2005,7 @@ Rust + Axum。`/v1/config` は静的 JSON と ETag による配信とします�
 - 降格後の操作可否が 6.7 の表と一致すること
 - 顔の初期状態が常に加工対象であること（6.1 の不変条件）
 - 拡張率適用、`RenderPlan` 生成、座標正規化
-- 顔トラック関連付け、キーフレーム補間（v2 機能だが v1 で実装・テスト）
+- キーフレーム補間（v2 機能だが仕様確定のため v1 で実装・テスト。5.5）
 - ストレージ必要量計算、`ExportQueue` 状態機械、`AdFrequencyPolicy`
 - 履歴の保存期間と容量判定。7.2.4 の保持保証（単体は直近 1 プロジェクト、一括は直近 1 バッチの全プロジェクト）が容量超過時にも守られること
 - リモート設定のフォールバック
@@ -2049,7 +2162,7 @@ v1 では利用者向けの表現を **「写真」** に統一します。内�
 
 ### 13.7 v2 以降
 
-動画対応（検出、追跡、プレビュー、書き出し、長尺、4K）。5.5 の 4 契約を実装し、v1 の時点で実装・テスト済みのドメインロジック（顔トラック関連付け、キーフレーム補間、平滑化、シーン切替判定）と接続します。
+動画対応（検出、追跡、プレビュー、書き出し、長尺、4K）。5.5 の 4 契約を実装し、v1 で用意したデータモデルとキーフレーム補間へ接続します。顔トラック関連付け・平滑化・シーン切替判定は、実際の検出結果を見ながら v2 で実装します（5.5）。
 
 ---
 
@@ -2106,6 +2219,7 @@ Web モックである以上、以下は本書の記述どおりには再現で�
 | 商品 ID | 仕様 27.1 の商品 ID は暫定。ストア登録時に確定 | ストア登録時 |
 | カスタムスタンプのバックアップ方針 | 仕様 20.4 が初期リリース前の決定としている | v1 実装中 |
 | プライバシーポリシーの記載 | トライアル台帳（`sourceHash`）を期限なく端末内へ保持することを記載し、7.2.3 の例外と整合させる | ストア申請前 |
+| 共有結果 `Unknown` 後の利用者操作 | `Generated` を維持するため、共有後に画面を離れると「保存していない写真があります」が出る。「共有できましたか？」と明示確認して `Delivered` にするか、`Generated` のまま保存・再共有・破棄を選ばせるか。OS 結果の写像だけでなく、その後の操作まで定義が必要（7.4.2） | 実装計画で確定 |
 | 基本スタンプの意匠 | ベクターで自作する 12〜20 種の具体的な図案 | v1 実装中 |
 | `ExtremePose` の角度閾値 | yaw / pitch の絶対値が何度を超えたら警告するか。検出品質テストの結果から決定（6.5.2） | v1 実装中 |
 | 履歴の使用容量上限 | 初期値 200MB は暫定。加工後サムネイルの実サイズを計測して確定 | v1 実装中 |
