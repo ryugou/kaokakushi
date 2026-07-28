@@ -20,18 +20,22 @@ export type FaceBox = {
   manual?: boolean
   /**
    * 顔の向き（度）。左右の向き。
-   * iOS は VNFaceObservation.yaw、Android は Face.getHeadEulerAngleY から取る。
-   * 検出の信頼度は ML Kit が提供しないため、トリアージには使わない。
+   * FaceObservation.yaw を度へ変換した値。iOS 単独のため非 Optional。
    */
   yawDegrees?: number
   /** 顔の向き（度）。上下の向き */
   pitchDegrees?: number
+  /**
+   * 検出の信頼度（0〜1）。FaceObservation.confidence。
+   * iOS 単独になったため、トリアージの判定に使う。
+   */
+  confidence?: number
   /** 検出用の画像上で小さすぎる顔 */
   small?: boolean
   /** 画像の端に接している顔 */
   atEdge?: boolean
-  /** ほかの顔と領域が重なっている */
-  overlap?: boolean
+  /** ほかの顔と領域が重なっている（相手の faceId） */
+  overlapsWith?: string
 }
 
 export type MediaItem = {
@@ -64,8 +68,8 @@ export const MEDIA_LIBRARY: MediaItem[] = [
     sizeMb: 3.8,
     faces: [
       { id: "f1", x: 21.5, y: 27, w: 12.5, h: 10.5 },
-      { id: "f2", x: 45, y: 28, w: 12.5, h: 10.5, overlap: true },
-      { id: "f3", x: 52, y: 29, w: 12, h: 10.5, overlap: true },
+      { id: "f2", x: 45, y: 28, w: 12.5, h: 10.5, overlapsWith: "f3" },
+      { id: "f3", x: 52, y: 29, w: 12, h: 10.5, overlapsWith: "f2" },
     ],
   },
   {
@@ -76,7 +80,7 @@ export const MEDIA_LIBRARY: MediaItem[] = [
     sizeMb: 5.1,
     faces: [
       { id: "f1", x: 41, y: 28.5, w: 10, h: 9.5 },
-      { id: "f2", x: 49, y: 22.5, w: 10, h: 9.5 },
+      { id: "f2", x: 49, y: 22.5, w: 10, h: 9.5, confidence: 0.42 },
       { id: "f3", x: 17, y: 39, w: 5.5, h: 5, small: true },
       { id: "f4", x: 71, y: 37, w: 5.5, h: 5, small: true },
       { id: "f5", x: 93, y: 35.5, w: 5.5, h: 5, small: true, atEdge: true },
@@ -191,10 +195,11 @@ export function findMedia(id: string) {
 /* ------------------------------------------------------------------ */
 
 /** 写真1枚を「要確認」にする理由 */
-export type ReviewReason = "no-face" | "small-face" | "extreme-pose" | "edge-face" | "overlap"
+export type ReviewReason = "no-face" | "low-confidence" | "small-face" | "extreme-pose" | "edge-face" | "overlap"
 
 export const REVIEW_REASON_LABELS: Record<ReviewReason, string> = {
   "no-face": "顔が検出されませんでした",
+  "low-confidence": "検出の確からしさが低い顔があります",
   "small-face": "小さい顔があります",
   "extreme-pose": "大きく横や上下を向いた顔があります",
   "edge-face": "画像の端に顔があります",
@@ -203,35 +208,87 @@ export const REVIEW_REASON_LABELS: Record<ReviewReason, string> = {
 
 /** yaw / pitch の絶対値がこれを超えたら要確認にする（度） */
 const POSE_THRESHOLD = 40
+/** これ未満の信頼度は要確認にする */
+const CONFIDENCE_THRESHOLD = 0.6
 
 function hasExtremePose(face: FaceBox) {
   return Math.abs(face.yawDegrees ?? 0) > POSE_THRESHOLD || Math.abs(face.pitchDegrees ?? 0) > POSE_THRESHOLD
 }
 
+function hasLowConfidence(face: FaceBox) {
+  return face.confidence !== undefined && face.confidence < CONFIDENCE_THRESHOLD
+}
+
 /**
- * 検出結果から要確認の理由を求める。
+ * 警告1件。「理由」ではなく「発生」を表す。
  *
- * 判定に使うのは、iOS と Android の両方が返せる値だけにする。
- * 検出の信頼度は ML Kit が提供しないため使わない。
+ * 理由ごとに1件へ集約すると、小さい顔が3人いる写真で
+ * 1人だけ対応して確認済みにできてしまう。
+ */
+export type ReviewIssue = {
+  /** projectID + revision + reason + 対象の顔 から決まる */
+  id: string
+  reason: ReviewReason
+  /** 対象の顔。no-face では空 */
+  faceIds: string[]
+  /** 一覧に出す短い説明 */
+  label: string
+}
+
+function issueId(mediaId: string, revision: number, reason: ReviewReason, faceIds: string[]) {
+  // 写真をまたいで衝突しないよう mediaId を含める。
+  // no-face は faceIds が空なので、これが無いと同じ revision の別写真と同じ ID になる。
+  return `${mediaId}#${revision}#${reason}#${faceIds.join(",")}`
+}
+
+/**
+ * 検出結果から要確認の「発生」を列挙する。
+ *
+ * iOS 単独になったため、検出の信頼度も判定に使う。
  *
  * 注意：判定できるのは「検出された顔の状態」だけで、
  * 検出できなかった顔の存在は判定できない。
- * そのため理由が0件でも「安全」ではなく「警告なし」でしかない。
+ * そのため0件でも「安全」ではなく「警告なし」でしかない。
  */
-export function triage(media: MediaItem): ReviewReason[] {
-  if (media.faces.length === 0) return ["no-face"]
+export function triage(media: MediaItem, revision = 0): ReviewIssue[] {
+  const make = (reason: ReviewReason, faceIds: string[], label: string): ReviewIssue => ({
+    id: issueId(media.id, revision, reason, faceIds),
+    reason,
+    faceIds,
+    label,
+  })
 
-  const reasons: ReviewReason[] = []
-  if (media.faces.some((f) => f.small)) reasons.push("small-face")
-  if (media.faces.some(hasExtremePose)) reasons.push("extreme-pose")
-  if (media.faces.some((f) => f.atEdge)) reasons.push("edge-face")
-  if (media.faces.some((f) => f.overlap)) reasons.push("overlap")
-  return reasons
+  if (media.faces.length === 0) {
+    return [make("no-face", [], REVIEW_REASON_LABELS["no-face"])]
+  }
+
+  const issues: ReviewIssue[] = []
+
+  media.faces.forEach((f, index) => {
+    const nth = `${index + 1}人目`
+    if (hasLowConfidence(f)) issues.push(make("low-confidence", [f.id], `${nth}：確からしさが低い`))
+    if (f.small) issues.push(make("small-face", [f.id], `${nth}：顔が小さい`))
+    if (hasExtremePose(f)) issues.push(make("extreme-pose", [f.id], `${nth}：大きく向いている`))
+    if (f.atEdge) issues.push(make("edge-face", [f.id], `${nth}：画像の端にある`))
+  })
+
+  // 重なりは「顔の組み合わせ」ごとに1件。順序で別 ID にならないよう辞書順に並べる
+  const seenPairs = new Set<string>()
+  media.faces.forEach((f) => {
+    if (!f.overlapsWith) return
+    const pair = [f.id, f.overlapsWith].sort()
+    const key = pair.join(",")
+    if (seenPairs.has(key)) return
+    seenPairs.add(key)
+    issues.push(make("overlap", pair, `${pair.join(" と ")} が重なっている`))
+  })
+
+  return issues
 }
 
 /** 顔ひとつが要確認かどうか（検出画面の警告表示に使う） */
 export function faceNeedsReview(face: FaceBox) {
-  return Boolean(face.small || face.atEdge || face.overlap || hasExtremePose(face))
+  return Boolean(face.small || face.atEdge || face.overlapsWith || hasExtremePose(face) || hasLowConfidence(face))
 }
 
 /* ------------------------------------------------------------------ */

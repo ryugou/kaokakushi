@@ -8,6 +8,7 @@ import { BottomNav } from "@/components/bottom-nav"
 import { MediaPicker } from "@/components/media-picker"
 import { UpgradeModal } from "@/components/upgrade-modal"
 import { DiscardDialog, RecoveryDialog, UnsavedOutputDialog } from "@/components/pending-dialogs"
+import { UpdateGate } from "@/components/update-gate"
 import { HomeScreen } from "@/components/screens/home-screen"
 import { DetectScreen } from "@/components/screens/detect-screen"
 import { EffectScreen } from "@/components/screens/effect-screen"
@@ -64,6 +65,7 @@ function AppShellInner() {
       <UnsavedOutputDialog />
       <DiscardDialog />
       <RecoveryDialog />
+      <UpdateGate />
     </PhoneShell>
   )
 }

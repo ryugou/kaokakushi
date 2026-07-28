@@ -24,6 +24,7 @@ import {
   findMedia,
   formatMb,
   REVIEW_REASON_LABELS,
+  type ReviewIssue,
   type ReviewReason,
 } from "@/lib/mock-data"
 import { STAMPS } from "@/lib/stamps"
@@ -471,8 +472,9 @@ function ReviewStage() {
     confirmGrid,
     canConfirmGrid,
     startBatchExport,
-    resolveReason,
+    resolveIssue,
     resolveGroup,
+    redetect,
     markOverride,
     reviewedIds,
     markReviewed,
@@ -500,19 +502,21 @@ function ReviewStage() {
     return () => observer.disconnect()
   }, [batchMode, markReachedEnd, onlyReview])
 
-  const shown = onlyReview ? batchItems.filter((i) => i.reasons.length > 0) : batchItems
+  const shown = onlyReview ? batchItems.filter((i) => i.issues.length > 0) : batchItems
 
   // 理由ごとの一括確認。「顔が検出されませんでした」は対象にしない
   const groupable = React.useMemo(() => {
+    // 枚数を数える。同じ写真に同じ理由が複数あっても1枚として数える
     const map = new Map<ReviewReason, number>()
     batchItems.forEach((item) => {
-      if (isDecided(item) || item.reasons.includes("no-face")) return
-      item.reasons.forEach((r) => map.set(r, (map.get(r) ?? 0) + 1))
+      if (isDecided(item) || item.issues.some((i) => i.reason === "no-face")) return
+      const reasons = new Set(item.issues.filter((i) => !item.decisions[i.id]).map((i) => i.reason))
+      reasons.forEach((r) => map.set(r, (map.get(r) ?? 0) + 1))
     })
     return [...map.entries()]
   }, [batchItems])
 
-  const noFaceItems = batchItems.filter((i) => i.reasons.includes("no-face") && !isDecided(i))
+  const noFaceItems = batchItems.filter((i) => i.issues.some((x) => x.reason === "no-face") && !isDecided(i))
 
   if (batchMode === "one-by-one") {
     const item = batchItems[step]
@@ -541,8 +545,8 @@ function ReviewStage() {
                 <StatusBadge item={item} reviewed={reviewedIds.includes(item.mediaId)} />
               </div>
 
-              {item.reasons.length > 0 && !isDecided(item) ? (
-                <ReasonList reasons={item.reasons} />
+              {item.issues.length > 0 && !isDecided(item) ? (
+                <IssueList issues={item.issues} decisions={item.decisions} />
               ) : null}
 
               <div className="grid grid-cols-2 gap-2">
@@ -560,7 +564,7 @@ function ReviewStage() {
                   size="lg"
                   className="h-12 rounded-2xl text-sm font-bold"
                   onClick={() => {
-                    item.reasons.forEach((r) => resolveReason(item.mediaId, r, "accepted-as-is"))
+                    item.issues.forEach((i) => resolveIssue(item.mediaId, i.id, "accepted-as-is"))
                     markReviewed(item.mediaId)
                     setStep((s) => Math.min(batchItems.length - 1, s + 1))
                   }}
@@ -577,6 +581,17 @@ function ReviewStage() {
                 onClick={() => markOverride(item.mediaId)}
               >
                 この写真だけ個別に調整する
+              </Button>
+
+              {/* 再検出すると顔の対応づけができないため、この写真の判断はすべて破棄する */}
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-10 rounded-2xl text-[11px] text-muted-foreground"
+                onClick={() => redetect(item.mediaId)}
+              >
+                <RotateCcw data-icon="inline-start" />
+                顔を検出し直す（この写真の確認はやり直しになります）
               </Button>
             </>
           ) : null}
@@ -667,7 +682,7 @@ function ReviewStage() {
         <div className="grid grid-cols-3 gap-2">
           {shown.map((item) => {
             const media = findMedia(item.mediaId)
-            const needsAction = item.reasons.length > 0 && !isDecided(item)
+            const needsAction = item.issues.length > 0 && !isDecided(item)
             return (
               <button
                 key={item.mediaId}
@@ -755,8 +770,8 @@ function ReviewStage() {
       <PreviewDialog
         item={preview}
         onClose={() => setPreview(null)}
-        onResolve={(id, reason, resolution) => {
-          resolveReason(id, reason, resolution)
+        onResolve={(id, issueId, resolution) => {
+          resolveIssue(id, issueId, resolution)
         }}
         onOverride={(id) => {
           markOverride(id)
@@ -783,17 +798,26 @@ function FilterChip({ active, label, onClick }: { active: boolean; label: string
   )
 }
 
-function ReasonList({ reasons }: { reasons: ReviewReason[] }) {
+/** 警告は「発生」ごとに並べる。同じ理由でも顔ごとに別の行になる */
+function IssueList({
+  issues,
+  decisions,
+}: {
+  issues: ReviewIssue[]
+  decisions: Record<string, ReviewResolution>
+}) {
+  const pending = issues.filter((i) => !decisions[i.id])
+  if (pending.length === 0) return null
   return (
     <div className="flex flex-col gap-1 rounded-2xl bg-chart-3/15 px-3 py-2.5">
       <p className="flex items-center gap-1.5 text-[11px] font-bold text-foreground">
         <AlertTriangle className="size-3.5 shrink-0" aria-hidden />
-        確認が必要です
+        {pending.length}件の確認が必要です
       </p>
       <ul className="flex flex-col gap-0.5 pl-5 text-[11px] leading-relaxed text-foreground">
-        {reasons.map((r) => (
-          <li key={r} className="list-disc">
-            {REVIEW_REASON_LABELS[r]}
+        {pending.map((i) => (
+          <li key={i.id} className="list-disc">
+            {i.label}
           </li>
         ))}
       </ul>
@@ -804,7 +828,7 @@ function ReasonList({ reasons }: { reasons: ReviewReason[] }) {
 /** 通常／要確認／確認済みの3状態だけを表示する。「安全」とは表示しない */
 function StatusBadge({ item, compact, reviewed }: { item: BatchItem; compact?: boolean; reviewed?: boolean }) {
   const state =
-    item.reasons.length === 0
+    item.issues.length === 0
       ? reviewed
         ? { label: "確認済み", className: "bg-primary text-primary-foreground" }
         : { label: "通常", className: "bg-card/90 text-muted-foreground" }
@@ -833,12 +857,12 @@ function PreviewDialog({
 }: {
   item: BatchItem | null
   onClose: () => void
-  onResolve: (mediaId: string, reason: ReviewReason, resolution: ReviewResolution) => void
+  onResolve: (mediaId: string, issueId: string, resolution: ReviewResolution) => void
   onOverride: (mediaId: string) => void
 }) {
   const { effect } = useApp()
   const media = item ? findMedia(item.mediaId) : null
-  const needsAction = item ? item.reasons.length > 0 && !isDecided(item) : false
+  const needsAction = item ? item.issues.length > 0 && !isDecided(item) : false
 
   return (
     <Dialog open={item !== null} onOpenChange={(open) => (!open ? onClose() : undefined)}>
@@ -862,13 +886,13 @@ function PreviewDialog({
 
             {/* 警告は消さず、理由ごとにどう扱うと決めたかを記録する */}
             <div className="flex flex-col gap-3">
-              {item.reasons.map((reason) => {
-                const decided = item.decisions[reason]
+              {item.issues.map((issue) => {
+                const decided = item.decisions[issue.id]
                 return (
-                  <div key={reason} className="flex flex-col gap-1.5 rounded-2xl bg-chart-3/15 p-3">
+                  <div key={issue.id} className="flex flex-col gap-1.5 rounded-2xl bg-chart-3/15 p-3">
                     <p className="flex items-center gap-1.5 text-[11px] font-bold text-foreground">
                       <AlertTriangle className="size-3.5 shrink-0" aria-hidden />
-                      {REVIEW_REASON_LABELS[reason]}
+                      {issue.label}
                     </p>
                     {decided ? (
                       <p className="text-[11px] leading-relaxed text-foreground">
@@ -891,7 +915,7 @@ function PreviewDialog({
                               "h-9 rounded-xl text-[11px] font-bold",
                               value === "unmasked-export-confirmed" && "text-destructive",
                             )}
-                            onClick={() => onResolve(item.mediaId, reason, value)}
+                            onClick={() => onResolve(item.mediaId, issue.id, value)}
                           >
                             {label}
                           </Button>

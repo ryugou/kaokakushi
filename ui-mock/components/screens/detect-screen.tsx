@@ -2,7 +2,7 @@
 
 import { AlertTriangle, Plus, ScanFace, X } from "lucide-react"
 
-import { faceNeedsReview, REVIEW_REASON_LABELS, triage } from "@/lib/mock-data"
+import { faceNeedsReview, triage } from "@/lib/mock-data"
 import { useApp } from "@/components/app-provider"
 import { ScreenHeader } from "@/components/app-bits"
 import { MediaCanvas } from "@/components/media-canvas"
@@ -14,7 +14,7 @@ export function DetectScreen() {
   if (!media) return null
 
   const noFace = faces.length === 0
-  const warnings = triage(media).filter((r) => r !== "no-face")
+  const warnings = triage(media).filter((i) => i.reason !== "no-face")
   const reviewFaces = faces.filter(faceNeedsReview).length
 
   return (
@@ -88,9 +88,9 @@ export function DetectScreen() {
                   確認が必要です
                 </p>
                 <ul className="flex flex-col gap-0.5 pl-5 text-[11px] leading-relaxed text-foreground">
-                  {warnings.map((r) => (
-                    <li key={r} className="list-disc">
-                      {REVIEW_REASON_LABELS[r]}
+                  {warnings.map((i) => (
+                    <li key={i.id} className="list-disc">
+                      {i.label}
                     </li>
                   ))}
                 </ul>

@@ -12,6 +12,7 @@ import {
   type HistoryItem,
   type MediaItem,
   type ReviewReason,
+  type ReviewIssue,
   type SingleHistoryItem,
 } from "@/lib/mock-data"
 import { DEFAULT_EFFECT, EFFECT_LABELS, type EffectConfig, type EffectType } from "@/components/face-mask"
@@ -157,9 +158,14 @@ export const BATCH_STATUS_LABELS: Record<BatchItemStatus, string> = {
  */
 export type ReviewResolution = "accepted-as-is" | "manual-region-added" | "unmasked-export-confirmed"
 
-/** その写真の全警告に判断が記録されているか */
-export function isDecided(item: { reasons: ReviewReason[]; decisions: Partial<Record<ReviewReason, ReviewResolution>> }) {
-  return item.reasons.every((r) => item.decisions[r])
+/**
+ * その写真の全警告に判断が記録されているか。
+ *
+ * 判定は「発生（issue）」ごと。理由ごとに集約すると、
+ * 小さい顔が3人いる写真で1人だけ対応して先へ進めてしまう。
+ */
+export function isDecided(item: { issues: ReviewIssue[]; decisions: Record<string, ReviewResolution> }) {
+  return item.issues.every((i) => item.decisions[i.id])
 }
 
 export const RESOLUTION_LABELS: Record<ReviewResolution, string> = {
@@ -171,12 +177,14 @@ export const RESOLUTION_LABELS: Record<ReviewResolution, string> = {
 export type BatchItem = {
   mediaId: string
   status: BatchItemStatus
-  reasons: ReviewReason[]
+  /** 検出のやり直し回数。増やすと issue の ID が変わり、判断がすべて破棄される */
+  detectionRevision: number
+  issues: ReviewIssue[]
   /**
-   * 警告理由ごとの判断。reasons は変化しない。
-   * 1枚に複数の警告が付くため、写真に対して1つだけでは表現できない。
+   * 発生（issue.id）ごとの判断。issues 自体は利用者の操作で変化しない。
+   * 1枚に同じ理由の警告が複数付くため、理由をキーにはできない。
    */
-  decisions: Partial<Record<ReviewReason, ReviewResolution>>
+  decisions: Record<string, ReviewResolution>
   /** 共通設定とは別に個別編集したか */
   hasOverride: boolean
   /** 加工後サムネイルの生成が終わったか */
@@ -200,6 +208,17 @@ export const CUSTOM_STAMP_LIMIT = 100
 export const HISTORY_ITEM_MB = 0.35
 /** 履歴の使用容量上限（MB） */
 export const HISTORY_LIMIT_MB = 200
+
+/** ストアにある最新バージョン。実装ではリモート設定から取る */
+export const LATEST_VERSION = "1.2.0"
+
+/**
+ * 起動時の更新判定。
+ *
+ * required は強制更新。ただし未保存の加工済み写真がある場合は、
+ * 受け渡しの導線を先に出す（消費したのに受け取れない状態を作らない）。
+ */
+export type UpdateDecision = "none" | "recommended" | "required"
 
 export const PLAN_LABELS: Record<Plan, string> = {
   free: "Free",
@@ -332,6 +351,9 @@ type AppContextValue = {
   keepPendingForLater: () => void
   closeRecovery: () => void
   simulateCrash: () => void
+  updateState: UpdateDecision
+  simulateUpdate: (decision: UpdateDecision) => void
+  skipUpdate: () => void
   /** 未保存があるときは確認をはさんでから実行する */
   guardNewWork: (label: string, run: () => void) => void
 
@@ -356,8 +378,9 @@ type AppContextValue = {
   /** 「1枚ずつ確認」で個別に確認を終えた写真 */
   reviewedIds: string[]
   markReviewed: (mediaId: string) => void
-  resolveReason: (mediaId: string, reason: ReviewReason, resolution: ReviewResolution) => void
+  resolveIssue: (mediaId: string, issueId: string, resolution: ReviewResolution) => void
   resolveGroup: (reason: ReviewReason) => void
+  redetect: (mediaId: string) => void
   markOverride: (mediaId: string) => void
   startBatchDetection: () => void
   startBatchExport: () => void
@@ -748,6 +771,30 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     })
   }, [])
 
+  /* ---------------------------------------------------------------- */
+  /* アプリ更新の誘導                                                    */
+  /* ---------------------------------------------------------------- */
+
+  const [updateState, setUpdateState] = React.useState<UpdateDecision>("none")
+  const [skippedVersion, setSkippedVersion] = React.useState<string | null>(null)
+
+  /**
+   * 更新判定。リモート設定を取得できない場合は none。
+   * サーバー障害でアプリを止めないため、既定は「更新なし」。
+   */
+  const simulateUpdate = React.useCallback(
+    (decision: UpdateDecision) => {
+      if (decision === "recommended" && skippedVersion === LATEST_VERSION) return
+      setUpdateState(decision)
+    },
+    [skippedVersion],
+  )
+
+  const skipUpdate = React.useCallback(() => {
+    setSkippedVersion(LATEST_VERSION)
+    setUpdateState("none")
+  }, [])
+
   /**
    * 未保存があるときは確認をはさむ。単体・一括を問わず同時に1件まで。
    * 受け渡し済みの出力は、画面を離れる時点で静かに破棄する。
@@ -958,7 +1005,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       batchSelection.map((id) => ({
         mediaId: id,
         status: "detecting" as BatchItemStatus,
-        reasons: triage(findMedia(id)),
+        detectionRevision: 0,
+        issues: triage(findMedia(id), 0),
         decisions: {},
         hasOverride: false,
         thumbReady: false,
@@ -985,7 +1033,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         next[pending] = {
           ...item,
           thumbReady: true,
-          status: item.reasons.length > 0 ? "review" : "waiting",
+          status: item.issues.length > 0 ? "review" : "waiting",
         }
         return next
       })
@@ -995,7 +1043,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const allThumbsReady = batchItems.length > 0 && batchItems.every((i) => i.thumbReady)
   const unresolvedCount = batchItems.filter((i) => !isDecided(i)).length
-  const reviewCount = batchItems.filter((i) => i.reasons.length > 0).length
+  const reviewCount = batchItems.filter((i) => i.issues.length > 0).length
   const overrideCount = batchItems.filter((i) => i.hasOverride).length
 
   const markReachedEnd = React.useCallback(() => setReachedEnd(true), [])
@@ -1019,13 +1067,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [canConfirmGrid])
 
   /** 警告は消さず、理由ごとにどう扱うと決めたかを記録する */
-  const resolveReason = React.useCallback(
-    (id: string, reason: ReviewReason, resolution: ReviewResolution) => {
+  const resolveIssue = React.useCallback(
+    (id: string, issueId: string, resolution: ReviewResolution) => {
       setBatchItems((prev) =>
         prev.map((item) => {
           if (item.mediaId !== id) return item
-          const decisions = { ...item.decisions, [reason]: resolution }
-          const done = item.reasons.every((r) => decisions[r])
+          const decisions = { ...item.decisions, [issueId]: resolution }
+          const done = item.issues.every((i) => decisions[i.id])
           return { ...item, decisions, status: (done ? "waiting" : "review") as BatchItemStatus }
         }),
       )
@@ -1038,12 +1086,42 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (reason === "no-face") return
     setBatchItems((prev) =>
       prev.map((item) => {
-        if (!item.reasons.includes(reason) || item.reasons.includes("no-face")) return item
-        const decisions = { ...item.decisions, [reason]: "accepted-as-is" as ReviewResolution }
-        const done = item.reasons.every((r) => decisions[r])
+        // その理由に属する issue を1件も取りこぼさない
+        const targets = item.issues.filter((i) => i.reason === reason)
+        if (targets.length === 0 || item.issues.some((i) => i.reason === "no-face")) return item
+        const decisions = { ...item.decisions }
+        targets.forEach((i) => {
+          decisions[i.id] = "accepted-as-is" as ReviewResolution
+        })
+        const done = item.issues.every((i) => decisions[i.id])
         return { ...item, decisions, status: (done ? "waiting" : "review") as BatchItemStatus }
       }),
     )
+  }, [])
+
+  /**
+   * 検出のやり直し。
+   *
+   * 新旧の顔を対応づける手段がないため、対応づけは試みない。
+   * revision を増やして issue の ID を変え、その写真の判断と確認済みをすべて破棄する。
+   * 誤って対応づけるより、やり直してもらうほうが安全。
+   */
+  const redetect = React.useCallback((id: string) => {
+    setBatchItems((prev) =>
+      prev.map((item) => {
+        if (item.mediaId !== id) return item
+        const revision = item.detectionRevision + 1
+        const issues = triage(findMedia(id), revision)
+        return {
+          ...item,
+          detectionRevision: revision,
+          issues,
+          decisions: {},
+          status: (issues.length > 0 ? "review" : "waiting") as BatchItemStatus,
+        }
+      }),
+    )
+    setGridConfirmed(false)
   }, [])
 
   const markOverride = React.useCallback(
@@ -1276,6 +1354,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     keepPendingForLater,
     closeRecovery,
     simulateCrash,
+    updateState,
+    simulateUpdate,
+    skipUpdate,
     guardNewWork,
     batchStage,
     batchMode,
@@ -1296,8 +1377,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     reviewCount,
     reviewedIds,
     markReviewed,
-    resolveReason,
+    resolveIssue,
     resolveGroup,
+    redetect,
     markOverride,
     startBatchDetection,
     startBatchExport,
