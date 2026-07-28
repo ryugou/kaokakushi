@@ -3,7 +3,7 @@
 | 項目 | 内容 |
 | --- | --- |
 | 文書名 | 顔かくし 技術スタックおよびアーキテクチャ設計 |
-| バージョン | 2.2 |
+| バージョン | 2.3 |
 | 作成日 | 2026-07-27 |
 | 対象 | 写真向け顔匿名化アプリ（**iOS 単独**） |
 | 上位文書 | 写真・動画向け顔匿名化アプリ 仕様書 v0.1 |
@@ -156,7 +156,7 @@ SwiftData の `ModelContext` は保存タイミングが暗黙的で、上記の
 
 | v1.x の制約 | v2.0 での扱い |
 | --- | --- |
-| 検出信頼度を使えない（ML Kit に API が無い） | **`VNFaceObservation.confidence` を使える。** 仕様 8.1 どおり `LowConfidence` をトリアージ理由へ戻す（5.7.1 / 6.5.2） |
+| 検出信頼度を使えない（ML Kit に API が無い） | **`FaceObservation.confidence` を使える。** 仕様 8.1 どおり `lowConfidence` をトリアージ理由へ戻す（5.7.1 / 6.5.2） |
 | ぼかしを OpenGL ES 2.0 のシェーダで自作 | Core Image の `CIGaussianBlur` を使う |
 | 両 OS の座標系・角度の差を吸収する契約テスト | 不要。Vision の座標系のみを扱う |
 | 広告 SDK の自前ラップ | 不要。iOS SDK を直接使う |
@@ -197,17 +197,24 @@ kaokakushi/
 依存は次の一方向とします。
 
 ```
-App
- ↓
-Application
- ↓
-Domain
- ↑
-Persistence / MediaKit / Rendering / Billing / Ads / Analytics
-（Domain のプロトコルを実装する）
+実行時の依存:
+
+  App ──→ Application ──→ Domain
+                            ↑
+  Persistence / MediaKit / Rendering / Billing / Ads / Analytics
+  （Domain のプロトコルを実装する）
+
+Composition Root（DI の組み立て）:
+
+  App ──→ Application
+   └────→ Persistence / MediaKit / Rendering / Billing / Ads / Analytics
 ```
 
 `Domain` がプロトコルを定義し、各アダプタがそれを実装します。`Application` は `Domain` のプロトコルだけを通してアダプタを操作します。
+
+**`App` は具象アダプタへ依存します。** DI を組み立てる Composition Root が具象を生成して `Application` へ注入する以上、`App` からアダプタへの依存は避けられません。「`App → Application → Domain` の一直線」だけを書くと、Composition Root が具象へ到達できない図になります。
+
+この依存は**組み立て時に限ります。** `App` の `View` や状態オブジェクトがアダプタを直接呼ぶことは禁止します。呼び先は `Application` の Coordinator だけです。
 
 **`Domain` は `Foundation` 以外に依存しません。**
 
@@ -250,6 +257,7 @@ Swift 6 の strict concurrency を有効にします。
 | `UsageLedgerStore` | `Domain` は**プロトコル**。実装は待機キューを持つ `actor`（7.4.3） |
 | `ExportStartGate` | 同上 |
 | `Application` の Coordinator | `actor` |
+| `SharePresenter` / `AdPresenter` | **``**（UIKit を操作する。5.4） |
 | UI の状態オブジェクト | `@MainActor` |
 | `MediaKit` の重い処理 | `nonisolated` な `async` 関数。呼び出し側が並行度を制御する |
 
@@ -625,6 +633,59 @@ enum BackgroundOp: Sendable {
 
 `PixelRect` の `rightExclusive` / `bottomExclusive` は名前で排他性を示します。`right` / `bottom` という名前だと、包含のつもりで実装される余地が残ります。
 
+##### 何も隠さない `RenderOp` を作れないようにする
+
+**生の `Double` / `Int` を受け取ると、安全上の no-op を表現できます。**
+
+`isMasked == true` の顔に対して、次はいずれも「加工したことになっているが、実際には何も隠れていない」出力を作ります。
+
+| 値 | 結果 |
+| --- | --- |
+| `opacity = 0` | 完全に透明な塗り・スタンプ |
+| `sigmaRatio = 0` | ぼかしゼロ |
+| `cellRatio = 0`（または `cellSizePx < 1`） | モザイクのセルが 1 ピクセル未満＝原画のまま |
+| 幅または高さ 0 の `bounds` | 描画対象が無い |
+| `NaN` / 無限大の座標 | 描画が未定義（レンダラーが黙って無視しうる） |
+| 完全に透明なカスタムスタンプ画像 | 貼っても何も隠れない |
+
+**検証済みの値型としてしか作れないようにします。**
+
+```swift
+struct Opacity: Sendable, Equatable {
+    let value: Double
+
+    init(_ value: Double) throws {
+        guard value.isFinite, (0.0...1.0).contains(value) else {
+            throw RenderValidationError.invalidOpacity
+        }
+        self.value = value
+    }
+}
+```
+
+同じ方式で次を検証します。
+
+| 対象 | 条件 |
+| --- | --- |
+| `PixelSize` | `width > 0` かつ `height > 0` |
+| `PixelRect` / `NormalizedRect` | すべて有限。`left < rightExclusive`、`top < bottomExclusive` |
+| 各 `ratio` | 有限かつ規定範囲内（`0 < ratio <= 上限`） |
+| `cellSizePx` | **`>= 1`** |
+| `sigmaPx` | **`> 0`** |
+| `featherPx` | `>= 0`（0 は許容。境界をぼかさない指定） |
+| `rotationDegrees` | 有限 |
+| カスタムスタンプ画像 | **完全に透明な画像を取り込み時に拒否する**（8.1） |
+
+`featherPx` だけ 0 を許すのは、境界のぼかしが匿名化の強度に影響しないためです。他は 0 が「隠していない」を意味します。
+
+##### 意図的に隠さない場合
+
+**利用者が「この顔は隠さない」と選ぶ経路は別に存在します。**
+
+`isMasked = false` にするか、`ReviewResolution.unmaskedExportConfirmed` を記録するか（6.5.4）のいずれかです。**no-op の `RenderOp` を作って迂回させません。**
+
+`isMasked == true` の顔に no-op 相当の値が渡された場合、`compileRenderDraft` が `throw` します。UI 側でスライダーの下限を 0 にしない、といった表示上の対処だけに頼りません。
+
 #### 5.2.1 座標・回転・色の共通規約
 
 **数値の解釈を規約として固定します。** 未定義のままだと、`MediaKit` の実装者（将来の自分を含む）が独自に解釈し、ゴールデン画像テストの期待値が「たまたま今の実装が出す値」になります。規約を先に決め、テストはそれを検証する手段に留めます。
@@ -639,7 +700,7 @@ enum BackgroundOp: Sendable {
 | `left` / `top` | 含む（inclusive） |
 | `right` / `bottom` | **含まない（exclusive）** |
 
-原点を「向き正規化後」と明記するのは、EXIF の回転を適用する前後で左上の位置が変わるためです。`ImageLoader` が向きを正規化したあとの画像が、すべての座標の基準です。
+原点を「向き正規化後」と明記するのは、EXIF の回転を適用する前後で左上の位置が変わるためです。`PickedPhotoLoader` が向きを正規化したあとの画像が、すべての座標の基準です。
 
 値域は**段階によって異なります。** 「0.0〜1.0」と「はみ出しを許容」を同じ型の規約として並べることはできません。
 
@@ -734,7 +795,47 @@ struct SrgbArgb8888: Sendable, Hashable {
 
 **Vision は左下原点の正規化座標を返します。** 本設計は左上原点なので、Y 軸の反転が必要です。`VNImageRectForNormalizedRect` は `CGImage` の座標系（左下原点）を前提とするため、そのまま使うと上下が反転します。変換は `MediaKit` の責務であり、`Domain` へ持ち込みません。
 
-同様に、`VNFaceObservation` の `yaw` / `pitch` / `roll` は `NSNumber?` のラジアン値です。度への変換、`nil` の扱い（該当角度が推定できなかった場合）、符号の向きを 5.7.1 の共通モデルへ揃えます。
+同様に、`FaceObservation` の `yaw` / `pitch` / `roll` は `Measurement<UnitAngle>` です。度への変換と符号の向きを 5.7.1 の共通モデルへ揃えます。
+
+##### `Domain` から Core Image への変換責務
+
+**Vision → `Domain` の変換だけでは足りません。逆向きも必要です。**
+
+Core Image の API は **`CIImage` 自身の Cartesian 座標系（左下原点）** の矩形を受け取ります。`Domain` の `PixelRect`（左上原点）をそのまま `CGRect` にすると上下が反転します。
+
+```swift
+// MediaKit
+func makeCIRect(_ rect: PixelRect, canvasHeight: Int) -> CGRect {
+    CGRect(
+        x: rect.left,
+        y: canvasHeight - rect.bottomExclusive,   // ← Y 軸の反転
+        width: rect.rightExclusive - rect.left,
+        height: rect.bottomExclusive - rect.top
+    )
+}
+```
+
+あわせて次を定めます。
+
+| 項目 | 規約 |
+| --- | --- |
+| 回転方向 | `Domain` は時計回り正。**Core Image は反時計回り正**なので符号を反転する |
+| `extent` の原点 | 向き正規化後の `CIImage.extent` を **`(0, 0)` へ移す**（`transformed(by:)`）。原点が 0 でない `CIImage` は存在しうる |
+| ぼかしの端 | `CIGaussianBlur` の**前に `CIAffineClamp` で端を伸ばし**、処理後にキャンバスの `extent` で `cropped(to:)` する |
+| マスク | **同じ `makeCIRect` を通す。** マスクだけ別の変換を書かない |
+| 出力 | エンコード時に**再度上下反転しない**（Image I/O は `CGImage` を受けるため、ここで整合する） |
+
+**`CIAffineClamp` を省くと、画像端の顔のぼかしが薄くなります。** Core Image はキャンバス外を透明として扱うため、端の領域では透明とブレンドされて隠蔽が弱まります。仕様 9.5 の「平滑化によって顔が露出する場合は領域を拡張する」と同じ問題です。
+
+**`extent` の原点を明示的に 0 へ移すのは、`cropped(to:)` の結果が原点を保つためです。** 途中で切り抜きを行うと以降の座標がずれます。
+
+ゴールデン画像テストの素材へ次を追加します（12.1.3）。
+
+- 画像**上端**だけに顔がある
+- 画像**下端**だけに顔がある
+- `extent` の原点が `(0, 0)` でない `CIImage`
+
+上下の非対称性は、Y 軸反転の誤りが最も現れやすい形です。中央に顔がある素材では反転しても差が出ません。
 
 エフェクト強度は **`RenderSpec` の段階で領域サイズに対する相対値** として保持します（仕様 11.1）。`compileRenderDraft` が対象解像度で絶対ピクセルへ換算するため、低解像度プレビューと原寸書き出しで見た目が一致し、ゴールデン画像テストが成立します。**`MediaKit` は比率計算を一切行いません。**
 
@@ -750,27 +851,105 @@ func expand(face: NormalizedRect, effect: EffectSetting) -> NormalizedRect
 
 ### 5.4 プラットフォームプロトコル（v1 = 写真のみ）
 
-**12 のプロトコルがありますが、すべてが「メディア」ではありません。** 実装先モジュールをプロトコルごとに指定します。
+プロトコルとして切る理由は、**テストダブルを差し込む点**であり、12.1.2 の saga テストが成立する境界だからです。
 
-iOS 単独になっても、これらをプロトコルとして切る理由は残ります。**テストダブルを差し込む点**であり、12.1.2 の saga テストが成立する境界だからです。
+##### `Domain` のプロトコル（10 件）
+
+`Application` から `async` 関数として呼べるものだけを置きます。
 
 | プロトコル | 責務 | 実装モジュール | 使用 API |
 | --- | --- | --- | --- |
-| `PhotoPicker` | 写真選択。画像のみ | `MediaKit` | PhotosPicker |
-| `FilePicker` | カスタムスタンプ用画像の取り込み。対応形式は 8.1 に従う | `MediaKit` | `fileImporter` |
-| `ImageLoader` | 読み込み、向き正規化、検出用縮小、HEIC 対応 | `MediaKit` | Image I/O |
+| `PickedPhotoLoader` | 選択結果の読み込み、向き正規化、検出用縮小、HEIC 対応 | `MediaKit` | Image I/O |
+| `PickedFileImporter` | 取り込んだファイルのアプリ領域への複製（5.4.1） | `MediaKit` | Foundation |
 | `FaceDetector` | 顔検出。正規化座標で返す | `MediaKit` | Vision |
 | `ImageEffectRenderer` | `RenderPlan` の 4 プリミティブ実行 | `MediaKit` | Core Image |
 | `ImageEncoder` | JPEG / HEIC エンコード、メタデータ除去 | `MediaKit` | Image I/O |
 | `MediaSaver` | 写真ライブラリ保存、登録日時の指定 | `MediaKit` | PhotoKit |
-| `SharePresenter` | 共有シートの提示と結果の返却 | `MediaKit` | `UIActivityViewController`（`ShareLink` は結果を返せない。7.4.2） |
 | `StampRasterizer` | スタンプのラスタライズ（5.1.1） | `Rendering` | Core Graphics |
 | `CryptoKeyStore` | HMAC 鍵の生成と保持。**鍵のみ扱う** | `Persistence/Security` | Keychain |
 | `ProtectedBlobStore` | 署名済み状態の原子的な読み書き | `Persistence` | 保護ファイル（原子的置換） |
-| `AdPresenter` | バナー・全画面広告 | `Ads` | Google Mobile Ads |
-| `PrivacyShield` | 画面スナップショット対策（7.7） | `App` | `scenePhase` |
+| `ManagedFileStore` | 全ファイル生成の共通口（7.3.4） | `Persistence` | Foundation |
 
-`CryptoKeyStore` と `ProtectedBlobStore` を `MediaKit` へ置きません。`MediaKit` は画像の入出力に閉じた責務であり、ここへ鍵と台帳の保管を混ぜると、写真処理のテストダブルが鍵ストアまで抱えることになります。`PrivacyShield` はライフサイクルに紐づくため、`App` 側の責務です。
+##### `@MainActor` のプロトコル（2 件）
+
+UIKit のビューやコントローラを操作するため、**メインアクタへ隔離します。**
+
+```swift
+@MainActor
+protocol SharePresenter: AnyObject {
+    func share(_ file: OutputFile) async -> ShareResult
+}
+
+@MainActor
+protocol AdPresenter: AnyObject {
+    // バナー / 全画面広告
+}
+```
+
+| プロトコル | 責務 | 実装モジュール | 使用 API |
+| --- | --- | --- | --- |
+| `SharePresenter` | 共有シートの提示と結果の返却 | `MediaKit` | `UIActivityViewController`（7.4.2） |
+| `AdPresenter` | バナー・全画面広告 | `Ads` | Google Mobile Ads |
+
+`OutputDeliveryCoordinator`（`actor`）から `await` して呼びます。`@MainActor` の型はアクタによって状態が保護されるため、`Sendable` として扱えます。
+
+##### `App` が所有するもの
+
+**ピッカーは `Domain` のプロトコルにできません。**
+
+`PhotosPicker` は SwiftUI の `View`／modifier であり、`fileImporter` も modifier です。いずれも**画面上の `Binding` と提示状態**を必要とします。`Application` から呼ぶ非 UI サービスとして表現できません。
+
+| 対象 | 所有者 | 備考 |
+| --- | --- | --- |
+| `PhotosPicker` の提示 | **`App`** | 選択結果（`PhotosPickerItem`）を `Application` へ渡す |
+| `fileImporter` の提示 | **`App`** | 選択された `URL` を `Application` へ渡す |
+| `PrivacyShield` | `App` | `scenePhase` に紐づく（7.7） |
+
+`App` はピッカーの結果を `PickedPhotoInput` / `PickedFileInput` へ変換し、`Application` の Coordinator へ渡します。**読み込みそのものは `PickedPhotoLoader` / `PickedFileImporter` が行います。**
+
+```swift
+protocol PickedPhotoLoader: Sendable {
+    func load(_ input: PickedPhotoInput) async throws -> LoadedPhoto
+}
+```
+
+`CryptoKeyStore` と `ProtectedBlobStore` を `MediaKit` へ置きません。`MediaKit` は画像の入出力に閉じた責務であり、ここへ鍵と台帳の保管を混ぜると、写真処理のテストダブルが鍵ストアまで抱えることになります。
+
+#### 5.4.1 ピッカー結果の取り扱い
+
+##### `PhotosPicker`
+
+**`itemIdentifier` は `Optional` です。** `photoLibrary` を指定せずに作成した `PhotosPicker` では `nil` になります。`providerAssetKeyHash`（6.2.4）を得るため、次の指定を必須とします。
+
+```swift
+.photosPicker(
+    isPresented: $isPresented,
+    selection: $selection,
+    matching: .images,
+    preferredItemEncoding: .current,   // 可能ならトランスコードを避ける
+    photoLibrary: .shared()            // これが無いと itemIdentifier が nil になる
+)
+```
+
+**それでも `itemIdentifier` は `Optional` として扱います。** 取得できない場合は `SourceIdentity.providerAssetKeyHash` を `nil` とし、`contentFingerprint` だけで判定します（6.2.4）。
+
+`preferredItemEncoding: .current` は、**可能ならトランスコードを避ける**指定です。HEIC が JPEG へ変換される頻度が下がり、6.2.4 の `.transcoded` 経路が減ります。ただし保証ではないため、`SourceRepresentation` の記録は継続します。
+
+##### `fileImporter`
+
+**返される `URL` は security-scoped です。** 利用前にアクセスを開始し、処理後に必ず解放します。start と stop を均衡させないとカーネル資源をリークします。
+
+```swift
+let accessed = url.startAccessingSecurityScopedResource()
+defer {
+    if accessed {
+        url.stopAccessingSecurityScopedResource()
+    }
+}
+// この区間内でアプリ領域へコピーする
+```
+
+**外部の `URL` を永続保存しません。** `PickedFileImporter` がこの区間内でアプリ専用領域へコピーし、以後は自前の `fileID` で参照します（7.3.4）。ブックマークを保存して後から再アクセスする方式は採りません。カスタムスタンプは取り込み時点で複製すれば足りるためです（8.4）。
 
 ### 5.5 動画対応で追加するプロトコル（v2）
 
@@ -1088,7 +1267,7 @@ v1 では次を規則とします。
 6. `consumed >= limit` なら `Blocked(MonthlyLimitReached, limit)`
 7. それ以外は `Consume`
 
-**手順 4 を月間上限の判定より前に置きます。** 破損修復後は `consumedExportIds` が空なので、上限判定だけでは通過してしまいます。
+**判定手順 4 を月間上限の判定より前に置きます。** 破損修復後は `consumedExportIDs` が空なので、上限判定だけでは通過してしまいます。（この番号は 7.4.3 のコミット手順とは無関係です）
 
 **理由を型で分けるのは、文言が異なるためです。** 破損時に「今月の無料保存を使い切りました」と表示するのは事実に反します。
 
@@ -1685,7 +1864,7 @@ HMAC 鍵そのものが失われた、または無効化された場合（Keycha
 
 | フラグ | 参照箇所 | 効果 |
 | --- | --- | --- |
-| `monthlyBlockedPeriod` | `QuotaPolicy.evaluate` の手順 4（6.2 判定順） | 月間上限の判定より前に `Blocked(LedgerIntegrityFailure)` を返す |
+| `monthlyBlockedPeriod` | `QuotaPolicy.evaluate` の判定手順 4（6.2） | 月間上限の判定より前に `Blocked(LedgerIntegrityFailure)` を返す |
 | `trialIntegrityLocked` | `remainingCredits` の導出（6.5.6.1） | 残数を 0 とし、一括トライアル画面への進入・写真選択・認可をすべて禁止する |
 
 `monthlyBlockedPeriod` を上限判定より前に置く理由は、修復後の `consumedExportIds` が空だからです。上限判定だけでは `consumed(0) >= limit` が成立せず、そのまま通過します。
@@ -1828,6 +2007,7 @@ enum ReviewReason: Sendable, Hashable {
 
 /// 警告 1 件の同一性。理由ではなく「発生」を識別する
 struct ReviewIssueID: Sendable, Hashable {
+    let projectID: UUID                  // 写真を識別する。noFaceDetected に必須
     let detectionRevision: Int64
     let reason: ReviewReason
     let affectedFaceTrackIDs: [String]   // 辞書順にソート済み
@@ -1835,27 +2015,36 @@ struct ReviewIssueID: Sendable, Hashable {
 
 struct ReviewIssue: Sendable, Equatable {
     let id: ReviewIssueID
-    let affectedFaceTrackIDs: Set<String>
 }
 
-func triage(_ result: DetectionResult, detectionRevision: Int64) -> [ReviewIssue]
+extension ReviewIssue {
+    /// ID から導出する。二重に持たない
+    var affectedFaceTrackIDs: [String] { id.affectedFaceTrackIDs }
+}
+
+func triage(
+    _ result: DetectionResult,
+    projectID: UUID,
+    detectionRevision: Int64
+) -> [ReviewIssue]
 ```
 
 ##### 警告は発生単位で持つ
 
 **`Set<ReviewReason>` では、同じ理由を持つ複数の顔を区別できません。** これは匿名化確認の安全性に直接影響します。
 
-小さい顔が 3 人写っている写真を考えます。`Set` では `SmallFace` が 1 件に集約されるため、**1 人に手動領域を追加しただけで** `SmallFace → ManualRegionAdded` を記録でき、3 人すべてに対応したものとして `Reviewed` へ進めます。残り 2 人は隠れていません。
+小さい顔が 3 人写っている写真を考えます。`Set` では `smallFace` が 1 件に集約されるため、**1 人に手動領域を追加しただけで** `.manualRegionAdded` を記録でき、3 人すべてに対応したものとして `Reviewed` へ進めます。残り 2 人は隠れていません。
 
 `ReviewIssue` を発生単位で列挙します。
 
 | 理由 | 発生単位 |
 | --- | --- |
+| `lowConfidence` | **顔ごと**に 1 件 |
 | `smallFace` | **顔ごと**に 1 件 |
 | `extremePose` | **顔ごと**に 1 件 |
 | `faceAtEdge` | **顔ごと**に 1 件 |
 | `overlappingFaces` | **重なる顔の組み合わせごと**に 1 件 |
-| `noFaceDetected` | **写真ごと**に 1 件（対象の顔が存在しないため `affectedFaceTrackIDs` は空） |
+| `noFaceDetected` | **写真ごと**に 1 件（対象の顔が存在しないため `affectedFaceTrackIDs` は空。`projectID` で識別する） |
 
 ##### 再検出時は対応づけを試みない
 
@@ -1875,7 +2064,7 @@ v1 では対応づけを試みません。
 | --- | --- |
 | `lowConfidence` / `smallFace` / `extremePose` / `faceAtEdge` | 対象の `faceTrackID` 1 件 |
 | `overlappingFaces` | 重なる 2 件を**辞書順に並べる**（順序で別 ID にならないように） |
-| `noFaceDetected` | 空。ID は写真 ID と `detectionRevision` から生成する |
+| `noFaceDetected` | 空。`projectID` と `detectionRevision` が識別を担う |
 
 ##### 判定に使う値（v1.x からの変更）
 
@@ -2042,13 +2231,16 @@ struct ReviewDecision: Sendable, Equatable {
 ```swift
 ReviewDecision(resolutions: [
     // 1 人目の小さい顔に範囲を足した
-    ReviewIssueID(detectionRevision: rev, reason: .smallFace, affectedFaceTrackIDs: ["face-1"])
+    ReviewIssueID(projectID: pid, detectionRevision: rev, reason: .smallFace,
+                  affectedFaceTrackIDs: ["face-1"])
         : .manualRegionAdded(regionID: "region-9"),
     // 2 人目はそのままでよいと判断した
-    ReviewIssueID(detectionRevision: rev, reason: .smallFace, affectedFaceTrackIDs: ["face-2"])
+    ReviewIssueID(projectID: pid, detectionRevision: rev, reason: .smallFace,
+                  affectedFaceTrackIDs: ["face-2"])
         : .acceptedAsIs,
     // 端の顔はそのままでよいと判断した
-    ReviewIssueID(detectionRevision: rev, reason: .faceAtEdge, affectedFaceTrackIDs: ["face-5"])
+    ReviewIssueID(projectID: pid, detectionRevision: rev, reason: .faceAtEdge,
+                  affectedFaceTrackIDs: ["face-5"])
         : .acceptedAsIs,
 ])
 ```
@@ -2594,7 +2786,7 @@ GRDB（SQLite）を使います。採用理由は 3.3 に示します。
 
 **`runtime.db` を復元してはいけない理由は明確です。** `ExportCommit` を別端末へ復元しても、対応する一時ファイルは存在せず、`UsageLedger`（バックアップ対象外）との整合も失われます。復元された途端に全件が復旧エラーになります。
 
-##### 2 つの DB にまたがるトランザクションを作らない
+##### 2 つの接続に分けない
 
 **この分割は制約を生みます。** 手順 7 の単一トランザクション（7.4.3）は `OutputRecord`・`ExportRecord`・キュー状態・`Project` を同時に更新しますが、このうち `ExportRecord` と `Project` は `user-data.db` 側です。
 
@@ -2666,6 +2858,7 @@ GRDB（SQLite）を使います。採用理由は 3.3 に示します。
 **`ThisDeviceOnly` を指定するのは、鍵を別端末へ移行させないためです。** ただしこれは**アンインストール時の削除を保証しません**（7.3.1）。
 
 - `SubscriptionState`（6.3 の `Entitlement` キャッシュ）。読み込み失敗時の扱いは 6.3 に定義する
+- `RemoteConfigState`（11.3）。last-known-good と `highestAcceptedVersion`。HMAC 不一致ならバンドル既定値へ戻す
 - `UsageLedger`（6.2）。通常クォータ・grant・トライアル台帳・基準時刻を1つの署名済みオブジェクトとして原子的に置き換える。残クレジットは保存せず台帳から導出する
 
 いずれも読み込み結果は `ProtectedLoadResult`（6.2.5）で返し、**未存在・改ざん・一時障害・スキーマ不一致を区別します。** これらを 1 つの失敗にまとめると、初回起動の利用者を封鎖したり、一時障害のたびに正常な状態を上書きしたりします。
@@ -2771,14 +2964,20 @@ GRDB（SQLite）を使います。採用理由は 3.3 に示します。
 | `tmp/processing/` | **対象外** | 復元しても意味がない |
 | `Library/Application Support/outputs/` | **対象外** | 24 時間で消えるもの。端末移行後に復元しても期限切れ |
 | `tmp/raster/` | **対象外** | `render` 呼び出し内でのみ有効（5.1.2） |
+| `Library/Caches/stamp-thumbnails/` | **対象外** | `StampAsset` から再生成できるキャッシュ（7.3.5） |
 | `Library/Application Support/protected/` | **対象外** | HMAC 鍵と寿命を揃えるため（6.2.5） |
 | `Library/Application Support/runtime.db` | **対象外** | 復元しても整合しない（7.1） |
 | `Library/Application Support/stamps/` | **16 節で決定するまで未確定** | 利用者が作った資産であり、失われると再作成が必要 |
+| `Library/Application Support/thumbnails/` | **`user-data.db` と同一**（16 節で決定） | 履歴の実体。DB だけ復元しても空の画像が並ぶ（7.3.5） |
 | `Library/Application Support/user-data.db` | **16 節で決定するまで未確定** | 履歴と設定。スタンプと方針を揃える |
 
-除外の指定は各パスへ `URL.setResourceValues` で `isExcludedFromBackup = true` を設定します。**ディレクトリ単位で設定し、その配下に作るファイルへ個別指定を要しない構成**にします。ファイルごとに設定すると、新しく作ったファイルへの設定漏れが起きます。
+除外の指定は各パスへ `URL.setResourceValues` で `isExcludedFromBackup = true` を設定します。
 
-**スタンプと `user-data.db` の方針を揃えます。** `StampAsset` のメタデータは `user-data.db` にあり、実体は `stamps/` にあります。片方だけ復元されると、参照はあるが実体が無い状態（またはその逆）になります。16 節では 2 つをまとめて決めます。
+**ディレクトリへ一度設定すれば足りる、とは考えません。** Apple は `isExcludedFromBackup` について、一般的なファイル操作で値が `false` へ戻りうるため、**ファイルを保存するたびに設定する**よう明記しています。`ProtectedBlobStore` は `replaceItemAt` で置換するため、特にこれに該当します。
+
+**すべてのファイル生成を `ManagedFileStore` へ通します**（7.3.4）。ディレクトリ単位の設定は保険であり、保証ではありません。
+
+**`user-data.db` / `stamps/` / `thumbnails/` の 3 つをまとめて決めます。** メタデータは `user-data.db` にあり、実体は `stamps/` と `thumbnails/` にあります。片方だけ復元されると、参照はあるが実体が無い状態（またはその逆）になります。
 
 #### 7.3.2 再インストール後に鍵だけが残る場合
 
@@ -2813,10 +3012,15 @@ GRDB（SQLite）を使います。採用理由は 3.3 に示します。
 | 未受け渡し出力（`outputs/`） | **`.complete`** |
 | ラスタ一時ファイル（`tmp/raster/`） | **`.complete`** |
 | カスタムスタンプ実体（`stamps/`） | **`.complete`** |
+| 履歴サムネイル（`thumbnails/`） | **`.complete`** |
 | `runtime.db` / `user-data.db` | `.completeUntilFirstUserAuthentication` |
 | `ProtectedBlobStore` | `.completeUntilFirstUserAuthentication` |
 
-指定は `FileProtectionType` を `FileManager` の属性として設定します。**ディレクトリ単位で設定し、配下に作るファイルへ個別指定を要しない構成**にします（7.3.1 のバックアップ除外と同じ理由）。
+指定は `FileProtectionType` を `FileManager` の属性として設定します。**バックアップ除外と同じく、ファイル生成のたびに設定します**（7.3.4）。
+
+**アプリ全体の既定を `.completeUntilFirstUserAuthentication` にし、画像系ファイルだけ `.complete` へ上書きします。** 既定を低いままにして個別に引き上げる構成だと、設定漏れが「保護が弱い」方向へ倒れます。既定を上げておけば、漏れても最低限の保護が残ります。
+
+**SQLite は DB 本体だけでは足りません。** rollback journal、super-journal、一時 DB ファイルにも同じ保護が必要です。これらは SQLite が自動生成するため、**ディレクトリの既定保護クラス**で覆う必要があります。ここでも既定を `.completeUntilFirstUserAuthentication` にしておくことが効きます。
 
 ##### なぜ DB を `.complete` にしないか
 
@@ -2838,7 +3042,69 @@ GRDB（SQLite）を使います。採用理由は 3.3 に示します。
 
 `.complete` のファイルを欠損と誤認すると、**7.4.3 のロールバックが走って会計を戻します。** 実際には出力は無事なので、消費だけが取り消されて出力が残る、あるいは無事な出力が削除されます。
 
-`NSFileReadNoPermissionError` / `EPERM` を保護データ利用不可として識別し、`AppError` に専用のコードを設けます（9.1）。
+##### 保護データの利用可否は状態で判定する
+
+**エラーコードだけで判断しません。** `NSFileReadNoPermissionError` / `EPERM` は他の原因でも返りえます。
+
+| 手段 | 用途 |
+| --- | --- |
+| `UIApplication.isProtectedDataAvailable` | **アクセス前に**利用可否を確認する |
+| `protectedDataDidBecomeAvailableNotification` | ロック解除後に**処理を再開する** |
+| `protectedDataWillBecomeUnavailableNotification` | 進行中の処理を安全な位置で止める |
+| `NSFileReadNoPermissionError` / `EPERM` | 上記で捕捉できなかった場合の**補助的な**判定 |
+
+`isProtectedDataAvailable` が `false` の間は `.complete` のファイルへアクセスせず、通知を待ちます。**エラーを受けてから判断する経路を主にしません。** 一度でも誤って欠損と判定すればロールバックが走るためです。
+
+`AppError` に保護データ利用不可の専用コードを設けます（9.1）。このエラーは**再試行可能**として分類し、利用者には「端末のロックを解除してください」と提示します。
+
+#### 7.3.4 ManagedFileStore
+
+**ファイル生成を 1 か所へ集約します。** バックアップ除外と保護クラスを、生成のたびに確実に設定するためです。
+
+`Domain` がプロトコルを定義し、`Persistence` が実装します。
+
+| 順 | 操作 |
+| --- | --- |
+| 1 | 一時ファイルへ書く |
+| 2 | atomic rename / `replaceItemAt` で最終 URL へ移す |
+| 3 | **最終 URL へ `isExcludedFromBackup` を設定する**（該当する場合） |
+| 4 | **最終 URL へ `FileProtectionType` を設定する** |
+| 5 | 属性を**読み返して検証する** |
+| 6 | 検証に失敗したら**完成扱いにしない**（一時ファイルとして残し、GC 対象とする） |
+
+**手順 3 と 4 を rename の後に行います。** `replaceItemAt` は置換先の属性を引き継ぐとは限らないため、置換前に設定しても意味がありません。
+
+**手順 5 の読み返しを省きません。** 設定が反映されなかった場合、次回起動まで気づけません。1 ファイルあたりの属性読み取りは軽く、書き出しの所要時間に影響しません。
+
+対象は次のすべてです。**個別に `FileManager` を呼ぶ実装を許しません。**
+
+- 処理中の一時ファイル
+- 未受け渡し出力
+- ラスタスタンプ一時ファイル
+- カスタムスタンプ実体
+- 履歴サムネイル（7.3.5）
+- `ProtectedBlobStore` の blob
+
+SQLite のファイル群は GRDB が生成するため `ManagedFileStore` を通せません。ディレクトリの既定保護クラスで覆い、起動時に DB ファイルの属性を検証します。
+
+#### 7.3.5 履歴サムネイル
+
+**7.2.3 の容量上限 200MB は加工後サムネイルを対象としていますが、その保存先が定義されていませんでした。**
+
+| 項目 | 規約 |
+| --- | --- |
+| ディレクトリ | `Library/Application Support/thumbnails/` |
+| 参照 | ファイル名ではなく **`thumbnailFileID`**（`Project` が保持） |
+| 保護クラス | **`.complete`**（加工後とはいえ顔を含む画像） |
+| バックアップ | **`user-data.db` と同一**（16 節で決定するまで未確定） |
+| 生成 | `ManagedFileStore` を通す（7.3.4） |
+| 削除 | `Project` 削除と**同じ DB トランザクション**で `PendingFileDeletion` へ追加（7.5.1） |
+| 孤児 GC | 起動時に `Project` から参照されない実体を回収（8.4.1） |
+| 復元時に実体が無い | サムネイルなしのプレースホルダを表示する。**履歴自体は消さない** |
+
+**バックアップ方針を `user-data.db` と揃えるのが要点です。** DB だけ復元されてサムネイルが無ければ、履歴一覧が空の画像で埋まります。逆にサムネイルだけ復元されても参照先がありません。7.3.1 の表で「まとめて決める」としたのはこのためです。
+
+`CustomStamp` の一覧サムネイルは、**`StampAsset` の実体から再生成できるキャッシュ**として扱います。バックアップ対象外とし、欠損時は実体から作り直します。履歴サムネイルと違い、元データが手元にあるためです。
 
 ### 7.4 原子的書き出しと受け渡し
 
@@ -3246,7 +3512,7 @@ protocol UsageLedgerStore: Sendable {
 したがって、次はいずれも成立しません。
 
 - `actor UsageLedgerStore` にすれば `transact` 全体が直列化される
-- `actor ExportStartGate` にすれば `withPermit` の `operation` 全体がロックされる
+- `actor ExportStartGate` にすれば `withExclusivePermit` の `operation` 全体がロックされる
 
 `transact` は「台帳を読む → 変換する → **署名してファイルへ保存する**」であり、保存が `await` を含みます。その中断点で次の `transact` が入れば、更新が失われます。**`actor` は本設計が要求する排他をそのままでは満たしません。**
 
@@ -3272,9 +3538,39 @@ actor FileUsageLedgerStore: UsageLedgerStore {
 
 **`transact` は、読み込みから書き込み完了まで、別の `transact` を進めません。** ファイル保存中の `await` をまたいでも次の台帳処理を開始しません。
 
-`ExportStartGate` も同じ構造です。permit を `held` 集合へ登録し、**`await operation()` の間も維持します。** `withPermit` から復帰するまで、同じ `sourceID` の要求は待機します。
+`ExportStartGate` も同じ構造です。permit を保持したまま **`await operation()` を実行します。** `withExclusivePermit` から復帰するまで、次の要求は待機します。
 
 **「`actor` にしたから安全」という記述は、本設計では誤りです。** actor が保証するのは actor 内部の可変状態への同時アクセスが無いことだけであり、複数の `await` をまたぐ論理的なクリティカルセクションではありません。
+
+##### キャンセルを扱う
+
+**`CheckedContinuation` だけではキャンセルを解除できません。**
+
+利用者が待機中の写真をキャンセルしても、continuation はキューに残ります。前の処理が終わると resume され、**キャンセル済みのタスクが permit を取得して書き出しを開始します。** 結果としてキャンセル後にクォータやトライアルを消費します。
+
+| 規則 | 内容 |
+| --- | --- |
+| waiter の識別 | 各 waiter へ **`UUID`** を割り当てる |
+| キャンセル時 | **`withTaskCancellationHandler`** でキューから該当 waiter を除去し、`CancellationError` で resume する |
+| permit 取得直後 | **`try Task.checkCancellation()`** |
+| 認可の直前 | **もう一度 `try Task.checkCancellation()`**（待機中に取り消された場合を捕捉） |
+| 解放 | `defer` で必ず行う。キャンセル経路でも解放される |
+
+**チェックを 2 回入れます。** permit 取得直後だけだと、その後の `transact` 開始までの間にキャンセルされた場合を拾えません。認可の直前が最後の安全な中断点です。
+
+##### キャンセルの境界
+
+**どこまでならキャンセルで消費が発生しないかを定めます。**
+
+| 時点 | 扱い |
+| --- | --- |
+| 手順 4 より前 | **ロールバック。消費なし** |
+| 手順 4 以降・最終確定（手順 7）より前 | **暫定会計を取り消してロールバック**（7.4.3 のロールバック手順） |
+| 手順 7 の完了後 | **キャンセルではなく破棄として扱う。** 枠は戻さない（6.2.2.4） |
+
+3 行目が要点です。手順 7 が完了した時点で成果物は公開されており、正常生成が確定しています。ここから先の「キャンセル」は、利用者から見れば**出力の破棄**です。6.2.2.4 の「破棄しても消費は戻らない」と同じ扱いにします。
+
+UI 上も、手順 7 の完了後は「キャンセル」ではなく「破棄」と表示します。取り消せるかのような文言にしません。
 
 **更新後の台帳だけを返す API では足りません。** 同じ排他区間の中で次も取り出す必要があります。台帳を外側で読んで結果を計算してから `update` すると、競合が再発します。
 
@@ -3567,6 +3863,7 @@ enum PayloadType: UInt32, Sendable {
     case usageLedger = 1
     case subscriptionState = 2
     case exportCommit = 3
+    case remoteConfigState = 4    // 11.3
 }
 
 struct SignedPayload: Sendable {
@@ -3586,7 +3883,7 @@ struct SignedPayload: Sendable {
 - 検証はバイト列の**定数時間比較**で行う
 - マイグレーション時は旧形式で検証してから新形式で再署名する
 
-**`payloadType` を含めないと、種別をまたいだ付け替えを検出できません。** 3 種のデータが同じ鍵で署名されているため、署名だけを見れば有効な `SubscriptionState` の blob を `UsageLedger` の保存先へ置いても検証を通ります。復号ではなく検証しかしていないため、内容の構造が偶然パースできれば通過します。
+**`payloadType` を含めないと、種別をまたいだ付け替えを検出できません。** 4 種のデータが同じ鍵で署名されているため、署名だけを見れば有効な `SubscriptionState` の blob を `UsageLedger` の保存先へ置いても検証を通ります。復号ではなく検証しかしていないため、内容の構造が偶然パースできれば通過します。
 
 ##### 正準形は専用エンコーダで作る
 
@@ -3834,11 +4131,25 @@ EXIF の撮影日時を一律に削除すると、加工後の写真がすべて
 | 撮影機器情報を削除 | ON | 可 |
 | コメント・編集ソフト情報を削除 | ON | 可 |
 | EXIF の撮影日時を保持 | ON | 可（OFF にすると日時も削除） |
-| **写真ライブラリの登録日時を元画像から引き継ぐ** | **常時 ON** | **不可** |
+| **写真ライブラリの登録日時を元画像から引き継ぐ** | **常時 ON**（取得できる場合） | **不可** |
 
 最後の 1 行が要点です。`PHAssetCreationRequest.creationDate` は保存時に明示指定できるため、**EXIF から日時を消しても、ライブラリ側の日時を引き継げば並び順は保たれます**。
 
 これにより、プライバシーを最優先して EXIF 日時を削除した利用者でも、写真アプリ内の並び順は崩れません。外部へファイルを共有した場合のみ日時が失われます。
+
+##### 引き継ぐ日時が無い場合
+
+**`PHAsset.creationDate` は `Optional` です。** 「常に引き継ぐ」は成立しません。優先順位を定めます。
+
+| 順 | 取得元 |
+| --- | --- |
+| 1 | `PHAsset.creationDate` |
+| 2 | EXIF の `DateTimeOriginal` |
+| 3 | **どちらも無ければ `creationDate` を設定しない**（OS が保存日時を使う） |
+
+**3 の場合に現在時刻を明示指定しません。** 設定しないのと同じ結果になりますが、「日時を引き継いだ」と記録が残ると、あとから不具合を追うときに誤解の元になります。取得できなかったことを `LogValue` の区分値として記録します（9.2）。
+
+この優先順位は 6.2.4 の `capturedAt` と同じです。実装を共有します。
 
 画像方向とピクセルサイズは常に保持します。
 
@@ -3860,7 +4171,7 @@ Standard および Pro で利用可能とします（仕様 12.4）。
 
 | 項目 | 仕様 |
 | --- | --- |
-| 取り込み元 | 写真ライブラリ、およびファイルアプリ（`FilePicker`） |
+| 取り込み元 | 写真ライブラリ、およびファイルアプリ（`fileImporter`。5.4.1） |
 | 対応形式 | PNG、JPEG、HEIF / HEIC |
 | 透過 PNG | 透過状態を維持する |
 | 非透過画像 | 円形または角丸マスクで切り抜く |
@@ -4069,7 +4380,7 @@ Sentry Cocoa SDK は `Domain` が定義する `CrashReporter` プロトコルの
 
 ## 10. 分析
 
-仕様 28.2 のイベント名をそのまま sealed class 化します。
+仕様 28.2 のイベント名をそのまま `enum AnalyticsEvent: Sendable` として表現します。
 
 仕様 28.3 の禁止項目（元ファイル名、ファイルパス、写真ライブラリ ID、正確な顔座標、画像ハッシュ、SNS アカウント名、カスタムスタンプ画像、写真・動画の内容、音声内容）について、経路ごとに保証の根拠が異なります。
 
@@ -4182,6 +4493,39 @@ struct RemoteConfigEnvelope: Sendable, Decodable {
 
 **期限切れで機能停止フラグだけを残すのは、それが障害対応の手段だからです。** サーバーが落ちている間に機能停止を解除してしまうと、止めたかった機能が動きます。逆に上限値や閾値は、古い値を使い続けるより既定値のほうが安全です。
 
+##### キャッシュを保護する
+
+**last-known-good を平文で保存すると、防御が成立しません。**
+
+リモート設定は無料枠、トライアル枚数、一括上限、スタンプ上限、広告頻度、強制更新、機能停止を変更できます。**キャッシュを `UserDefaults` や平文ファイルへ置けば、利用者が値を書き換えて無料枠を増やせます。** `UsageLedger` を HMAC で保護しても、判定に使う上限値そのものが改変可能なら意味がありません。
+
+**`ProtectedBlobStore` へ保存します**（6.2.5 と同じ HMAC 保護）。
+
+```swift
+struct RemoteConfigState: Sendable {
+    let highestAcceptedVersion: Int64
+    let lastKnownGood: RemoteConfigEnvelope
+}
+```
+
+| 規則 | 内容 |
+| --- | --- |
+| 保存 | HTTPS 取得と検証に成功した後、HMAC 付きで保存する |
+| 署名対象 | **`highestAcceptedVersion` も含める**（バージョンだけ下げる改変を防ぐ） |
+| `payloadType` | `remoteConfigState` を追加する（7.4.3） |
+| HMAC 不一致 | **バンドル既定値へ戻す。** 改変された値で動かさない |
+| `expiresAt` の判定 | **`effectiveNow` を使う**（6.2.2.5。端末時計を進めて期限切れを装わせない） |
+| `appStoreID` | **数字のみの形式検証**（6.8.7。任意の URL を差し込ませない） |
+| 強制更新 | **キャッシュの改変から `.required` を発生させない。** HMAC 不一致なら既定値＝更新なし（6.8.3） |
+
+**最後の行が重要です。** キャッシュを書き換えて `minimumSupportedVersion` を上げれば、他人の端末でアプリを止められます。HMAC 不一致を既定値へ倒すことで、改変は「更新なし」にしかなりません。
+
+##### サーバー側の署名は v1 の範囲外
+
+**上記が守るのは端末上の改変までです。** CDN やバックエンドの侵害には対応しません。
+
+対応するには、サーバーが設定へ Ed25519 で署名し、公開鍵をアプリへ埋め込む方式が必要です。v1 では実装せず、**脅威モデルとして範囲外**と記録します（7.4.3 の HMAC 脅威モデルと同じ扱い）。設定の内容が枠数と表示に限られ、金銭や個人情報へ直結しないためです。
+
 ##### リモート設定で変更できないこと
 
 **次はリモート設定から無効化できません。** 安全性の中核であり、サーバー側の事故や侵害で外せる状態にしません。
@@ -4285,6 +4629,15 @@ struct RemoteConfigEnvelope: Sendable, Decodable {
 - **`isSameSource` を直接使わず、`sourceID` で同一性を判定していること**（6.2.4）
 - **provider 一致と content 一致が別レコードを指す場合に、1 件へ統合されること**（6.2.4）
 - **統合時に最も古い `firstSuccessAt` が維持され、トライアルが消費済みへ倒れること**（6.2.4）
+- **`SourceRecord` が grant / trial / reservation / lease のどれからも参照されなくなった場合だけ削除されること**（6.2.4）
+- **`paidUnlimited` の書き出し中に `SourceRecord` が GC されないこと**（`SourceLease` が効いていること。6.2.4）
+- **`ReviewIssueID` が `projectID` を含み、同じ revision の別写真の `noFaceDetected` が別 ID になること**（6.5.2）
+- **`affectedFaceTrackIDs` が ID から導出され、二重に保持されないこと**（6.5.2）
+- **`opacity = 0` / `cellSizePx < 1` / `sigmaPx = 0` / 幅 0 の領域が `throw` されること**（5.2）
+- **`NaN` や無限大の座標が `throw` されること**（5.2）
+- **完全に透明なカスタムスタンプ画像が取り込み時に拒否されること**（5.2 / 8.1）
+- **`isMasked == true` の顔に no-op 相当の値が渡されたとき `compileRenderDraft` が `throw` すること**（5.2）
+- **`evaluateUpdate` が `appStoreID` の数字のみ形式を検証すること**（11.3）
 - **`DetectedFace` の角度が非 Optional であり、`Measurement<UnitAngle>` から度へ変換されること**（5.7.1）
 - **`lowConfidence` が顔ごとに 1 件の `ReviewIssue` になること**（6.5.2）
 - **6 種類の要確認理由すべてについて、単独・複合・空の判定が正しいこと**（6.5.2）
@@ -4351,7 +4704,7 @@ struct RemoteConfigEnvelope: Sendable, Decodable {
 - `Prepared` / `FileVerified` / `Finalizing` / `AccountingCommitted` / `ReadyToPublish` のいずれからもコミット行が最終的に消えること（7.4.3）
 - 復旧が終わるまで新しい書き出しを開始できないこと（7.4.3）
 - `ExportCommit` の署名検証失敗が復旧エラーになり、自動破棄されないこと（7.4.3）
-- 復旧エラーを「破棄して続ける」で解除でき、台帳が変更されないこと（7.4.3）
+- 復旧エラーを「破棄して続ける」で解除でき、予約が `TrialEntry` へ確定した上でコミットが削除されること（7.4.3）
 - 手順 4 と 5 の間で中断しても、台帳更新を冪等に再適用できること（7.4.3）
 - `finalizedAt` が `Finalizing` の保存時点で決まり、`FileVerified` では `null` であること（7.4.3）
 - 中断して復旧した場合、月跨ぎの有無にかかわらず新しい `finalizedAt` で再適用されること（7.4.3）
@@ -4365,7 +4718,6 @@ struct RemoteConfigEnvelope: Sendable, Decodable {
 - 開始後に契約が失効しても、その書き出しは開始時の権限で完了すること（7.4.3）
 - 失効時、`Prepared` 以降の写真は完了し `waiting` の写真は開始しないこと（7.4.3）
 - 月間枠の対象となる単体書き出しが同時に 1 件までに制限されること（7.4.3）
-- 開始ゲートが `requiresMeteredSingleExportGate` で取得され、認可前に決定できること（7.4.3）
 - 開始ゲートにより、認可から `Prepared` までの間に同一素材 の別書き出しが割り込めないこと（7.4.3）
 - 同一素材 の非終端コミットが同時に 1 件までに制限されること（7.4.3）
 - 素材のロックがコミット行削除まで保持されること（7.4.3）
@@ -4432,7 +4784,10 @@ struct RemoteConfigEnvelope: Sendable, Decodable {
 - クリップが回転の後に行われ、キャンバス端の回転領域が露出しないこと（5.2.1）
 - 背景処理が顔エフェクトより先に適用されること（5.2.1）
 - 重なり時に後のエフェクトが加工済み画像へ作用すること（5.2.1）
-- Vision の左下原点座標が左上原点へ変換され、角度の nil が保持されること（5.2.1 / 5.7.1）
+- Vision の左下原点座標が左上原点へ変換されること。角度が `Measurement<UnitAngle>` から度へ変換されること（5.2.1 / 5.7.1）
+- `Domain` の `PixelRect` が Core Image の Cartesian 矩形へ正しく変換されること。上端のみ・下端のみに顔がある素材で上下が入れ替わらないこと（5.2.1）
+- `CIAffineClamp` を経ることで、画像端の顔のぼかしが薄くならないこと（5.2.1）
+- `extent` の原点が `(0, 0)` でない `CIImage` でも座標がずれないこと（5.2.1）
 - `plan` が参照する `bitmapID` が `rasterAssets` に無い場合、描画を開始せずエラーになること（5.1.2）
 - 同一 `StampRasterKey` のラスタライズが 1 回で済み、複数領域から再利用されること（5.1.2）
 - `RasterizedStampAsset` の `bitmapID` スコープが `render` 呼び出し内に閉じ、並列レンダリングで衝突しないこと（5.1.2）
@@ -4690,7 +5045,7 @@ Web モックである以上、以下は本書の記述どおりには再現で�
 
 1. プロジェクト基盤（Xcode プロジェクトと SwiftPM ローカルパッケージの骨格、CI、SwiftLint、`swift test` の実行基盤）
 2. ドメイン層（`QuotaPolicy`、`EntitlementResolver`、`BatchTriagePolicy`、`compileRenderDraft`、キーフレーム補間、`ExportQueue`）
-3. プラットフォーム層（12 プロトコルの実装と適合テスト）。**モジュールは責務ごとに分ける**（下表）。`SharePresenter` は結果写像を先に定義してから実装する（7.4.2）
+3. プラットフォーム層（`Domain` の 10 プロトコル、`` の 2 プロトコル、`App` 所有のピッカーの実装と適合テスト）。**モジュールは責務ごとに分ける**（下表）。`SharePresenter` は結果写像を先に定義してから実装する（7.4.2）
 4. 永続化とコミットジャーナル（GRDB、2 DB 構成と `ATTACH`、`ProtectedBlobStore`、`CryptoKeyStore`、障害注入テスト基盤）
 5. 編集フロー UI（detect / effect / export / processing / done）
 6. 課金と権限（RevenueCat、Paywall、復元、`SubscriptionState` の読み込み失敗経路）
@@ -4702,15 +5057,15 @@ Web モックである以上、以下は本書の記述どおりには再現で�
 
 **サブプロジェクト 4 を独立させます。** コミットジャーナルは本設計で最も密度が高く、実機の障害注入テストを伴います。UI と並行して進めると、どちらの不具合か切り分けられません。
 
-サブプロジェクト 3 の内訳は次のとおりです。**12 プロトコルをすべて `MediaKit` へ実装しません**（5.4）。
+サブプロジェクト 3 の内訳は次のとおりです。**すべてを `MediaKit` へ実装しません**（5.4）。
 
 | モジュール | プロトコル |
 | --- | --- |
-| `MediaKit` | `PhotoPicker` / `FilePicker` / `ImageLoader` / `FaceDetector` / `ImageEffectRenderer` / `ImageEncoder` / `MediaSaver` / `SharePresenter` |
+| `MediaKit` | `PickedPhotoLoader` / `PickedFileImporter` / `FaceDetector` / `ImageEffectRenderer` / `ImageEncoder` / `MediaSaver` / `SharePresenter`（MainActor） |
 | `Rendering` | `StampRasterizer` |
-| `Persistence` | `ProtectedBlobStore`、GRDB、ファイル管理 |
+| `Persistence` | `ProtectedBlobStore`、`ManagedFileStore`、GRDB、ファイル管理 |
 | `Persistence/Security` | `CryptoKeyStore` |
 | `Ads` | `AdPresenter` |
-| `App` | `PrivacyShield` |
+| `App` | `PrivacyShield`、`PhotosPicker` / `fileImporter` の提示（5.4） |
 
 各サブプロジェクトは個別に spec → plan → 実装のサイクルを回します。
