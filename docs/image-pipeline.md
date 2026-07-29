@@ -314,18 +314,84 @@ struct EffectOpacity: Sendable, Equatable {
 }
 ```
 
-| 型 | 条件 |
-| --- | --- |
-| `EffectOpacity` | 有限かつ **`0 < v <= 1`** |
-| `MosaicRatio` / `BlurRatio` | 有限かつ `0 < v <= 上限` |
-| `PixelSize` | `width > 0` かつ `height > 0` |
-| `PixelRect` / `NormalizedRect` | すべて有限。`left < rightExclusive`、`top < bottomExclusive` |
-| `CellSizePx` | **`>= 2`**（1px のモザイクは元画像と同じ） |
-| `SigmaPx` | `> 0` |
-| `FeatherPx` | `>= 0`（境界のぼかしは匿名化の強度に影響しない） |
-| `RotationDegrees` | 有限 |
-| `VisibleColor` | **アルファが 0 より大きい** |
-| カスタムスタンプ画像 | 最大アルファ値が 0 なら取り込み時に拒否する |
+| 型 | 表現 | 条件 |
+| --- | --- | --- |
+| `EffectOpacity` | `Double` | 有限かつ **`0 < v <= 1`** |
+| `MosaicRatio` | `Double` | 有限かつ `0 < v <= 0.5`（領域短辺に対する比） |
+| `BlurRatio` | `Double` | 有限かつ `0 < v <= 0.5`（同上） |
+| `FeatherRatio` | `Double` | 有限かつ `0 <= v <= 0.5` |
+| `PixelSize` | `Int` × 2 | `width > 0` かつ `height > 0` |
+| `PixelRect` | `Int` × 4 | `left < rightExclusive`、`top < bottomExclusive` |
+| `NormalizedRect` | `Double` × 4（`left` / `top` / `rightExclusive` / `bottomExclusive`） | すべて有限。`left < rightExclusive`、`top < bottomExclusive`。**画像外へのはみ出しは許す** |
+| `CellSizePx` | `Int` | **`>= 2`**（1px のモザイクは元画像と同じ） |
+| `SigmaPx` | `Double` | 有限かつ `> 0` |
+| `FeatherPx` | `Double` | 有限かつ `>= 0`（境界のぼかしは匿名化の強度に影響しない） |
+| `RotationDegrees` | `Double` | 有限。**`[0, 360)` へ正規化してから保持する** |
+| `VisibleColor` | `UInt32`（RGBA 各 8 bit） | **アルファが 0 より大きい** |
+| カスタムスタンプ画像 | — | 最大アルファ値が 0 なら取り込み時に拒否する |
+
+列挙型です。
+
+```swift
+enum MaskShape: Sendable, Hashable {
+    case ellipse
+    case circle
+    case rectangle
+    case rounded(cornerRatio: CornerRatio)
+}
+
+/// 角丸の半径。領域短辺に対する比
+struct CornerRatio: Sendable, Hashable {
+    let value: Double            // 有限かつ 0 < v <= 0.5
+
+    init(_ value: Double) throws {
+        guard value.isFinite, value > 0, value <= 0.5 else {
+            throw RenderValidationError.invalidCornerRatio
+        }
+        self.value = value
+    }
+}
+
+enum RegionOrigin: Sendable, Hashable {
+    case auto      // Vision による検出
+    case manual    // 利用者が追加した領域
+}
+
+enum RenderValidationError: Error, Sendable, Equatable {
+    case invalidOpacity
+    case invalidRatio
+    case invalidCornerRatio
+    case invalidPixelSize
+    case invalidRect
+    case invalidCellSize
+    case invalidSigma
+    case invalidFeather
+    case nonVisibleColor
+    case emptyRegion
+    case unresolvedStampAsset      // bindRasterAssets で asset が欠けた
+    case sourceCropOutOfBounds
+}
+
+/// 顔ごとの隠し方の設定。RenderRegionSpec の生成元
+struct EffectSetting: Sendable, Equatable {
+    let op: RenderOpSpec
+    let shape: MaskShape
+    let featherRatio: FeatherRatio
+    let expansion: ExpansionRatios
+}
+
+/// 顔矩形からの拡張率（仕様 8.4）
+struct ExpansionRatios: Sendable, Equatable {
+    let top: Double        // 有限かつ >= 0
+    let bottom: Double
+    let leading: Double
+    let trailing: Double
+}
+```
+
+**`cornerRatio` を生の `Double` にしません。** `NaN`・負数・1 を超える値がそのまま Core Graphics へ渡ると、描画結果が未定義になります。他の比率と同じく検証済みの値型にします。
+
+**`RotationDegrees` を正規化して保持します。** `370` と `10` が別の値として `ProjectSettingsHash` に入ると、見た目が同じでも「設定を変えた」と判定されます。
 
 **検証を迂回できないようにします。** Swift は `struct` へ memberwise initializer を自動生成するため、同一モジュール内からは検証を飛ばせます。
 
@@ -618,7 +684,7 @@ struct OutputFile: Sendable {
 | 実体の参照 | **`ManagedFileRef` のみ。** `URL` もパス文字列も持たない |
 | 向き | `ImageSource` を作れる時点で正規化済み。**未正規化を表す case を持たない** |
 | 寸法 | すべて向き正規化後の値。`compileRenderDraft` の `sourceSize` はここから取る |
-| メタデータ | 境界型は EXIF を保持しない。`ImageEncoder` が `ExportSetting` に従って付与する |
+| メタデータ | `ImageSource` / `RenderedImage` / `OutputFile` は EXIF を保持しない。読み取った撮影日時は `LoadedPhoto.capture`（`OriginalCaptureMetadata`）が持ち、書き出しでは `ImageEncoder` が `OutputMetadata` に従って付与する |
 
 **`OutputFile` に `suggestedCreationDate` を持たせるのは、`MediaSaver` が `PHAssetCreationRequest.creationDate` を設定するために必要だからです。** 取得できなかった場合は `nil` とし、`MediaSaver` は `creationDate` を設定しません（5 章）。
 
@@ -815,12 +881,17 @@ struct WorkingSourceRecord: Sendable {
 | --- | --- | --- | --- |
 | 1 | `PickedPhotoInput.importedFile` の**所有権を受け取る**（以降の削除責務は Saga 側） | — | ファイルを削除して選択を失敗として返す |
 | 2 | `contentFingerprint` と EXIF を読む | — | 同上 |
-| 3 | **向きを正規化した原寸ファイルを作成する** | ファイルシステム | 手順 7 へ |
-| 4 | **台帳トランザクションで `ProjectSourceSnapshot` を保存する** | ProtectedBlobStore | 手順 7 へ |
-| 5 | **DB トランザクションで `Project`・キュー項目・`WorkingSourceRecord`（正規化ファイルを指す）を作成する** | DB | 手順 6 へ |
-| 6 | 手順 5 が失敗したら、**snapshot を補償削除する** | ProtectedBlobStore | 起動時 GC へ委ねる |
-| 7 | 失敗したら、作成済みのファイルを削除するか `PendingFileDeletion` へ追加する | ファイルシステム | 起動時 GC へ委ねる |
-| 8 | **手順 5 の完了後にのみ、選択処理の成功を呼び出し元へ返す** | — | — |
+| 3 | **向きを正規化した原寸ファイルを作成し、その SHA-256 とサイズを測る** | ファイルシステム | 手順 8 へ |
+| 4 | **台帳トランザクションで `ProjectSourceSnapshot` と `WorkingSourceBinding` を保存する** | ProtectedBlobStore | 手順 8 へ |
+| 5 | **DB トランザクションで `Project`・キュー項目・`WorkingSourceRecord`（正規化ファイルを指す）を作成する** | DB | 手順 7 へ |
+| 6 | **取り込みファイルを削除する。** 削除に失敗したら `PendingFileDeletion` へ積む | ファイルシステム | 起動時 GC へ委ねる |
+| 7 | 手順 5 が失敗したら、**snapshot と binding を補償削除する** | ProtectedBlobStore | 起動時 GC へ委ねる |
+| 8 | 失敗したら、作成済みのファイル（取り込み・正規化の両方）を削除するか `PendingFileDeletion` へ追加する | ファイルシステム | 起動時 GC へ委ねる |
+| 9 | **手順 5 の完了後にのみ、選択処理の成功を呼び出し元へ返す** | — | — |
+
+**手順 6 を DB 確定の後に置きます。** 先に消すと、手順 5 が失敗したときに再試行できません。DB が確定していれば、取り込みファイルはもう誰からも参照されないため、残っても孤児 GC が回収します。
+
+**取り込みファイルを残しません。** 正規化後の原寸があれば処理は成立し、取り込みファイル（未加工の顔画像）を端末へ二重に置く理由がありません。
 
 **snapshot を DB より先に保存します。** 逆順にすると「DB 行はあるが identity が無い」状態が生まれ、その `Project` は `sourceID` を解決できません。この順なら、余るのは「snapshot はあるが `Project` が無い」状態だけです。
 
@@ -845,7 +916,7 @@ struct WorkingSourceRecord: Sendable {
 | EXIF 由来の撮影日時 | `suggestedCreationDate` を組み立てられない |
 | 写真ライブラリの登録日時 | 同上 |
 
-**正規化済みファイルから再計算できません。** `contentFingerprint` は取り込みファイルから計算する規約であり、正規化後から計算すれば別物になります。取り込みファイルは手順 5 で削除済みです。
+**正規化済みファイルから再計算できません。** `contentFingerprint` は取り込みファイルから計算する規約であり、正規化後から計算すれば別物になります。取り込みファイルは手順 6 で削除済みです。
 
 **これらを未署名の DB 行へ置けません。** `SourceIdentity` はクォータとトライアルの認可に使うため、**書き換えれば「別素材」を装って無料枠を回避できます。**
 
@@ -881,24 +952,40 @@ struct WorkingSourceRecord: Sendable {
 
 ##### 再選択後の Saga
 
-**`paused(.sourceReselectionRequired)` から再開する経路を定めます。** 定めないと、別の写真を選び直しても**以前の顔座標・`ReviewIssue`・`ReviewDecision`・`PreviewConfirmation` を保持したまま再開できます。**
+**`paused(.sourceReselectionRequired)` と履歴からの再編集は、どちらも「素材を選び直して既存 `Project` へ結び直す」操作です。** 定めないと、別の写真を選び直しても**以前の顔座標・`ReviewIssue`・`ReviewDecision`・`PreviewConfirmation` を保持したまま再開できます。**
 
-`replaceWorkingSource` を正式な Saga とします。**通常のインポート Saga を再利用しません。** インポートは新しい `Project` を作り、`ProjectSourceSnapshot` を上書きします。**比較対象を比較前に壊すため、そのままでは使えません。**
+**通常のインポート Saga を再利用しません。** インポートは新しい `Project` を作り、`ProjectSourceSnapshot` を上書きします。**比較対象を比較前に壊すため、そのままでは使えません。**
 
-| 順 | 操作 |
-| --- | --- |
-| 1 | 候補ファイルを**一時的に**物質化し、`contentFingerprint` と EXIF を読む |
-| 2 | **旧 `ProjectSourceSnapshot` は変更しない** |
-| 3 | 候補の `SourceIdentity` を、旧 snapshot および台帳の alias 連結成分と照合する |
-| 4 | 不一致なら候補ファイルを削除し、選び直しを求める |
-| 5 | 一致したら、向きを正規化した原寸ファイルを作る |
-| 6 | **同一 DB トランザクション**で `WorkingSourceRecord.sourceFile` を置換し、旧ファイルを `PendingFileDeletion` へ入れ、`FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` / `PreviewConfirmation` を破棄し、`detectionRevision` と `projectRevision` を増やす |
-| 7 | 旧 snapshot は**そのまま維持する**（identity が同じであるため更新不要） |
-| 8 | **顔検出をやり直す。** 新しい確認が完了するまで書き出し不可 |
+前半（手順 1〜4）は共通で、後半だけが分岐します。
 
-**手順 6 を 1 トランザクションにまとめます。** 分けると「新しい素材だが古い顔座標」という状態が観測されます。
+| 順 | 操作 | 失敗時 |
+| --- | --- | --- |
+| 1 | 候補ファイルを**一時的に**物質化し、`contentFingerprint` と EXIF を読む | 候補ファイルを削除して終了 |
+| 2 | **旧 `ProjectSourceSnapshot` は変更しない** | — |
+| 3 | `transact` の内側で、候補の `SourceIdentity` と snapshot の `identity` が**同じ alias 連結成分へ解決されるか**を判定する（[アーキテクチャ設計](architecture.md) の 6.4） | 候補ファイルを削除して終了 |
+| 4 | 不一致なら候補ファイルを削除し、選び直しを求める | — |
+| 5 | 一致したら、**同じ台帳トランザクションで候補の alias を勝者 `SourceRecord` へ追加する** | 候補ファイルを削除して終了 |
+| 6 | 向きを正規化した原寸ファイルと `WorkingSourceBinding` を作る | 手順 9 へ |
+| 7 | **後半へ分岐する**（下記） | 手順 9 へ |
+| 8 | **候補ファイル（正規化前）を削除する。** 削除に失敗したら `PendingFileDeletion` へ積む | — |
+| 9 | 失敗経路では、作成済みの正規化ファイルと候補ファイルを `PendingFileDeletion` へ積む | — |
 
-手順 4〜8 は再検出の既存規則（[アーキテクチャ設計](architecture.md) の 6.1）と同じです。**再選択は再検出を必ず伴うため、確認状態の破棄も自動的に成立します。**
+後半は `WorkingSourceRecord` の有無で決まります。**「再選択」と「再編集」を利用者の導線ではなく、DB の状態で分岐させます。**
+
+| 現在の状態 | 呼ぶメソッド | 内容 |
+| --- | --- | --- |
+| `WorkingSourceRecord` **あり**（実体が欠損している場合を含む） | `replaceWorkingSource` | `sourceFile` を置換し、**トランザクション内で読んだ現在値**を `PendingFileDeletion` へ入れる。`createdAt` を `replacedAt` へ更新する |
+| `WorkingSourceRecord` **なし**（24 時間で削除済み・履歴から開いた） | `attachWorkingSourceToExistingProject` | 行を新規作成する。`createdAt` は `attachedAt` |
+
+どちらも**同一 DB トランザクション**で、`WorkingSourceBinding` の更新、`FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` / `PreviewConfirmation` の破棄、`detectionRevision` と `projectRevision` の増加を行います。完了後に**顔検出をやり直します。** 新しい確認が完了するまで書き出しできません。
+
+**`createdAt` を更新するのは、保持期限の起点だからです。** 更新しないと、再選択した直後に 24 時間期限へ到達して再び削除されます。
+
+**`previousSourceFile` を呼び出し側から渡しません。** 呼び出し側が読んだ時点と DB トランザクションの間に別経路が置換すると、**現在使われているファイルを削除対象として渡せます。** 置換対象はトランザクション内で読みます。
+
+**手順 6〜7 を 1 トランザクションにまとめます。** 分けると「新しい素材だが古い顔座標」という状態が観測されます。
+
+手順 7 以降は再検出の既存規則（[アーキテクチャ設計](architecture.md) の 6.1）と同じです。**再選択は再検出を必ず伴うため、確認状態の破棄も自動的に成立します。**
 
 ##### 実装の所在
 
@@ -935,44 +1022,88 @@ struct CreateWorkingSourceInput: Sendable {
 struct ReplaceWorkingSourceInput: Sendable {
     let projectID: ProjectID
     let newSourceFile: WorkingSourceFileRef
-    let previousSourceFile: WorkingSourceFileRef   // PendingFileDeletion へ積む
-    let replacedAt: Date
+    let newBinding: WorkingSourceBinding
+    let replacedAt: Date       // createdAt もこの値へ更新する
+    // 旧ファイルは DB トランザクション内で読む。呼び出し側から渡さない
 }
 
 struct AttachWorkingSourceInput: Sendable {
     let projectID: ProjectID
     let sourceFile: WorkingSourceFileRef
+    let binding: WorkingSourceBinding
     let attachedAt: Date
-    /// 照合済みであることの根拠。ProjectSourceSnapshot.identity と一致する
-    let verifiedIdentity: SourceIdentity
+    /// 照合済みであることの根拠。台帳側で解決済みの sourceID
+    let verifiedSourceID: SourceID
 }
 ```
 
-##### 履歴の既存 `Project` へ再接続する
+##### 実体と署名済み identity を結び付ける
 
-**新規作成と欠損素材の置換だけでは、履歴からの再編集を実装できません。** 保存期間内の `Project` は設定と検出結果を保持していますが、`WorkingSourceRecord` は 24 時間で消えています。再編集には処理用素材の再接続が要ります。
+**`ProjectSourceSnapshot` は署名済みですが、実体側の `WorkingSourceRecord` は未署名の DB 行です。** `sourceFile` を別プロジェクトの `.processingTemporary` ファイルへ差し替えると、次の状態を作れます。
+
+| 参照するもの | 値 |
+| --- | --- |
+| クォータ・トライアルの判定 | 元の署名済み `identity` |
+| 実際にレンダリングする画像 | 差し替えた別の写真 |
+
+**`kind` の検査では防げません。** どちらも `.processingTemporary` であり、型としては正当です。
+
+署名対象へ、実体との結び付きを持たせます。
+
+```swift
+/// UsageLedger の一部。projectID ごとに 0 件または 1 件
+struct WorkingSourceBinding: Sendable, Equatable {
+    let projectID: ProjectID
+    let sourceFile: WorkingSourceFileRef
+    let normalizedFileSHA256: Data     // 32 バイト。正規化後ファイルの全バイト
+    let byteSize: Int64
+}
+```
+
+| 契機 | 操作 |
+| --- | --- |
+| インポート（手順 4）・再選択・再接続 | 正規化ファイルの作成後、**その台帳トランザクションで追加または置換する** |
+| 起動時復旧（手順 4.5） | `WorkingSourceRecord` を持つ全 `Project` について実体と照合する |
+| **書き出しの手順 −2** | 認可の内側で照合する。不一致なら開始しない |
+| `WorkingSourceRecord` の削除 | **DB を先に消す。** 残った binding は孤児として台帳側で回収する（下記） |
+
+| 照合結果 | 扱い |
+| --- | --- |
+| 一致 | 続行する |
+| `sourceFile` が binding と違う | **差し替え。** その `Project` の `WorkingSourceRecord` を破棄し、`paused(.sourceReselectionRequired)` へ |
+| ハッシュまたはサイズが違う | 同上 |
+| **`WorkingSourceRecord` があり binding が無い** | 同上。**照合できないものを通しません** |
+| **binding があり `WorkingSourceRecord` が無い** | **孤児。** 台帳トランザクションで binding を削除する |
+
+**起動時と書き出し開始時の 2 回照合します。** 起動時だけでは、起動後に差し替えられた場合を検出できません。書き出し開始時だけでは、編集画面が差し替えられた画像を表示したまま操作できます。
+
+##### binding は DB を先に消す
+
+**`WorkingSourceRecord`（DB）と binding（台帳）は同一トランザクションで消せません。** 順序を固定します。
 
 | 順 | 操作 |
 | --- | --- |
-| 1 | 候補ファイルを一時的に物質化し、`SourceIdentity` を作る |
-| 2 | **署名済み `ProjectSourceSnapshot.identity` と照合する**（[アーキテクチャ設計](architecture.md) の 6.3） |
-| 3 | 不一致なら候補を削除し、別の写真であることを提示する |
-| 4 | 一致したら向きを正規化した原寸ファイルを作る |
-| 5 | **同一 DB トランザクション**で `WorkingSourceRecord` を作成し、`FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` を破棄し、`detectionRevision` と `projectRevision` を増やす |
-| 6 | **顔検出をやり直す。** 新しい確認が完了するまで書き出し不可 |
+| 1 | DB トランザクションで `WorkingSourceRecord` を削除し、実体を `PendingFileDeletion` へ積む |
+| 2 | 台帳トランザクションで binding を削除する（または起動時の孤児回収に委ねる） |
 
-**照合に `ProjectSourceLocator` を使いません。** 未署名の平文参照であり、ファイル取り込みでは `nil` です。これだけを根拠にすると、別の写真を同じ `Project` へ結び直せます。
+**逆順にできません。** binding を先に消すと「`WorkingSourceRecord` があり binding が無い」状態になり、**正常な削除の途中経過が差し替えとして検出されます。** DB を先に消せば、余るのは孤児 binding だけであり、照合の判定へ影響しません。
 
-**検出結果を再利用しません。** 元素材のバイト列が同じでも、正規化の実装が更新されていれば座標がずれます。再接続は再検出を必ず伴います。
+この順序は書き出しの手順 7、24 時間期限の削除、`Project` 削除 Saga、台帳修復のすべてに適用します。**削除の入口ごとに順序を変えません。**
 
-同一性の確認は、候補の `SourceIdentity` と旧 `ProjectSourceSnapshot.identity` を比べます。
+**照合は起動時復旧の手順 4.5 で行います。** コミット復旧（手順 4）より前に置くと、手順 7 を完了させれば消えるはずの `WorkingSourceRecord` を差し替えとして誤検出します（[書き出し Saga](export-saga.md) の 5）。
 
-| 結果 | 扱い |
+**ハッシュは正規化後ファイルに対して取ります。** `contentFingerprint`（取り込みファイル基準）とは別物です。照合したいのは「いま処理しようとしている実体」であり、取り込み時のバイト列ではありません。
+
+##### 照合に使ってよいもの・使ってはいけないもの
+
+| 使う | 使わない |
 | --- | --- |
-| 一致（alias のいずれかが共有される） | そのキュー項目で続行してよい |
-| 不一致 | **別の写真。** 続行させず、選び直しを求める |
+| 署名済み `ProjectSourceSnapshot.identity` と台帳の alias グラフ | `ProjectSourceLocator`（未署名の平文参照。ファイル取り込みでは `nil`） |
+| `transact` の内側での解決 | `SourceIdentity` 同士の直接比較（取得経路の差で同じ写真が不一致になる） |
 
 **別の写真での続行を許しません。** バッチの一項目が別素材へ差し替わると、`sourceID` が変わってクォータの前提が崩れ、利用者にとっても「どの写真を処理したか」が分からなくなります。新しい写真を処理したい場合は、新しいバッチを作ります。
+
+**検出結果を再利用しません。** 元素材のバイト列が同じでも、正規化の実装が更新されていれば座標がずれます。再選択・再接続はいずれも再検出を伴います。
 
 **`ProjectSourceSnapshot` は `Project` の削除でのみ消します。** 素材の欠損・保持期限の到達・書き出しの完了のいずれでも削除しません。どれで消しても比較対象が失われます。
 
@@ -984,7 +1115,7 @@ struct AttachWorkingSourceInput: Sendable {
 | --- | --- |
 | 保持期限 | `createdAt` から **24 時間** |
 | 判定に使う時刻 | `retentionNow`。`nil` の間は削除しない（[アーキテクチャ設計](architecture.md) の 6.3） |
-| 期限到達時 | **処理用ファイルを削除**し、`WorkingSourceRecord` の行も削除する |
+| 期限到達時 | **DB トランザクションで `WorkingSourceRecord` を削除**し、実体を `PendingFileDeletion` へ積む。台帳の binding はその後に削除する（順序は上記） |
 | キュー項目 | `paused(.sourceReselectionRequired)` へ遷移させる |
 | `Project` | **削除しない。** 設定と検出結果は履歴の保存期間に従う |
 | `ProjectSourceSnapshot` | **削除しない。** 再選択の照合元として必要 |

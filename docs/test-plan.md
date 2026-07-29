@@ -67,7 +67,12 @@
 - **provider 一致と content 一致が別レコードを指す場合に、1 件へ統合されること**
 - **統合時に最も古い `firstSuccessAt` が維持され、トライアルが消費済みへ倒れること**
 - **統合時に `grants` / `trialEntries` / `trialReservations` / `sourceLeases` のすべてが勝者 `sourceID` へ書き換わること**
-- **`SourceRecord` が grant / trial / reservation / lease のどれからも参照されなくなった場合だけ削除されること**
+- **`SourceRecord` が grant / trial / reservation / lease / `projectSourceSnapshots` のどれからも参照されなくなった場合だけ削除されること**
+- **snapshot の `identity` が alias を共有する `SourceRecord` が GC されないこと**
+- **素材同一性の照合が alias グラフの連結成分で行われ、`SourceIdentity` の直接比較を使わないこと**
+- **`provider = P1, content = F1` の素材が `P1, F2` として再取得され、その後 `nil, F2` で再選択されたときに一致すること**
+- **一致した再選択・再接続で、候補の alias が同じ `SourceRecord` へ追加されること**
+- **`SourceLease` が `accountingMode` を持ち、統合時に勝者 `sourceID` へ書き換わっても保持されること**
 - **`paidUnlimited` の書き出し中に `SourceRecord` が GC されないこと**（`SourceLease` が効いていること）
 - 台帳の**全不変条件**が、保存前と署名検証直後の両方で検査されること
 - **同じ `sourceID` の `SourceLease` が 2 件以上あるとき、通常状態として通さず復旧エラーになること**
@@ -175,7 +180,13 @@
 - **`renderRevision` を上げると `PreviewRenderHash` が変わること**
 - **2 つのハッシュがそれぞれ `project-settings-v1` / `preview-render-v1` のドメイン分離子を先頭に持ち、`payloadType` / `schemaVersion` を前置きしないこと**
 - **同じ入力バイト列でも分離子が違えば別のハッシュになること**
-- **`PreviewConfirmation` が `detectionRevision` と `previewRenderHash` だけを持ち、`projectRevision` を含まないこと**
+- **`signedBytes` が `BE32(payloadType) || BE32(schemaVersion) || payloadBody` であり、`payloadBody` に先頭値が含まれないこと**
+- **blob の外部形式が `BE32 || BE32 || BE64(length) || payloadBody || signature` であり、全体長が一致しなければ署名検証まで進まないこと**
+- **`payloadType` が読み出そうとした `ProtectedBlobKey` の型と違えば破損として扱われること**
+- **長さフィールドを改変するとファイルサイズとの照合で弾かれること**
+- **`PreviewConfirmation` が `projectID` / `detectionRevision` / `previewRenderHash` を持ち、`projectRevision` を含まないこと**
+- **同じ設定・同じ領域の別 `Project` で `previewRenderHash` が一致しても、`projectID` の不一致で開始できないこと**
+- **`BatchReviewState` が `batchID` を持ち、別バッチの確認状態を流用できないこと**
 - **圧縮品質・メタデータ設定だけを変えて `projectRevision` が増えても、書き出しの開始条件が崩れないこと**
 - **手動領域の追加・削除では `previewRenderHash` が変わり、開始条件が崩れること**
 - **`PreviewConfirmation` と `overviewConfirmed` が再起動後に保持されず、再確認を求めること**
@@ -209,6 +220,9 @@
 - ストレージ必要量計算、`ExportQueue` 状態機械
 - 履歴の保存期間と容量判定。24 時間のやり直し保証が容量超過時にも守られること
 - `canDeleteHistoryUnit` が列挙された全参照元を見ること（[アーキテクチャ設計](architecture.md) の 7.5）
+- **絶対保護（非終端キュー項目 / 非終端 `ExportCommit` / `isUndelivered` の `OutputRecord`）が、手動削除でも拒否されること**
+- **お気に入り・編集中・`WorkingSourceRecord`・24 時間保証が、自動削除では保護され、明示確認付きの手動削除では上書きできること**
+- **上書き対象ごとに、失われるものを示す確認文言が選ばれること**
 - 未保存バッチが 1 件までに制限されること
 - 一括処理の開始が推定必要容量の 1.2 倍の空き容量を要求すること
 - 未保存出力がある状態では、単体・一括を問わず新規加工を開始できないこと
@@ -254,18 +268,24 @@
 
 - **`prepared` の `outputFile` が `nil` であり、`fileVerified` 以降は `OutputFileRef` が入っていること。手順 2 で `verifiedOutput` と同時に確定すること**
 - **手順 1 の途中で落ちた一時ファイルが、どのコミットからも参照されず孤児 GC で回収されること**
-- **`FinalizeExportInput` が `exportID` / `queueItemID` / `projectUpdatedAt` の 3 つだけであり、`OutputRecord` と `ExportRecord` を保存済みコミットから導出すること**
+- **`FinalizeExportInput` が `exportID` と `queueItemID` の 2 つだけであり、`OutputRecord` / `ExportRecord` / `Project.updatedAt` を保存済みコミットから導出すること**
+- **`queueItemID` が別 `Project` のキュー項目を指す場合に throw すること。`projectID` / `batchID` / `state == .exporting` をすべて検査すること**
+- **単体書き出しで `queueItemID != nil` なら throw すること**
 - **`loadRecoverySnapshot` が復旧前に一度だけ読まれ、`checkForeignKeys` が復旧後に別途呼ばれること**
 - **`ExportCommitColumns` が生のバイト列であり、署名検証前に `ProjectID` などへデコードされないこと**
 - **手順 7 が `WorkingSourceRecord` を同一トランザクションで削除し、実体を `PendingFileDeletion` へ積むこと**
-- **`AccountingIntent.settingsEntryToApply` が手順 4 で適用され、`applied.settingsEntryReplaced` が真のときだけロールバックで `previousSettingsEntry` へ戻ること。元が無ければエントリごと削除されること**
+- **`AccountingIntent.settingsEntryToApply` が手順 4 で適用され、ロールバックは台帳の `ownerExportID` が対象 `exportID` と一致する場合だけ `previousSettingsEntry` へ戻すこと。元が無ければエントリごと削除されること**
+- **`AccountingApplied` を単独の根拠にしないこと。`applied` 未保存で落ちても正しくロールバックできること**
 - **`ProjectSourceSnapshot` が書き出しで追加も削除もされず、ロールバックの対象にもならないこと**
-- **台帳を修復した起動では、署名が正常な非終端コミットも含めてすべて破棄され、キュー項目が `paused(.sourceReselectionRequired)` になること**
+- **台帳を修復した起動では、署名が正常な非終端コミットも含めてすべて破棄され、キュー項目が `failed(.ledgerRepaired)` になること**
 - **同じ起動で `WorkingSourceRecord` もすべて破棄され、実体が `PendingFileDeletion` へ積まれること**
 - **その破棄が署名不正行の規則（行 ID だけで削除し、フィールドを使わない）と同じ手順で行われること**
 - **その破棄で `UsageLedger` へ触れないこと（整合性封鎖のまま）**
 - **修復後の台帳で `exportedSettingsEntries` と `projectSourceSnapshots` が空になり、既存 `Project` が削除されないこと**
-- **修復後は「変更せず再書き出し」が成立せず、通常の消費として扱われること**
+- **修復後は「変更せず再書き出し」が成立せず、新規プロジェクトとして通常の消費になること**
+- **修復対象のキュー項目が `failed(.ledgerRepaired)` になり、`paused` にならないこと**
+- **`failed(.ledgerRepaired)` が再試行不可（`isRetryable == false`）であること**
+- **修復後の既存 `Project` が閲覧と削除だけ可能で、再接続を試みられないこと**
 - **`SignedCommitRow.schemaVersion` から正準バイト列を再構築でき、`delivery` を含む全署名対象が列として読めること**
 - **`delivery` を書き換えた行が署名検証で不正になること**
 - **`DeliveryAttempt` が残った起動で、`previousState == .generated` なら `deliveryUnknown` になり、自動再保存しないこと**
@@ -273,6 +293,12 @@
 - **共有成功 → 写真ライブラリ保存中に強制終了 → 再起動、で `delivered` が後退しないこと**
 - **通常の保存失敗で `previousState` へ戻ること**
 - **汎用の状態更新メソッドが存在せず、`delivered` → `generated` の遷移を呼び出せないこと**
+- **同じ `exportID` の受け渡し操作が直列化され、`actor` の再入で並行しないこと**
+- **写真ライブラリ保存の待機中に共有・破棄・別の保存が拒否されること**
+- **保存待機中に共有が成功して `delivered` になった場合でも、保存失敗の `abandonDeliveryAttempt` が `generated` へ戻さないこと**
+- **`completeLibrarySave` が `DeliveryAttempt` を削除し、`completeShare` は関与しないこと**
+- **`delivered` 維持で `UnknownLibrarySave` が永続化され、再度の異常終了後も案内が残ること**
+- **利用者が確認すると `UnknownLibrarySave` が消え、`OutputRecord` 削除でも CASCADE で消えること**
 - **`resolveOrphanedAttempts()` が起動時復旧の手順 7 で必ず呼ばれ、7.5 と 8 がその後に実行されること**
 - **`deliveryUnknown` が未受け渡しとして 24 時間の保持と離脱確認に数えられること**
 - **`OutputRecord` の `format` / `suggestedCreationDate` から `OutputFile` を復元でき、`Project` の現在値を参照しないこと**
@@ -296,7 +322,11 @@
 ### 3.3 署名不正コミット
 
 - `ExportCommit` の署名検証失敗が復旧エラーになり、自動破棄されないこと
-- 復旧エラーを「破棄して続ける」で解除でき、孤立 lease が 1 件なら予約が `TrialEntry` へ確定した上でコミットが削除されること
+- 復旧エラーを「破棄して続ける」で解除でき、孤立 lease が 1 件なら `accountingMode` に従って消費を確定した上でコミットが削除されること
+- **`freeMonthlyConsume` の孤立 lease で `consumedExportIDs` へ追加されること。** 手順 4 より前にコミットを壊しても月間枠が消費されること
+- **`batchTrial(true)` では予約が `TrialEntry` へ変換されること**
+- **`paidUnlimited` / `freeMonthlyReexport` / `batchTrial(false)` では追加消費が起きないこと**
+- **`consumedExportIDs` への追加が冪等であること**
 - **孤立 lease が 0 件のとき（`accountingCommitted` / `readyToPublish` で壊れた場合）、台帳を変更せずコミット行だけが削除されること**
 - 孤立 lease が 2 件以上なら復旧エラーを維持し、台帳へ触れないこと
 - **署名不正行の `outputFile` / `projectID` が参照されず、他の正常な出力と履歴が削除されないこと**
@@ -336,6 +366,9 @@
 - 異常終了後の起動時、`isUndelivered` では復旧案内が出て、`delivered` では出ないこと
 - 「履歴を保存しない」設定で、未受け渡し出力・`UsageLedger`・未完了 `ExportCommit`・トライアル用 `SourceRecord` の 4 つ以外が残らないこと
 - `canDeleteHistoryUnit` が**列挙された全参照元**を保護すること
+- **`Batch` 削除が所属する全 `Project`・キュー項目・`ExportRecord` を 1 トランザクションで削除し、台帳側も全 `projectID` 分を 1 トランザクションで削除すること**
+- **1 枚でも絶対保護に触れていればバッチ全体が削除されないこと**
+- **編集中 `Project` の破棄が `WorkingSourceRecord`・binding・snapshot をすべて削除すること**
 - `CustomStamp` を削除しても、それを使用したプロジェクトが再書き出しできること
 - `StampAsset` が**最終保存バイト列**の内容ハッシュで重複排除され、参照カウントが 0 になったときのみ削除されること
 - **`CustomStamp` の登録で参照が 1 増え、一覧削除で 1 減ること。一覧でしか使われていない実体が一覧削除で消えること**
@@ -348,6 +381,14 @@
 - **`ProjectSourceSnapshot` が署名済み台帳にあり、再起動後も `sourceID` を解決できること**
 - **未署名の DB 行を書き換えても `SourceIdentity` が変わらないこと**
 - **`ProjectSourceSnapshot` が、書き出しの完了でも処理用ファイルの 24 時間期限でも削除されないこと**
+- **`WorkingSourceBinding` が `WorkingSourceRecord` と常に同時に作成・削除されること**
+- **`sourceFile` を別 `Project` の `.processingTemporary` ファイルへ差し替えると、起動時と書き出し開始時の両方で検出されること**
+- **正規化ファイルの内容を書き換えると、ハッシュ不一致で検出されること**
+- **検出時にその `Project` が `paused(.sourceReselectionRequired)` になり、他の項目が止まらないこと**
+- **`WorkingSourceRecord` があって binding が無い状態が不変条件違反として扱われること**
+- **`replaceWorkingSource` が置換対象を DB トランザクション内で読み、呼び出し側の値を使わないこと**
+- **`replaceWorkingSource` が `createdAt` を `replacedAt` へ更新し、直後に 24 時間期限へ到達しないこと**
+- **`WorkingSourceRecord` の有無で `replaceWorkingSource` と `attachWorkingSourceToExistingProject` が選ばれること**
 - **24 時間経過して `paused(.sourceReselectionRequired)` になったあとも、再選択の照合が成立すること**
 - **`Project` 削除でのみ snapshot が削除されること**
 - **履歴の既存 `Project` へ `attachWorkingSourceToExistingProject` で再接続でき、別写真では拒否されること**
@@ -427,6 +468,13 @@
 - **同じ走査で孤児 `exportedSettingsEntries` も削除されること**
 - **`RecoverySnapshot.projectIDs` が全 `Project` を含み、これを照合に使うこと**
 - **インポート Saga が `PickedPhotoInput.importedFile` を作り直さず、所有権を受け取ること**
+- **DB 確定（手順 5）の後に取り込みファイルが削除され、削除失敗時は `PendingFileDeletion` へ積まれること**
+- **DB 確定より前に取り込みファイルを削除しないこと**
+- **再選択・再接続の成功経路でも候補ファイル（正規化前）が削除されること**
+- **「Free 版として複製」で新しい `projectID` の snapshot が台帳へ追加され、処理用ファイルが元 `Project` と共有されないこと**
+- **複製の DB 失敗で新 snapshot と binding が補償削除されること**
+- **元素材の実体が無い場合、`WorkingSourceRecord` を作らず再接続待ちになること**
+- **複製に `ExportedSettingsEntry` がコピーされないこと**
 - **`Project` 削除で DB が先に確定し、その後に台帳から 2 種類が削除されること**
 - **DB 確定と台帳削除の間で終了しても、`Project` から認可情報だけが失われる状態にならないこと**
 - **`WorkingSourceRecord` が最初から向き正規化済みの原寸ファイルを指すこと。差し替えが発生しないこと**
@@ -439,6 +487,7 @@
 - **読み取り権限あり** — 保存後に `PHAsset.creationDate` を読み戻し、元画像の登録日時と一致すること
 - **読み取り権限なし** — 偽 `PHAssetCreationRequest` または adapter spy で、**EXIF の日時が渡されたこと、または `creationDate` が設定されなかったこと**を検証する。`PHAsset` を取得しにいかないこと
 - **`OriginalCaptureMetadata` が EXIF のみから決まり、PhotoKit 権限の有無で変わらないこと**
+- **`OffsetTimeOriginal` があり `SubSecTimeOriginal` が無い場合、秒精度で `utcMillis` が算出されること**
 - 出力ファイルから位置情報・機器情報・編集ソフト情報が除去されていること
 
 ### 4.6 Vision と Core Image（[画像処理](image-pipeline.md) の 1 / 4）

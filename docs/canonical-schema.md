@@ -22,17 +22,51 @@ enum PayloadType: UInt32, Sendable {
     case exportCommit = 3
     case remoteConfigState = 4
 }
-
-struct SignedPayload: Sendable {
-    let payloadType: PayloadType
-    let schemaVersion: UInt32
-    let canonicalBytes: Data
-    let signature: Data
-}
 ```
 
+`ProtectedPayload`（`canonicalBodyBytes()` を含む）の型宣言は [アーキテクチャ設計](architecture.md) の 7.2 が正本です。
+
+##### 署名の式
+
+**`payloadType` と `schemaVersion` を本体バイト列へ含めるのか、署名時に前置きするのかを一意に決めます。** 両方の読み方ができると、実装ごとに別の署名が出ます。
+
+```
+payloadBody = 型固有フィールドだけの正準バイト列
+
+signedBytes = BE32(payloadType) || BE32(schemaVersion) || payloadBody
+
+signature   = HMAC-SHA256(derivedKey, signedBytes)
+```
+
+| 項目 | 規則 |
+| --- | --- |
+| `payloadBody` | 型固有フィールドのみ。**先頭に `payloadType` / `schemaVersion` を含めない** |
+| 前置き | **署名の直前に 1 回だけ**行う。`payloadBody` へは残さない |
+| `BE32` | ビッグエンディアンの `UInt32`。長さ前置きしない |
+| メソッド名 | **`canonicalBodyBytes()`**。`canonicalBytes()` では「どちらを指すか」が読めない |
+
+##### 保存形式
+
+**blob ファイルの外部形式も固定します。** 各領域の境界が決まらなければ、読み出し側が復元できません。
+
+```
+blob = BE32(payloadType)
+    || BE32(schemaVersion)
+    || BE64(payloadBody.length)
+    || payloadBody
+    || signature          // 32 バイト固定
+```
+
+| 項目 | 規則 |
+| --- | --- |
+| 全体長 | `4 + 4 + 8 + length + 32` バイト |
+| 長さの検査 | ファイルサイズと `length` が一致しなければ**破損として扱う**（署名検証まで進めない） |
+| `payloadType` の検査 | 読み出そうとしている `ProtectedBlobKey` の型と一致しなければ破損 |
+| 検証 | 先頭 `4 + 4 + 8` のうち**長さフィールドを除いた 8 バイト**と `payloadBody` を連結して `signedBytes` を再構築する |
+
+**長さフィールドは署名対象に入りません。** ファイル形式の都合であり、値そのものではないためです。改変されればファイルサイズとの照合で弾かれます。
+
 - HMAC の対象は **`signature` 自身を除く全永続フィールド**
-- **`schemaVersion` と `payloadType` を署名対象へ含める**
 - `ExportCommit` の insert / update の**たびに再署名する**
 - `UsageLedgerStore.transact` の保存時にも必ず再署名する
 - 検証はバイト列の**定数時間比較**で行う
@@ -96,7 +130,6 @@ struct SignedPayload: Sendable {
 
 | 型 | 符号化 |
 | --- | --- |
-| 先頭 | `payloadType`（`UInt32`）＋ `schemaVersion`（`UInt32`） |
 | 整数 | **ビッグエンディアン**の固定長 |
 | `Bool` | `UInt8`（`0` / `1`） |
 | `enum` | **固定の `UInt32`**（`case` の宣言順に依存させない。5 章） |
@@ -116,7 +149,7 @@ struct SignedPayload: Sendable {
 
 | 分類 | 対象 |
 | --- | --- |
-| unordered | `consumedExportIDs`、`sourceRecords`、`grants`、`trialEntries`、`trialReservations`、`sourceLeases`、`exportedSettingsEntries`、`projectSourceSnapshots`、`SourceRecord.aliases`、`RemoteConfig.enabledStampPacks` |
+| unordered | `consumedExportIDs`、`sourceRecords`、`grants`、`trialEntries`、`trialReservations`、`sourceLeases`、`exportedSettingsEntries`、`projectSourceSnapshots`、`workingSourceBindings`、`SourceRecord.aliases`、`RemoteConfig.enabledStampPacks` |
 | ordered | `RenderSpec.regions`、`ReviewIssueID.affectedFaceTrackIDs` |
 
 `affectedFaceTrackIDs` は「辞書順にソート済み」として構築されますが、それは**構築時の規則**であり、正準化がソートするのではありません。順序は値の一部です。
@@ -251,10 +284,11 @@ struct SignedPayload: Sendable {
 | 7 | `sourceLeases` | unordered collection of `SourceLease` |
 | 8 | `exportedSettingsEntries` | unordered collection of `ExportedSettingsEntry` |
 | 9 | `projectSourceSnapshots` | unordered collection of `ProjectSourceSnapshot` |
-| 10 | `lastObservedAt` | `Date` |
-| 11 | `monthlyIntegrityLock` | `MonthlyIntegrityLock` |
-| 12 | `lastTrustedMonth` | `TrustedUTCMonth?` |
-| 13 | `trialIntegrityLocked` | `Bool` |
+| 10 | `workingSourceBindings` | unordered collection of `WorkingSourceBinding` |
+| 11 | `lastObservedAt` | `Date` |
+| 12 | `monthlyIntegrityLock` | `MonthlyIntegrityLock` |
+| 13 | `lastTrustedMonth` | `TrustedUTCMonth?` |
+| 14 | `trialIntegrityLocked` | `Bool` |
 
 要素型のフィールド順です。
 
@@ -265,9 +299,10 @@ struct SignedPayload: Sendable {
 | `GrantEntry` | `sourceID` → `firstSuccessAt` → `ownerExportID` |
 | `TrialEntry` | `sourceID` → `ownerExportID` |
 | `TrialReservation` | `sourceID` → `exportID` |
-| `SourceLease` | `sourceID` → `exportID` |
+| `SourceLease` | `sourceID` → `exportID` → `accountingMode` |
 | `ExportedSettingsEntry` | `projectID` → `settingsHash`（32 バイト固定）→ `exportedAt` → `ownerExportID` |
 | `ProjectSourceSnapshot` | `projectID` → `identity` → `representation` → `capture` → `libraryCreationDate` → `registeredAt` |
+| `WorkingSourceBinding` | `projectID` → `sourceFile` → `normalizedFileSHA256`（32 バイト固定長） → `byteSize`（`Int64`） |
 | `SourceIdentity` | `providerAssetKeyHash`（`String?`）→ `contentFingerprint`（32 バイト固定） |
 | `OriginalCaptureMetadata` | `dateTimeOriginal` → `subSecTimeOriginal` → `offsetTimeOriginal` → `utcMillis`（すべて `Optional`） |
 
