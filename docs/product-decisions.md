@@ -98,6 +98,21 @@ Pro の説明は機能の列挙ではなく体験として記述し、**一枚�
 
 `batch-standard`（Standard が通常の一括処理を開いた）は設けません。その状況は「残クレジット 0 かつ台帳が空」と同じであり `batch-credit` が受けます。
 
+**型としては閉じた列挙にします。** 分析イベント（[アーキテクチャ設計](architecture.md) の 9.2）が同じ値を使うため、文字列では送信経路が閉じません。
+
+```swift
+enum UpgradeReason: Int32, Sendable, Hashable {
+    case exportLimit = 0
+    case ledgerBlocked = 1
+    case premiumStamp = 2
+    case customStamp = 3
+    case editLocked = 4
+    case batchCredit = 5
+    case batchSize = 6
+    case batchLimit = 7
+}
+```
+
 動画対応時に `long-video` と `export-4k` を追加します。
 
 ---

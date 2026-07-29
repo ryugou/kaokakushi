@@ -75,6 +75,9 @@ protocol OutputDeliveryStore: Sendable {
     /// 起動時。残存 attempt を previousState に応じて解決する（単一トランザクション）
     func resolveOrphanedAttempts() async throws -> [ResolvedAttempt]
 
+    /// 起動時と画面表示で、残っている注記を読む
+    func loadUnknownLibrarySaves() async throws -> [UnknownLibrarySave]
+
     /// 「保存結果不明」の案内を利用者が確認した
     func clearUnknownLibrarySave(_ exportID: ExportID) async throws
 
@@ -111,6 +114,7 @@ struct RecoverySnapshot: Sendable {
     let commits: [SignedCommitRow]
     let outputRecords: [OutputRecord]
     let deliveryAttempts: [DeliveryAttempt]            // 8.0
+    let unknownLibrarySaves: [UnknownLibrarySave]      // 8.0
     let nonTerminalQueueItems: [ExportQueueItemSnapshot]
     let workingSources: [WorkingSourceRecord]
 
@@ -332,7 +336,7 @@ struct AuthorizedExportStart: Sendable {
 }
 
 /// どの勘定を使う書き出しか。blocked は含めない
-enum ExportAccountingMode: Sendable {
+enum ExportAccountingMode: Sendable, Equatable {
     case paidUnlimited                          // 月間枠の対象外
     case freeMonthlyConsume                     // 月間枠を 1 消費
     case freeMonthlyReexport                    // 24 時間以内の再書き出し
@@ -358,7 +362,7 @@ enum ExportAccountingMode: Sendable {
 
 ```swift
 /// grant の操作。ensure と preserve を型で分ける
-enum GrantAction: Sendable {
+enum GrantAction: Sendable, Equatable {
     /// 有効な grant がなければ firstSuccessAt で新規作成してよい
     case ensure(sourceID: SourceID, firstSuccessAt: Date)
 
@@ -434,7 +438,7 @@ protocol ExportStartGate: Sendable {
 5. `.blocked` なら生成せずに終える。ゲートは解放する
 6. `ExportCommit(prepared)` を保存する（`expectedProjectRevision` つき）
 7. 処理を開始する
-8. 手順 7 の完了またはロールバック完了で**ゲートを解放する**
+8. **手順 9（コミット行の削除）**またはロールバック完了で**ゲートを解放する**
 
 **ゲートは認可の完了では解放しません。コミット行の削除またはロールバックの完了まで保持します。** ロールバックの途中で次の認可が走ると、戻す前の台帳を根拠に判定してしまいます。
 
@@ -494,8 +498,8 @@ struct AccountingIntent: Sendable {
     let trialSourceIDToEnsure: SourceID?
 
     /// 「変更せず再書き出し」の比較対象（アーキテクチャ設計 6.2）
+    /// 手順 4 で pendingExportedSettingsEntries へ入れる値。手順 8 で確定側へ昇格する
     let settingsEntryToApply: ExportedSettingsEntry
-    let previousSettingsEntry: ExportedSettingsEntry?   // 置換前。新規なら nil
 
 }
 
@@ -504,7 +508,7 @@ struct AccountingApplied: Sendable {
     let consumedInserted: Bool
     let grantInsertedByThisExport: Bool
     let trialInsertedByThisExport: Bool
-    let settingsEntryReplaced: Bool
+    let pendingSettingsEntryInserted: Bool
 }
 
 /// 受け渡しに必要な不変値。手順 7 で OutputRecord へコピーする
@@ -513,12 +517,13 @@ struct OutputDeliveryDescriptor: Sendable {
     let suggestedCreationDate: Date?
 }
 
-enum ExportCommitState: Sendable {
+enum ExportCommitState: Sendable, Equatable {
     case prepared
     case fileVerified          // finalizedAt はまだ nil
     case finalizing            // finalizedAt を確定した。台帳へ適用する直前
     case accountingCommitted
     case readyToPublish        // 手順 7 の直前。まだ非公開
+    case published             // 手順 7 完了。設定エントリの昇格待ち
 }
 ```
 
@@ -529,8 +534,9 @@ enum ExportCommitState: Sendable {
 | `finalizing` | 上記 ＋ `finalizedAt` / `finalizedPeriod` / `intent` |
 | `accountingCommitted` | 上記 ＋ `applied` |
 | `readyToPublish` | 上記 ＋ ファイル再検証済み |
+| `published` | 上記。**`OutputRecord` と `ExportRecord` が存在する** |
 
-**`readyToPublish` は成果物がまだ非公開で、コミット行も残っている状態です。**
+**`readyToPublish` は成果物がまだ非公開で、コミット行も残っている状態です。** **`published` は公開済みで、残る仕事は台帳側の昇格（手順 8）だけです。**
 
 **`outputFile` は `prepared` では `nil` です。** `ManagedFileStore.createFile` はファイルの作成が完了してからでないと `ref` を返さないため（[アーキテクチャ設計](architecture.md) の 7.3）、手順 0 の時点で参照を作れません。手順 1 で生成し、手順 2 で `verifiedOutput` と同時に保存します。
 
@@ -582,13 +588,18 @@ enum ExportCommitState: Sendable {
 | 4 | `UsageLedger` を冪等に**暫定適用**する。**予約の `trialEntries` への移動と `SourceLease` の削除も同じ台帳トランザクション内** | ProtectedBlobStore | — |
 | 5 | `applied` を埋めて保存 | DB | **`accountingCommitted`** |
 | 6 | `verifiedOutput` と出力ファイルの**健全性**を確認して保存 | ファイルシステム / DB | **`readyToPublish`** |
-| 7 | **単一トランザクション**（3.4）。`OutputRecord` を作り、コミット行を削除する。**ここが会計の最終確定境界** | DB | （行が消える） |
+| 7 | **単一トランザクション**（3.4）。`OutputRecord` と `ExportRecord` を作り、キュー項目を `completed` にし、`WorkingSourceRecord` を削除する。**ここが会計の最終確定境界** | DB | **`published`** |
+| 8 | 台帳トランザクションで **`pendingExportedSettingsEntries` の該当要素を `exportedSettingsEntries` へ昇格**する（4.3） | ProtectedBlobStore | — |
+| 9 | コミット行を削除する | DB | （行が消える） |
 
 ```
 prepared → fileVerified → finalizing → accountingCommitted → readyToPublish
-                                                                   ↓
-                                              手順 7 の単一トランザクションで削除
+    → published → （手順 8 の台帳昇格）→ 手順 9 でコミット行を削除
 ```
+
+**手順 7 でコミット行を消しません。** 消すと、手順 8 の台帳昇格が中断した場合に「何を昇格すべきか」の根拠が失われます。`published` を挟むことで、**「出力は公開済みだが設定エントリが未昇格」を復旧可能な状態として表現できます。**
+
+**手順 7 が会計の最終確定境界である点は変わりません。** `published` へ到達した時点で消費は確定し、以降のロールバックはありません。手順 8 と 9 は前進のみです。
 
 **手順 −2 の `SourceLease` は勘定の種類を問いません。** `paidUnlimited` の通常の単体書き出しには grant も予約もないため、lease が無ければ認可から正常生成までの間その素材を参照するものが台帳に存在せず、**処理中の素材が GC されます。**
 
@@ -738,7 +749,7 @@ struct OutputRecord: Sendable {
 
 | 順 | 操作 | 保存先 |
 | --- | --- | --- |
-| 1 | `transact` で、この `exportID` が所有する会計要素（消費・grant・トライアル台帳・トライアル予約・**`SourceLease`**・**`ExportedSettingsEntry`**）を**冪等に**取り消す | ProtectedBlobStore |
+| 1 | `transact` で、この `exportID` が所有する会計要素（消費・grant・トライアル台帳・トライアル予約・**`SourceLease`**・**`pendingExportedSettingsEntries`**）を**冪等に**取り消す | ProtectedBlobStore |
 | 2 | 台帳の保存が成功したことを確認する | ProtectedBlobStore |
 | 3 | `OutputRecord` を削除する（存在する場合のみ） | DB |
 | 4 | `outputFile` のファイルを削除する | ファイルシステム |
@@ -759,17 +770,15 @@ trialEntries      のうち ownerExportID == 対象 exportID の要素を削除
 trialReservations のうち exportID == 対象 exportID の要素を削除
 sourceLeases      のうち exportID == 対象 exportID の要素を削除
 
-exportedSettingsEntries の当該 projectID の要素が
-  ownerExportID == 対象 exportID なら
-      intent.previousSettingsEntry があればその値へ戻す
-      無ければ削除する
+pendingExportedSettingsEntries のうち ownerExportID == 対象 exportID の要素を削除
+  （確定側の exportedSettingsEntries は触らない）
 
 別の exportID が作った要素は削除しない
 ```
 
 既存の grant を再利用しただけの書き出しは `ownerExportID` が一致しないため、以前から存在した権利を巻き添えで消しません。
 
-**`ExportedSettingsEntry` を戻さないと権限を迂回できます。** 新しい設定 S1 で開始 → 手順 4 で S1 を「最後に成功した設定」として保存 → 手順 7 の前に失敗 → S1 が残る → 降格後、成功していない S1 が「変更なし」と判定される、という経路です。`ownerExportID` と `previousSettingsEntry` の両方が要ります。
+**確定側を触らないのは、手順 4 が pending にしか書かないからです**（[アーキテクチャ設計](architecture.md) の 6.2）。確定側への昇格は手順 8 であり、そこへ到達したコミットはロールバックの対象になりません。**「一度も成功していない設定が最後の正常書き出しとして残る」経路は、集合を分けたことで構造的に消えています。**
 
 **`ProjectSourceSnapshot` はロールバックの対象外です。** 書き出しでは追加も削除もしません。`Project` の寿命まで保持し、削除は `Project` 削除 Saga だけが行います（[アーキテクチャ設計](architecture.md) の 7.5）。
 
@@ -823,7 +832,7 @@ exportedSettingsEntries の当該 projectID の要素が
 | 4 | 有効な未完了コミットを復旧する（5.3） | 1・2・3・2.5 の完了 |
 | 4.5 | **`WorkingSourceBinding` と処理用実体を照合する**（[画像処理](image-pipeline.md)） | **4 の完了** |
 | 5 | `PRAGMA foreign_key_check` で外部キー違反が無いことを確認する | 4.5 の完了 |
-| 5.5 | **`Project` が存在しない `exportedSettingsEntries` / `projectSourceSnapshots` / `workingSourceBindings` と、`WorkingSourceRecord` が無い孤児 binding を削除する**（[アーキテクチャ設計](architecture.md) の 7.5） | 5 の完了。`projectIDs` が必要 |
+| 5.5 | **`Project` が存在しない台帳要素（pending を含む 4 集合）、`WorkingSourceRecord` が無い孤児 binding、対応するコミットが無い pending を削除する**（[アーキテクチャ設計](architecture.md) の 7.5） | 5 の完了。`projectIDs` が必要 |
 | 6 | `PendingFileDeletion` と孤児ファイルを回収する | 5.5 の完了 |
 | 7 | **`resolveOrphanedAttempts()` を実行し、残存 `DeliveryAttempt` を `previousState` に従って解決する**（8.0） | 5 の完了 |
 | 7.5 | 未受け渡し出力（`isUndelivered`）を復元する | **7 の完了** |
@@ -901,7 +910,7 @@ exportedSettingsEntries の当該 projectID の要素が
 
 ##### 履歴側への影響
 
-`projectSourceSnapshots` / `exportedSettingsEntries` / `workingSourceBindings` は署名済み台帳の一部であり、HMAC 不一致では**内容を信用できません。** したがって修復では 3 つとも空にします。
+`projectSourceSnapshots` / `exportedSettingsEntries`（pending 含む）/ `workingSourceBindings` は署名済み台帳の一部であり、HMAC 不一致では**内容を信用できません。** したがって修復では 3 つとも空にします。
 
 | 失われるもの | 修復後の扱い |
 | --- | --- |
@@ -937,7 +946,12 @@ exportedSettingsEntries の当該 projectID の要素が
 | `finalizing` | 暫定適用があれば冪等に取り消し、**手順 3 からやり直す** |
 | `accountingCommitted` | **出力ファイルを再検証**する（5.4）。正常なら暫定適用を取り消し、**手順 3 からやり直す** |
 | `readyToPublish` | 出力ファイルを `verifiedOutput` と照合する。正常なら暫定適用を取り消し、**手順 3 からやり直す**。不一致ならロールバック |
+| **`published`** | **前進のみ。** 手順 8（設定エントリの昇格）と手順 9（コミット行の削除）を冪等に再実行する |
 | 署名検証に失敗 | 復旧エラー。自動破棄しない（6 章） |
+
+**`published` からはやり直しません。** 会計は確定済みで `OutputRecord` も存在します。ここで手順 3 へ戻すと、同じ出力に対して 2 つ目の `OutputRecord` ができます。
+
+**手順 8 は冪等です。** 昇格対象は `ownerExportID` がこのコミットの `exportID` と一致する pending だけであり、既に昇格済みなら pending が存在せず何も起きません。
 
 **`finalizing` 以降からの復旧は、`readyToPublish` を含めて必ず手順 3 へ戻ります。例外はありません。** `readyToPublish` で異常終了し数日後に再起動した場合、`finalizedAt` は数日前で `expiresAt = finalizedAt + 24h` はすでに過ぎており、**公開した瞬間に期限切れの出力ができます。** ファイル検証が済んでいることと、時刻が妥当であることは別の話です。
 
@@ -1107,11 +1121,7 @@ struct DeliveryAttempt: Sendable {
 | 自動削除 | 行わない。出力は保持する |
 | 利用者への提示 | 写真ライブラリを確認したうえで、保存済みなら破棄、未保存なら再試行を選ばせる |
 
-```swift
-enum OutputState: Sendable { case generated, deliveryUnknown, delivered, discarded }
-```
-
-`deliveryUnknown` は**未受け渡しとして扱います。** 24 時間の保持対象であり、完了画面の離脱確認にも数えます。**受け取れていない可能性がある側へ倒します**（`.unknown` の共有結果と同じ方針）。
+`OutputState` の定義と DB 列値は [アーキテクチャ設計](architecture.md) の 7.5 が正本です。`deliveryUnknown` は**未受け渡しとして扱います。** 24 時間の保持対象であり、完了画面の離脱確認にも数えます。**受け取れていない可能性がある側へ倒します**（`.unknown` の共有結果と同じ方針）。
 
 ##### `delivered` を後退させない
 
@@ -1191,7 +1201,7 @@ struct UnknownLibrarySave: Sendable {
 OS 共有（`SharePresenter`）にはこの経路がありません。結果が同期的に返るためです。
 
 ```swift
-enum ShareResult: Sendable { case completed, canceled, unknown, failed }
+enum ShareResult: Sendable, Equatable { case completed, canceled, unknown, failed }
 ```
 
 | 結果 | 出力状態 | 扱い |

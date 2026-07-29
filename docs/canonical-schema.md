@@ -149,7 +149,7 @@ blob = BE32(payloadType)
 
 | 分類 | 対象 |
 | --- | --- |
-| unordered | `consumedExportIDs`、`sourceRecords`、`grants`、`trialEntries`、`trialReservations`、`sourceLeases`、`exportedSettingsEntries`、`projectSourceSnapshots`、`workingSourceBindings`、`SourceRecord.aliases`、`RemoteConfig.enabledStampPacks` |
+| unordered | `consumedExportIDs`、`sourceRecords`、`grants`、`trialEntries`、`trialReservations`、`sourceLeases`、`pendingExportedSettingsEntries`、`exportedSettingsEntries`、`projectSourceSnapshots`、`workingSourceBindings`、`SourceRecord.aliases`、`RemoteConfig.enabledStampPacks` |
 | ordered | `RenderSpec.regions`、`ReviewIssueID.affectedFaceTrackIDs` |
 
 `affectedFaceTrackIDs` は「辞書順にソート済み」として構築されますが、それは**構築時の規則**であり、正準化がソートするのではありません。順序は値の一部です。
@@ -208,6 +208,7 @@ blob = BE32(payloadType)
 | `finalizing` | 3 |
 | `accountingCommitted` | 4 |
 | `readyToPublish` | 5 |
+| `published` | 6 |
 
 ### `ExportAccountingMode`
 
@@ -282,13 +283,14 @@ blob = BE32(payloadType)
 | 5 | `trialEntries` | unordered collection of `TrialEntry` |
 | 6 | `trialReservations` | unordered collection of `TrialReservation` |
 | 7 | `sourceLeases` | unordered collection of `SourceLease` |
-| 8 | `exportedSettingsEntries` | unordered collection of `ExportedSettingsEntry` |
-| 9 | `projectSourceSnapshots` | unordered collection of `ProjectSourceSnapshot` |
-| 10 | `workingSourceBindings` | unordered collection of `WorkingSourceBinding` |
-| 11 | `lastObservedAt` | `Date` |
-| 12 | `monthlyIntegrityLock` | `MonthlyIntegrityLock` |
-| 13 | `lastTrustedMonth` | `TrustedUTCMonth?` |
-| 14 | `trialIntegrityLocked` | `Bool` |
+| 8 | `pendingExportedSettingsEntries` | unordered collection of `ExportedSettingsEntry` |
+| 9 | `exportedSettingsEntries` | unordered collection of `ExportedSettingsEntry` |
+| 10 | `projectSourceSnapshots` | unordered collection of `ProjectSourceSnapshot` |
+| 11 | `workingSourceBindings` | unordered collection of `WorkingSourceBinding` |
+| 12 | `lastObservedAt` | `Date` |
+| 13 | `monthlyIntegrityLock` | `MonthlyIntegrityLock` |
+| 14 | `lastTrustedMonth` | `TrustedUTCMonth?` |
+| 15 | `trialIntegrityLocked` | `Bool` |
 
 要素型のフィールド順です。
 
@@ -349,8 +351,8 @@ blob = BE32(payloadType)
 | `ExportAuthorization` | `entitlementSnapshot`（`Entitlement`）→ `accountingMode` → `authorizedAt` → `authorizedGrant` |
 | `AuthorizedGrant` | `sourceID` → `firstSuccessAt` |
 | `VerifiedOutput` | `byteSize`（`Int64`）→ `sha256`（32 バイト固定長。長さ前置きしない） |
-| `AccountingIntent` | `consumeExportID` → `grantAction` → `trialSourceIDToEnsure` → `settingsEntryToApply` → `previousSettingsEntry` |
-| `AccountingApplied` | `consumedInserted` → `grantInsertedByThisExport` → `trialInsertedByThisExport` → `settingsEntryReplaced` |
+| `AccountingIntent` | `consumeExportID` → `grantAction` → `trialSourceIDToEnsure` → `settingsEntryToApply` |
+| `AccountingApplied` | `consumedInserted` → `grantInsertedByThisExport` → `trialInsertedByThisExport` → `pendingSettingsEntryInserted` |
 | `OutputDeliveryDescriptor` | `format`（`UInt32`）→ `suggestedCreationDate`（`Date?`） |
 
 `sha256` を固定長にするのは、長さが常に 32 バイトであり前置きが冗長なためです。他の `Data` は長さ前置きを維持します。

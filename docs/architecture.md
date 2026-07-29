@@ -566,6 +566,22 @@ struct CustomerInfoSnapshot: Sendable, Equatable {
     let fetchedAt: Date
 }
 
+/// 契約の等級。固定番号は正準スキーマ 3 章
+enum Plan: Sendable, Hashable, Comparable {
+    case free
+    case standard
+    case pro
+}
+
+/// 契約の状態。pending は支払い保留（仕様 5.4）
+enum PlanStatus: Sendable, Hashable {
+    case active
+    case grace
+    case pending
+    case expired
+    case revoked
+}
+
 func resolve(snapshot: CustomerInfoSnapshot, usageNow: Date) -> Entitlement
 
 struct Entitlement: Sendable, Equatable {
@@ -594,7 +610,7 @@ struct SubscriptionState: Sendable, Equatable {
 ##### 能力の解決
 
 ```swift
-enum SingleExportAccess: Sendable {
+enum SingleExportAccess: Sendable, Equatable {
     case metered      // 月間枠の対象
     case unlimited    // 月間枠の対象外
 }
@@ -608,7 +624,7 @@ struct ResolvedCapabilities: Sendable, Equatable {
     let shouldShowAds: Bool
 }
 
-enum CapabilityResolution: Sendable {
+enum CapabilityResolution: Sendable, Equatable {
     case resolved(ResolvedCapabilities)
     case verificationRequired
 }
@@ -724,16 +740,22 @@ Free 範囲のプロジェクトとは、モザイク・ぼかし・黒塗り・
 
 | 順 | 操作 | 保存先 | 失敗時 |
 | --- | --- | --- | --- |
+| 順 | 操作 | 保存先 | 失敗時 |
+| --- | --- | --- | --- |
 | 1 | 新しい `ProjectID` を発行する | — | — |
-| 2 | 元の snapshot の `identity` / `representation` / `capture` / `libraryCreationDate` を、新しい `projectID` で台帳へ追加する（`registeredAt` は現在時刻） | ProtectedBlobStore | 終了。副作用なし |
-| 3 | 元素材の実体がある場合、**別の `WorkingSourceFile` を作り**、その `WorkingSourceBinding` を同じ台帳トランザクションで追加する | ファイルシステム / ProtectedBlobStore | 手順 6 へ |
-| 4 | DB トランザクションで `Project` と設定を複製し、有料スタンプの領域を選択された方式へ置換する | DB | 手順 5 へ |
+| 2 | 元素材の実体がある場合、**`VerifiedWorkingSourceResolver` を通してコピー元を取得し**（[画像処理](image-pipeline.md)）、**別の `WorkingSourceFile` を作る**。SHA-256 とサイズを測る | ファイルシステム | 手順 6 へ |
+| 3 | **1 つの台帳トランザクション**で、元 snapshot の内容を新しい `projectID` で追加し（`registeredAt` は現在時刻）、実体を作った場合は `WorkingSourceBinding` も同時に追加する。identity は既存 `SourceRecord` へ解決する（無ければ作成） | ProtectedBlobStore | 手順 6 へ |
+| 4 | DB トランザクションで `Project` と設定を複製し、有料スタンプの領域を選択された方式へ置換する。実体を作った場合は `WorkingSourceRecord` も作る | DB | 手順 5 へ |
 | 5 | 手順 4 が失敗したら、**追加した snapshot と binding を補償削除する** | ProtectedBlobStore | 起動時 GC へ委ねる |
 | 6 | 失敗したら、作成済みのファイルを `PendingFileDeletion` へ積む | ファイルシステム | 起動時 GC へ委ねる |
 
+**手順 3 を 1 トランザクションにします。** snapshot だけが入って binding が入らない状態は、`Project` が無いため実害こそありませんが、**補償の対象が 2 つに分かれて手順 5 が複雑になります。**
+
+**手順 3 で `SourceRecord` を解決します。** 元 `Project` と同じ identity なので通常は既存レコードが見つかりますが、**不変条件 9 を満たすことを明示的な手順として持ちます**（6.4）。
+
 **処理用ファイルを共有しません。** 同じ `WorkingSourceFileRef` を 2 つの `Project` が指すと、**一方の書き出し完了または破棄が他方の素材を削除します。** `WorkingSourceRecord` の削除規則は参照カウントを持ちません。
 
-**元素材の実体が無い場合は、`WorkingSourceRecord` を作らずに複製します。** 利用者が写真を選び直した時点で、通常の再接続（[画像処理](image-pipeline.md)）が走ります。照合対象は手順 2 で複製した新しい snapshot です。
+**元素材の実体が無い場合は、`WorkingSourceRecord` と binding を作らずに複製します。** 利用者が写真を選び直した時点で、通常の再接続（[画像処理](image-pipeline.md)）が走ります。照合対象は手順 3 で複製した新しい snapshot です。
 
 **`ExportedSettingsEntry` は複製しません。** 複製されたプロジェクトはまだ 1 度も書き出していないため、「変更せず再書き出し」の対象になりません。
 
@@ -763,13 +785,31 @@ Free 範囲のプロジェクトとは、モザイク・ぼかし・黒塗り・
 
 型は `ExportedSettingsEntry`（6.3）です。
 
+**暫定と確定を別の集合に分けます。** 1 つにすると、**成功していない設定が「最後の正常書き出し」として残ります。**
+
+```
+新しい設定 S1 で開始
+  → 手順 4 で S1 を適用
+  → 手順 7 の前にコミット行を破損させる
+  → 「破棄して続ける」で孤立 lease 0 件 → 台帳へ触れずコミットだけ削除
+  → S1 が残る
+  → 降格後、一度も成功していない S1 が「変更なし」と判定される
+```
+
 | 契機 | 操作 |
 | --- | --- |
-| 手順 4 | `AccountingIntent` に従って**暫定適用**する。置換前の値も `intent` へ保存する |
-| ロールバック | `ownerExportID` がこの `exportID` なら、置換前の値へ戻す（新規なら削除する） |
-| 判定 | `currentSettingsHash == entry.settingsHash` **かつ** 素材が `ProjectSourceSnapshot.identity` と一致する |
+| 手順 4 | `AccountingIntent` に従って **`pendingExportedSettingsEntries` へ**暫定適用する。置換前の確定値も `intent` へ保存する |
+| **手順 8** | **`published` に到達した証拠を確認し、`exportedSettingsEntries` へ昇格する**（[書き出し Saga](export-saga.md) の 3） |
+| ロールバック | `ownerExportID` がこの `exportID` の pending を削除する。確定側は触らない |
+| **署名不正コミットの破棄** | **pending を削除する。** `SourceLease.accountingMode` と同じく、台帳側だけを根拠にする |
+| 判定 | `currentSettingsHash == entry.settingsHash` **かつ** 素材が `ProjectSourceSnapshot.identity` と一致する。**pending は判定に使わない** |
 | entry が無い | **「変更せず再書き出し」の対象にしない。** Standard 以上を要求する |
-| `Project` の削除 | **`Project` 削除 Saga の手順 3**（DB 確定後）で削除する（7.5） |
+| `Project` の削除 | **`Project` 削除 Saga の手順 3**（DB 確定後）で両方とも削除する（7.5） |
+| 起動時 | **コミットが存在しない pending を削除する**（手順 5.5） |
+
+**昇格の根拠は `published` 状態のコミット行です。** 手順 7 でコミットを消さずに `published` を書くため、手順 8 が中断しても次回起動で同じ昇格を冪等に再実行できます。`published` に到達していないコミットの pending は、昇格せず削除します。
+
+**確定側の置換前の値を `intent` に持つのは変わりません。** 同じ `Project` を 2 回目以降に書き出す場合、昇格は「既存の確定値を新しい値で置換する」操作になります。
 
 **設定ハッシュだけでは足りません。** 再書き出しには処理用素材が要り、24 時間で消えていれば再接続します。このとき別の写真を結び直せると、**設定は同じままで中身の違う写真が「変更なし」として無料で処理されます。** 再接続は署名済み `ProjectSourceSnapshot.identity` との一致を必須とします（[画像処理](image-pipeline.md)）。
 
@@ -809,6 +849,7 @@ struct UsageLedger: Sendable, Equatable {
     let trialEntries: [TrialEntry]               // トライアル消費
     let trialReservations: [TrialReservation]    // 認可時の予約
     let sourceLeases: [SourceLease]              // 認可中の書き出しによる参照（6.4）
+    let pendingExportedSettingsEntries: [ExportedSettingsEntry]  // 手順 4 の暫定適用（6.2）
     let exportedSettingsEntries: [ExportedSettingsEntry]   // 変更せず再書き出しの比較対象（6.2）
     let workingSourceBindings: [WorkingSourceBinding]      // 処理用実体との結び付き（画像処理）
     let projectSourceSnapshots: [ProjectSourceSnapshot]    // 編集中素材の identity（画像処理）
@@ -884,7 +925,7 @@ struct ProjectSourceSnapshot: Sendable, Equatable {
 | 対象 | 内容 | 寿命 |
 | --- | --- | --- |
 | `WorkingSourceRecord`（DB） | 未加工の原寸ファイルへの参照 | **作成から 24 時間**。期限で削除し、キューを `paused(.sourceReselectionRequired)` へ |
-| `WorkingSourceBinding`（台帳） | いま処理してよい実体のハッシュとサイズ（画像処理） | **`WorkingSourceRecord` と同じ。** 常に同時に作成・削除する |
+| `WorkingSourceBinding`（台帳） | いま処理してよい実体のハッシュとサイズ（画像処理） | **`WorkingSourceRecord` と対応する。** 更新は台帳先行、削除は DB 先行で行い、片側だけ進んだ区間は起動時に解決する |
 | `ProjectSourceSnapshot`（台帳） | `SourceIdentity`・撮影日時・登録時刻 | **`Project` の寿命まで**。削除は `Project` 削除時のみ |
 
 **identity と実体を別の集合に分けます。** identity は `Project` の寿命まで要りますが、実体との結び付きは処理用ファイルが存在する間しか意味を持ちません。1 つにまとめると、24 時間で消える値のために snapshot 全体を書き換えることになります。
@@ -913,7 +954,7 @@ struct ProjectSourceSnapshot: Sendable, Equatable {
 ##### 判定
 
 ```swift
-enum QuotaBlockReason: Sendable {
+enum QuotaBlockReason: Sendable, Equatable {
     case monthlyLimitReached      // 通常の月間上限
     case ledgerIntegrityFailure   // 台帳破損による封鎖
 }
@@ -934,6 +975,7 @@ func evaluate(
     ledger: UsageLedger,
     access: SingleExportAccess,      // Plan ではない。6.2 が解決した能力
     sourceID: SourceID,              // 6.4 で解決済み
+    monthlyLimit: Int,               // リモート設定の freeMonthlyExportLimit（10 章）
     usageNow: Date,                  // 正規化済み。端末時刻を直接渡さない
     trustedMonth: TrustedUTCMonth?,  // 封鎖の解除判定に使う。端末時刻由来の値を渡さない
     timeZone: TimeZone
@@ -941,6 +983,8 @@ func evaluate(
 ```
 
 **判定結果だけでなく更新後の台帳も返します。** 判定だけでは `lastObservedAt` の前進、月次更新、期限切れ grant の削除を永続化できません。
+
+**`monthlyLimit` を引数で受け取ります。** 上限はリモート設定で変わるため（10 章）、`Domain` の定数にできません。`RemoteConfig` そのものを渡さないのは、`Domain` がリモート設定の型構造に依存しないためです。
 
 判定順序です。
 
@@ -977,7 +1021,7 @@ func evaluate(
 **すべての時間判定に端末時刻をそのまま使いません。** 正規化を 1 か所に集約します。各判定が個別に `max` を書くと、書き忘れた箇所だけ防御が抜けます。
 
 ```swift
-struct TimeAnchor: Sendable { let lastObservedAt: Date }
+struct TimeAnchor: Sendable, Equatable { let lastObservedAt: Date }
 
 struct ObservedTime: Sendable {
     /// クォータ・grant 用。単調増加する。巻き戻し防止が目的
@@ -1203,7 +1247,7 @@ v1 は全体排他ゲート（[書き出し Saga](export-saga.md)）により同
 | `lastTrustedMonth` | **信頼時刻の UTC 年月** | `nil` |
 | `monthlyIntegrityLock` | `.lockedUntilTrustedMonthAfter(信頼時刻の UTC 年月)` | **`.lockedUntilReinstall`** |
 | `trialIntegrityLocked` | `true` | `true` |
-| `grants` / `consumedExportIDs` / `trialEntries` / `trialReservations` / `sourceRecords` / `sourceLeases` / `exportedSettingsEntries` / `projectSourceSnapshots` | **すべて空** | **すべて空** |
+| `grants` / `consumedExportIDs` / `trialEntries` / `trialReservations` / `sourceRecords` / `sourceLeases` / `pendingExportedSettingsEntries` / `exportedSettingsEntries` / `projectSourceSnapshots` / `workingSourceBindings` | **すべて空** | **すべて空** |
 
 **端末年月を封鎖の基準にしません。** 信頼時刻を取得できない場合は基準を決められないため、`lockedUntilReinstall` へ倒します（整合性封鎖の項）。
 
@@ -1373,7 +1417,7 @@ OS がトランスコード provider = P1, content = F2  → R へ F2 を追加 
 | 8 | **同じ `sourceID` の `SourceLease` が 2 件以上存在しない** | 同一素材の非終端書き出しが 2 件走っており、所有者モデルが壊れる |
 | 9 | **`projectSourceSnapshots` の各 `identity` の alias が、いずれかの `SourceRecord` に存在する** | 再接続の照合元が消え、履歴を再編集できなくなる |
 | 11 | **`workingSourceBindings` の各 `projectID` が `projectSourceSnapshots` にも存在する** | 実体だけがあり identity が無い `Project` ができる |
-| 10 | **`exportedSettingsEntries` / `projectSourceSnapshots` / `workingSourceBindings` の各集合に、同じ `projectID` が 2 件以上存在しない** | どちらを認可の根拠にするか決まらない |
+| 10 | **`pendingExportedSettingsEntries` / `exportedSettingsEntries` / `projectSourceSnapshots` / `workingSourceBindings` の各集合に、同じ `projectID` が 2 件以上存在しない** | どちらを認可の根拠にするか決まらない |
 
 条件 5 は、予約と lease が手順 −2 の同一トランザクションで作られ、手順 4 またはロールバックで同時に消えることの帰結です。条件 7 の前半（空集合の禁止）は条件 1 に違反しないため、別条件として立てます。
 
@@ -1545,7 +1589,7 @@ let canEnterBatch =
 このモードでは 1 枚ずつ大きく表示して個別に確認するため、末尾到達と確認操作は求めません。`normal` の写真は「確認して次へ」により `ReviewDecision` なしで `reviewed` へ遷移します。これを定めないと `normal` の写真が永久に `unreviewed` のままになります。
 
 ```swift
-struct BatchReviewState: Sendable { let overviewConfirmed: Bool }
+// BatchReviewState の定義は [書き出し Saga](export-saga.md) の 1.1 が正本
 ```
 
 おまかせ一括の一覧確認はバッチ全体の操作なので、写真単位とは独立して持ちます。
@@ -2064,7 +2108,7 @@ protocol CryptoKeyStore: Sendable {
     func providerAssetKeyHash(_ localIdentifier: String) async throws -> String
 }
 
-enum KeyPresence: Sendable {
+enum KeyPresence: Sendable, Equatable {
     case created        // 今回生成した
     case existing       // 既にあった
 }
@@ -2103,7 +2147,7 @@ struct CrashContext: Sendable {
 **ファイル生成を 1 か所へ集約します。** バックアップ除外と保護クラスを、生成のたびに確実に設定するためです。`Domain` がプロトコルを定義し、`Persistence` が実装します。
 
 ```swift
-enum ManagedFileKind: UInt32, Sendable {
+enum ManagedFileKind: UInt32, Sendable, Hashable {
     case output = 1
     case stampAsset = 2
     case historyThumbnail = 3
@@ -2405,7 +2449,7 @@ protocol ProtectedDataAvailability: Sendable {
 消費は手順 7 の完了で確定します（[書き出し Saga](export-saga.md)）。**したがって、生成直後の失敗や異常終了によって利用者が成果物を失う経路を作りません。** ただし保持は無期限ではなく **24 時間で削除します。**
 
 ```swift
-enum OutputState: Sendable { case generated, deliveryUnknown, delivered, discarded }
+enum OutputState: Sendable, Equatable { case generated, deliveryUnknown, delivered, discarded }
 
 extension OutputRecord {
     /// 受け取れていない可能性がある。判定はすべてこの述語を使う
@@ -2451,10 +2495,31 @@ extension OutputRecord {
 | 状態 | 起動時の動作 |
 | --- | --- |
 | `generated` / `deliveryUnknown` | **復旧案内の対象に含める**（枚数は `isUndelivered` の数。バッチ総枚数ではない） |
-| `delivered` | 一時ファイルを削除し、**復旧案内の対象に含めない** |
+| **`delivered` かつ `UnknownLibrarySave` あり** | **削除しない。** 「写真ライブラリへの保存結果が不明」として提示する |
+| `delivered`（注記なし） | 一時ファイルを削除し、**復旧案内の対象に含めない** |
 | `discarded` | 残存ファイルを削除する |
 
-`DeliveryAttempt` が残っている出力は、この判定の前に `previousState` に従って解決します（[書き出し Saga](export-saga.md) の 8.0）。`previousState` が `delivered` なら `delivered` を維持し、復旧案内の対象にしません。
+`DeliveryAttempt` が残っている出力は、この判定の前に `previousState` に従って解決します（[書き出し Saga](export-saga.md) の 8.0）。`previousState` が `delivered` なら `delivered` を維持し、`UnknownLibrarySave` を記録します。
+
+**注記のある `delivered` 出力を削除しません。** 削除すると再試行するファイルが消え、`OutputRecord` の CASCADE で注記そのものも消えます。**追加した仕組みが 1 回の起動で無効になります。**
+
+```swift
+extension OutputRecord {
+    /// 利用者の対応が要る。isUndelivered とは別の軸
+    var requiresDeliveryAttention: Bool {
+        isUndelivered || hasUnknownLibrarySave
+    }
+}
+```
+
+| 述語 | 用途 |
+| --- | --- |
+| `isUndelivered` | 未受け渡しの件数。離脱確認・24 時間保持・更新誘導・新規加工の禁止 |
+| **`requiresDeliveryAttention`** | **ファイルを保持する条件。** 起動時の削除対象から外す |
+
+**2 つを分けます。** 注記付きの `delivered` は「受け取れている」ため未受け渡し件数には数えませんが、**再試行の余地を残すためファイルは保持します。** 利用者が「保存済みを確認」「再試行」「破棄」のいずれかを選ぶまで保持し、選んだ時点で注記を消して通常の `delivered` として扱います。
+
+**保持期間は他の出力と同じ 24 時間です。** 無期限に残すと、加工済み画像が端末へ蓄積します。期限到達時は注記ごと削除し、利用者へは通知しません（`delivered` であり、成果物は渡っています）。
 
 これは履歴の復元ではなく**未完了の受け渡し処理の復旧**として扱うため、「履歴を保存しない」を選んでいる利用者にも表示します。
 
@@ -2501,7 +2566,7 @@ struct DeletionContext: Sendable {
     let isFavorite: Bool
     let isBeingEdited: Bool
     let hasNonTerminalQueueItem: Bool
-    let hasOutputRecord: Bool
+    let hasUndeliveredOutputRecord: Bool   // isUndelivered のみ。delivered は保護しない
     let hasNonTerminalExportCommit: Bool
     let hasWorkingSourceRecord: Bool
     let isWithinReexportWindow: Bool   // 24 時間のやり直し保証
@@ -2519,7 +2584,7 @@ func canDeleteHistoryUnit(
 | --- | --- | --- |
 | **絶対保護**（どの契機でも削除しない） | **非終端のキュー項目**（`isTerminal == false`。6.5） | 処理中のバッチが消える |
 | 同上 | **非終端の `ExportCommit`** | 復旧の手がかりを失い、会計を戻せなくなる |
-| 同上 | **`isUndelivered` の `OutputRecord`** | 利用者が受け取っていない成果物が消える |
+| 同上 | **`isUndelivered` の `OutputRecord`**（`hasUndeliveredOutputRecord`） | 利用者が受け取っていない成果物が消える |
 | **利用者が上書きできる** | お気に入り | 利用者が明示的に保護した履歴が消える |
 | 同上 | 編集中のプロジェクト | 編集画面が参照先を失う |
 | 同上 | `WorkingSourceRecord`（[画像処理](image-pipeline.md)） | 処理用の元素材が消え、キューを復元できない |
@@ -2558,7 +2623,7 @@ func canDeleteHistoryUnit(
 | --- | --- | --- |
 | 1 | `canDeleteHistoryUnit` が真であることを確認する | DB |
 | 2 | **同一 DB トランザクション**で `Project` と関連行（`ExportRecord` / `OutputRecord` / キュー項目 / `WorkingSourceRecord` / 検出・レビュー結果 / `ProjectStampAsset` / 履歴サムネイル）を削除し、実体を `PendingFileDeletion` へ積む | DB |
-| 3 | DB の確定後、**台帳トランザクション**で `ExportedSettingsEntry` / `ProjectSourceSnapshot` / `WorkingSourceBinding` を削除する。他から参照されない `SourceRecord` も同じトランザクションで削除する | ProtectedBlobStore |
+| 3 | DB の確定後、**台帳トランザクション**で `ExportedSettingsEntry`（pending と確定の両方）/ `ProjectSourceSnapshot` / `WorkingSourceBinding` を削除する。他から参照されない `SourceRecord` も同じトランザクションで削除する | ProtectedBlobStore |
 | 4 | `PendingFileDeletion` に従って実体を削除する | ファイルシステム |
 
 **DB を先に確定させます。** 逆順にすると、台帳を消したあとに DB の削除が失敗した場合に、**存在する `Project` から認可情報だけが失われます。** その `Project` は素材同一性を解決できず、「変更せず再書き出し」も判定できません。DB が先なら、余るのは「`Project` が無い台帳要素」だけで、起動時に回収できます。
@@ -2566,7 +2631,7 @@ func canDeleteHistoryUnit(
 | 中断位置 | 起動時の扱い |
 | --- | --- |
 | 手順 2 の途中 | DB トランザクションが巻き戻る。削除は成立していない |
-| 手順 2 と 3 の間 | **`Project` が存在しない `exportedSettingsEntries` / `projectSourceSnapshots` / `workingSourceBindings` を台帳トランザクションで削除する** |
+| 手順 2 と 3 の間 | **`Project` が存在しない台帳要素（pending を含む 4 集合）を台帳トランザクションで削除する** |
 | 手順 3 と 4 の間 | `PendingFileDeletion` の GC が実体を回収する |
 
 **この照合には全 `projectID` が要ります。** 起動時復旧は `RecoverySnapshot.projectIDs` を使い、同じ 1 回の走査で 3 種類の孤児（`exportedSettingsEntries` / `projectSourceSnapshots` / `workingSourceBindings`）を削除します（[書き出し Saga](export-saga.md) の 5）。
@@ -2596,21 +2661,46 @@ actor HistoryDeletionCoordinator { }   // Project / Batch 削除、編集中 Pro
 ```swift
 // Domain — 永続化ポート
 protocol HistoryDeletionStore: Sendable {
-    /// 削除可否の判定材料を、削除と同一トランザクションで読む
-    func loadDeletionContext(
+    /// 確認画面の表示用。ここで得た値を削除の根拠にしない
+    func inspectDeletion(
         _ unit: HistoryUnit,
         trigger: DeletionTrigger
-    ) async throws -> DeletionContext
+    ) async throws -> DeletionInspection
 
-    /// 手順 2。判定と削除を単一 DB トランザクションで行い、消えた projectID を返す
+    /// DB トランザクション内で DeletionContext を再取得し、
+    /// canDeleteHistoryUnit を再評価してから削除する
     func deleteHistoryUnit(
         _ unit: HistoryUnit,
-        context: DeletionContext
+        trigger: DeletionTrigger
     ) async throws -> Set<ProjectID>
+}
+
+/// 確認画面へ出す情報。削除の可否そのものは保証しない
+struct DeletionInspection: Sendable {
+    let blockedByAbsoluteProtection: Set<AbsoluteProtection>
+    let overridableProtections: Set<OverridableProtection>
+    let affectedProjectCount: Int
+    let reclaimableBytes: Int64
+}
+
+enum AbsoluteProtection: Sendable, Hashable {
+    case nonTerminalQueueItem
+    case nonTerminalExportCommit
+    case undeliveredOutput
 }
 ```
 
-**判定結果を呼び出し側から渡しません。** 読み取りと削除を同じトランザクションへ閉じないと、判定と削除の間に新しい参照が生まれます。
+**`DeletionContext` を呼び出し側から渡しません。** 渡せる形にすると次の競合が残ります。
+
+```
+context を読む
+  → 新しい ExportCommit またはキュー項目が作られる
+  → 古い context で削除が通る
+```
+
+**`deleteHistoryUnit` は `trigger` だけを受け取り、`DeletionContext` を DB トランザクションの内側で読み直します。** `inspectDeletion` の結果は確認文言のためだけに使い、削除の根拠にしません。**再評価で不可になった場合は throw し、利用者へ理由を提示します。**
+
+**`DeletionInspection` と `DeletionContext` を別の型にします。** 同じ型にすると、表示用に読んだ値を削除へ渡す実装が書けてしまいます。
 
 ##### 出力の削除経路
 
@@ -2918,29 +3008,103 @@ func log(_ event: AnalyticsEvent)   // log(String) も log(code:fields:) も存�
 
 **`case` を「仕様のイベントを 1 case ずつ」とだけ書きません。** 列挙が閉じていなければ、実装時に文字列イベントが混ざります。上記が v1 の全 `case` であり、追加はこの列挙の変更として行います。
 
+フィールド型も同じ理由で閉じます。**`String` と `Date` を 1 つも持ちません。**
+
+```swift
+struct LaunchFields: Sendable {
+    let planKind: PlanKind
+    let recoveryPerformed: Bool
+    let coldStart: Bool
+}
+
+struct PhotoSelectedFields: Sendable {
+    let sourceRepresentation: SourceRepresentation
+    let resolutionBucket: ResolutionBucket
+    let hasProviderIdentifier: Bool
+    let isBatch: Bool
+}
+
+struct DetectionFields: Sendable {
+    let faceCountBucket: FaceCountBucket
+    let resolutionBucket: ResolutionBucket
+    let issueReasons: Set<ReviewReason>
+    let isRedetection: Bool
+}
+
+struct ReviewFields: Sendable {
+    let faceCountBucket: FaceCountBucket
+    let issueReasons: Set<ReviewReason>
+    let usedBulkResolution: Bool
+}
+
+struct ExportStartedFields: Sendable {
+    let accountingMode: ExportAccountingMode
+    let planKind: PlanKind
+    let isBatch: Bool
+}
+
+struct DeliveryFields: Sendable {
+    let planKind: PlanKind
+    let viaPhotoLibrary: Bool        // false なら OS 共有
+    let wasRetry: Bool
+}
+
+struct BatchFields: Sendable {
+    let sizeBucket: BatchSizeBucket
+    let planKind: PlanKind
+    let failureCountBucket: FaceCountBucket   // 件数区分を共用する
+}
+
+enum BatchSizeBucket: Int32, Sendable, Hashable {
+    case upTo5 = 0, upTo10 = 1, upTo25 = 2, upTo50 = 3
+}
+
+struct PaywallFields: Sendable {
+    let reason: UpgradeReason        // 商品判断の分類
+    let planKind: PlanKind
+}
+
+struct PurchaseFields: Sendable {
+    let plan: Plan
+    let isRestore: Bool
+}
+
+struct RecoveryFields: Sendable {
+    let commitState: ExportCommitState?
+    let outcome: RecoveryOutcome
+    let ledgerRepaired: Bool
+}
+
+enum RecoveryOutcome: Int32, Sendable, Hashable {
+    case completed = 0, rolledBack = 1, blocked = 2, noop = 3
+}
+```
+
+**`UpgradeReason` は [商品判断](product-decisions.md) の分類をそのまま使います。** 分析専用の別分類を作ると、Paywall の表示理由と集計が食い違います。
+
 区分値と誤り分類です。**いずれも `Int32` の wire 値を固定し、`/v1/diagnostics` と共有します。**
 
 ```swift
-enum FaceCountBucket: Int32, Sendable {
+enum FaceCountBucket: Int32, Sendable, Hashable {
     case zero = 0, one = 1, twoToThree = 2, fourToTen = 3, elevenOrMore = 4
 }
 
-enum ResolutionBucket: Int32, Sendable {
+enum ResolutionBucket: Int32, Sendable, Hashable {
     case upTo2MP = 0, upTo8MP = 1, upTo16MP = 2, upTo32MP = 3, above32MP = 4
 }
 
 /// 課金区分。Plan と status を潰した分析用の値。Plan をそのまま送らない
-enum PlanKind: Int32, Sendable {
+enum PlanKind: Int32, Sendable, Hashable {
     case free = 0, standardActive = 1, standardPending = 2
     case proActive = 3, proPending = 4, expired = 5
 }
 
-enum OsKind: Int32, Sendable {
+enum OsKind: Int32, Sendable, Hashable {
     case ios = 0
 }
 
 /// 仕様 26.1 の誤り分類。自由文字列を使わない
-enum AppErrorCode: Int32, Sendable {
+enum AppErrorCode: Int32, Sendable, Hashable {
     case unknown = 0
     case photoLoadFailed = 1
     case unsupportedFormat = 2

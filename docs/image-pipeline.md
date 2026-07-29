@@ -220,7 +220,7 @@ struct SourcePlacement: Sendable {
     let scaleMode: SourceScaleMode
 }
 
-enum SourceScaleMode: Sendable { case fit, fill }
+enum SourceScaleMode: Sendable, Hashable { case fit, fill }
 
 struct RenderRegion: Sendable {
     let bounds: PixelRect                // 出力キャンバス基準の絶対ピクセル
@@ -314,21 +314,89 @@ struct EffectOpacity: Sendable, Equatable {
 }
 ```
 
+**すべて `struct` として宣言し、`throws` の initializer だけを公開します。** 値域の表だけでは、実装が生の `Double` を通します。
+
+```swift
+struct MosaicRatio: Sendable, Hashable {         // 領域短辺に対するセル比
+    let value: Double
+    init(_ v: Double) throws { /* 有限かつ 0 < v <= 0.5 */ }
+}
+struct BlurRatio: Sendable, Hashable {           // 領域短辺に対する σ 比
+    let value: Double
+    init(_ v: Double) throws { /* 有限かつ 0 < v <= 0.5 */ }
+}
+struct FeatherRatio: Sendable, Hashable {        // 領域短辺に対する比
+    let value: Double
+    init(_ v: Double) throws { /* 有限かつ 0 <= v <= 0.5 */ }
+}
+struct ExpansionRatio: Sendable, Hashable {      // 顔矩形からの拡張率
+    let value: Double
+    init(_ v: Double) throws { /* 有限かつ 0 <= v <= 2.0 */ }
+}
+struct RotationDegrees: Sendable, Hashable {
+    let value: Double                            // 正規化済み
+    init(_ v: Double) throws { /* 有限。-180 <= v < 180 へ正規化して保持 */ }
+}
+struct SigmaPx: Sendable, Hashable {
+    let value: Double
+    init(_ v: Double) throws { /* 有限かつ > 0 */ }
+}
+struct FeatherPx: Sendable, Hashable {
+    let value: Double
+    init(_ v: Double) throws { /* 有限かつ >= 0 */ }
+}
+struct CellSizePx: Sendable, Hashable {
+    let value: Int
+    init(_ v: Int) throws { /* v >= 2 */ }
+}
+
+/// 元画像またはキャンバスに対する正規化矩形。左上原点
+struct NormalizedRect: Sendable, Hashable {
+    let left: Double
+    let top: Double
+    let rightExclusive: Double
+    let bottomExclusive: Double
+
+    init(left: Double, top: Double, rightExclusive: Double, bottomExclusive: Double) throws {
+        // すべて有限。left < rightExclusive、top < bottomExclusive
+        // 画像外へのはみ出し（負数・1.0 超過）は許す
+    }
+}
+```
+
 | 型 | 表現 | 条件 |
 | --- | --- | --- |
 | `EffectOpacity` | `Double` | 有限かつ **`0 < v <= 1`** |
-| `MosaicRatio` | `Double` | 有限かつ `0 < v <= 0.5`（領域短辺に対する比） |
-| `BlurRatio` | `Double` | 有限かつ `0 < v <= 0.5`（同上） |
-| `FeatherRatio` | `Double` | 有限かつ `0 <= v <= 0.5` |
 | `PixelSize` | `Int` × 2 | `width > 0` かつ `height > 0` |
 | `PixelRect` | `Int` × 4 | `left < rightExclusive`、`top < bottomExclusive` |
-| `NormalizedRect` | `Double` × 4（`left` / `top` / `rightExclusive` / `bottomExclusive`） | すべて有限。`left < rightExclusive`、`top < bottomExclusive`。**画像外へのはみ出しは許す** |
-| `CellSizePx` | `Int` | **`>= 2`**（1px のモザイクは元画像と同じ） |
-| `SigmaPx` | `Double` | 有限かつ `> 0` |
-| `FeatherPx` | `Double` | 有限かつ `>= 0`（境界のぼかしは匿名化の強度に影響しない） |
-| `RotationDegrees` | `Double` | 有限。**`[0, 360)` へ正規化してから保持する** |
-| `VisibleColor` | `UInt32`（RGBA 各 8 bit） | **アルファが 0 より大きい** |
+| `VisibleColor` | **`SrgbArgb8888` の別名**（下記） | **アルファが 0 より大きい** |
 | カスタムスタンプ画像 | — | 最大アルファ値が 0 なら取り込み時に拒否する |
+
+##### `CellSizePx` を `Int` にする理由と丸め
+
+**モザイクのセルはピクセル格子に整列するため `Int` です。** `cellRatio` からの変換規則を固定します。
+
+```
+cellSizePx = max(2, Int(floor(cellRatio.value * min(bounds.width, bounds.height))))
+```
+
+| 項目 | 規則 |
+| --- | --- |
+| 丸め | **floor** |
+| 下限 | **2**。floor の結果が 1 以下なら 2 へ引き上げる |
+| 例外 | 引き上げても領域が 2px 未満なら `throw`（隠せない） |
+
+**floor に固定するのは、セルを大きくする方向へ倒すと利用者の指定より粗くなるためです。** 下限 2 は「1px モザイク＝原画」を構造的に禁じます。
+
+**`sigmaPx` と `featherPx` は `Double` のままです。** どちらもガウス分布のパラメータであり、格子に整列する必要がありません。
+
+##### `RotationDegrees` の範囲
+
+**`[-180, 180)` へ正規化します。** `RenderRegion` の回転規約（4 章）と同じ範囲であり、2 か所で別の範囲を定めません。`370` と `10` が別の値として `ProjectSettingsHash` に入ると、見た目が同じでも「設定を変えた」と判定されます。
+
+##### `VisibleColor` は `SrgbArgb8888` の別名
+
+**別の型を 2 つ持ちません。** `RenderOpSpec.solid` と `BackgroundSpec.solid` が使う色は、4 章で定めた `SrgbArgb8888`（`0xAARRGGBB`、straight alpha）そのものです。「アルファが 0 より大きい」という制約は `SrgbArgb8888` の initializer が検証します。
 
 列挙型です。
 
@@ -381,17 +449,16 @@ struct EffectSetting: Sendable, Equatable {
 }
 
 /// 顔矩形からの拡張率（仕様 8.4）
-struct ExpansionRatios: Sendable, Equatable {
-    let top: Double        // 有限かつ >= 0
-    let bottom: Double
-    let leading: Double
-    let trailing: Double
+struct ExpansionRatios: Sendable, Hashable {
+    let top: ExpansionRatio
+    let bottom: ExpansionRatio
+    let leading: ExpansionRatio
+    let trailing: ExpansionRatio
 }
 ```
 
 **`cornerRatio` を生の `Double` にしません。** `NaN`・負数・1 を超える値がそのまま Core Graphics へ渡ると、描画結果が未定義になります。他の比率と同じく検証済みの値型にします。
 
-**`RotationDegrees` を正規化して保持します。** `370` と `10` が別の値として `ProjectSettingsHash` に入ると、見た目が同じでも「設定を変えた」と判定されます。
 
 **検証を迂回できないようにします。** Swift は `struct` へ memberwise initializer を自動生成するため、同一モジュール内からは検証を飛ばせます。
 
@@ -514,7 +581,8 @@ protocol ImageEffectRenderer: Sendable {
 | --- | --- |
 | `left` / `top` | **floor** |
 | `right` / `bottom` | **ceil** |
-| `featherPx` / `cellSizePx` / `sigmaPx` | 丸めない（`Double` のまま渡す） |
+| `featherPx` / `sigmaPx` | 丸めない（`Double` のまま渡す） |
+| `cellSizePx` | **floor し、下限 2 へ引き上げる**（3 章） |
 
 領域が必ず**外側へ広がる**方向に丸められます。内側へ丸めると顔の縁が 1 ピクセル露出しえます。
 
@@ -557,7 +625,12 @@ protocol ImageEffectRenderer: Sendable {
 ```swift
 struct SrgbArgb8888: Sendable, Hashable {
     let value: UInt32    // 0xAARRGGBB
+
+    init(_ v: UInt32) throws { /* アルファ（上位 8 bit）が 0 なら throw */ }
 }
+
+/// RenderOpSpec / BackgroundSpec が使う色。別の型を作らない
+typealias VisibleColor = SrgbArgb8888
 ```
 
 | 項目 | 規約 |
@@ -748,7 +821,7 @@ protocol StampRasterizer: Sendable {
 }
 ```
 
-`OutputMetadata` は許可リストで構築した出力メタデータで、ICC プロファイルの有無、ピクセル寸法、保持する場合の `DateTimeOriginal` だけを持ちます（[アーキテクチャ設計](architecture.md) の 7.5）。**`ImageEncoder` は元画像のメタデータ辞書を受け取りません。** 受け取れる形にすると、コピーして削除する実装が可能になります。
+`OutputMetadata` は許可リストで構築した出力メタデータで、ICC プロファイルの有無、ピクセル寸法、保持する場合の `OriginalCaptureMetadata`（ローカル日時・小数秒・UTC オフセット・算出済み `utcMillis`）だけを持ちます（[アーキテクチャ設計](architecture.md) の 7.5）。**`ImageEncoder` は元画像のメタデータ辞書を受け取りません。** 受け取れる形にすると、コピーして削除する実装が可能になります。
 
 ##### `@MainActor` のプロトコル
 
@@ -882,7 +955,7 @@ struct WorkingSourceRecord: Sendable {
 | 1 | `PickedPhotoInput.importedFile` の**所有権を受け取る**（以降の削除責務は Saga 側） | — | ファイルを削除して選択を失敗として返す |
 | 2 | `contentFingerprint` と EXIF を読む | — | 同上 |
 | 3 | **向きを正規化した原寸ファイルを作成し、その SHA-256 とサイズを測る** | ファイルシステム | 手順 8 へ |
-| 4 | **台帳トランザクションで `ProjectSourceSnapshot` と `WorkingSourceBinding` を保存する** | ProtectedBlobStore | 手順 8 へ |
+| 4 | **台帳トランザクションで、素材 identity を `SourceRecord` へ解決（無ければ作成）し、`ProjectSourceSnapshot` と `WorkingSourceBinding` を保存する** | ProtectedBlobStore | 手順 8 へ |
 | 5 | **DB トランザクションで `Project`・キュー項目・`WorkingSourceRecord`（正規化ファイルを指す）を作成する** | DB | 手順 7 へ |
 | 6 | **取り込みファイルを削除する。** 削除に失敗したら `PendingFileDeletion` へ積む | ファイルシステム | 起動時 GC へ委ねる |
 | 7 | 手順 5 が失敗したら、**snapshot と binding を補償削除する** | ProtectedBlobStore | 起動時 GC へ委ねる |
@@ -892,6 +965,10 @@ struct WorkingSourceRecord: Sendable {
 **手順 6 を DB 確定の後に置きます。** 先に消すと、手順 5 が失敗したときに再試行できません。DB が確定していれば、取り込みファイルはもう誰からも参照されないため、残っても孤児 GC が回収します。
 
 **取り込みファイルを残しません。** 正規化後の原寸があれば処理は成立し、取り込みファイル（未加工の顔画像）を端末へ二重に置く理由がありません。
+
+**手順 4 で `SourceRecord` も作ります。** 台帳の不変条件 9 は「全 `ProjectSourceSnapshot.identity` の alias がいずれかの `SourceRecord` に存在する」ことを要求します（[アーキテクチャ設計](architecture.md) の 6.4）。snapshot だけを追加すると、**新しい写真を選んだ直後に台帳を保存できません。**
+
+**snapshot 自体に `sourceID` を持たせません。** 後日 alias の統合が起きても、`SourceRecord` 側を統合すれば済みます。snapshot が `sourceID` を保持すると、統合後に古い値を指したままになります。**認可時の解決は従来どおり開始ゲートの内側で行います。**
 
 **snapshot を DB より先に保存します。** 逆順にすると「DB 行はあるが identity が無い」状態が生まれ、その `Project` は `sourceID` を解決できません。この順なら、余るのは「snapshot はあるが `Project` が無い」状態だけです。
 
@@ -965,27 +1042,44 @@ struct WorkingSourceRecord: Sendable {
 | 3 | `transact` の内側で、候補の `SourceIdentity` と snapshot の `identity` が**同じ alias 連結成分へ解決されるか**を判定する（[アーキテクチャ設計](architecture.md) の 6.4） | 候補ファイルを削除して終了 |
 | 4 | 不一致なら候補ファイルを削除し、選び直しを求める | — |
 | 5 | 一致したら、**同じ台帳トランザクションで候補の alias を勝者 `SourceRecord` へ追加する** | 候補ファイルを削除して終了 |
-| 6 | 向きを正規化した原寸ファイルと `WorkingSourceBinding` を作る | 手順 9 へ |
-| 7 | **後半へ分岐する**（下記） | 手順 9 へ |
-| 8 | **候補ファイル（正規化前）を削除する。** 削除に失敗したら `PendingFileDeletion` へ積む | — |
-| 9 | 失敗経路では、作成済みの正規化ファイルと候補ファイルを `PendingFileDeletion` へ積む | — |
+| 6 | 向きを正規化した原寸ファイルを作り、SHA-256 とサイズを測る | 手順 10 へ |
+| 7 | **台帳トランザクション**で `WorkingSourceBinding` を新しい値へ置換する。**置換前の値を保持しておく** | 手順 10 へ |
+| 8 | **DB トランザクション**で後半（下記）を実行する | 手順 9 へ |
+| 9 | 手順 8 が失敗したら、**台帳トランザクションで binding を置換前の値へ戻す** | 起動時の照合へ委ねる |
+| 10 | 失敗経路では、作成済みの正規化ファイルと候補ファイルを `PendingFileDeletion` へ積む | — |
+| 11 | 成功したら**候補ファイル（正規化前）を削除する。** 失敗したら `PendingFileDeletion` へ積む | — |
 
-後半は `WorkingSourceRecord` の有無で決まります。**「再選択」と「再編集」を利用者の導線ではなく、DB の状態で分岐させます。**
+後半（手順 8）は `WorkingSourceRecord` の有無で決まります。**「再選択」と「再編集」を利用者の導線ではなく、DB の状態で分岐させます。**
 
 | 現在の状態 | 呼ぶメソッド | 内容 |
 | --- | --- | --- |
 | `WorkingSourceRecord` **あり**（実体が欠損している場合を含む） | `replaceWorkingSource` | `sourceFile` を置換し、**トランザクション内で読んだ現在値**を `PendingFileDeletion` へ入れる。`createdAt` を `replacedAt` へ更新する |
 | `WorkingSourceRecord` **なし**（24 時間で削除済み・履歴から開いた） | `attachWorkingSourceToExistingProject` | 行を新規作成する。`createdAt` は `attachedAt` |
 
-どちらも**同一 DB トランザクション**で、`WorkingSourceBinding` の更新、`FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` / `PreviewConfirmation` の破棄、`detectionRevision` と `projectRevision` の増加を行います。完了後に**顔検出をやり直します。** 新しい確認が完了するまで書き出しできません。
+どちらも**同一 DB トランザクション**で、`FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` / `PreviewConfirmation` の破棄と、`detectionRevision` / `projectRevision` の増加を行います。完了後に**顔検出をやり直します。** 新しい確認が完了するまで書き出しできません。
+
+##### 台帳と DB は同時に更新できない
+
+**`WorkingSourceBinding` は署名済み台帳にあり、`WorkingSourceRecord` は `app.db` にあります。** DB トランザクションの内側から台帳を更新することはできません（[アーキテクチャ設計](architecture.md) の 7.1）。**「同一トランザクションで両方を更新する」とは書けません。**
+
+したがって、手順 7 と 8 の間には**片側だけが進んだ区間が必ず存在します。** 専用の素材変更ジャーナルを設けない代わりに、**その区間を起動時に安全側へ回復させます。**
+
+| 中断位置 | 台帳 | DB | 起動時の判定 |
+| --- | --- | --- | --- |
+| 手順 7 の前 | 旧 binding | 旧 record | 一致。**何も起きない** |
+| **手順 7 と 8 の間** | **新 binding** | **旧 record** | 不一致。**`paused(.sourceReselectionRequired)` へ倒し、選び直しからやり直す** |
+| 手順 8 の後 | 新 binding | 新 record | 一致。**完了している** |
+| 手順 9（補償）の後 | 旧 binding | 旧 record | 一致。**何も起きない** |
+
+**中断区間では作業をやり直すことになりますが、失われるのは再選択の操作だけです。** 素材・設定・検出結果はどちらの側も壊れておらず、**別画像が正規の binding として通ることもありません。**
+
+**逆順（DB を先）にできません。** DB を先に進めると「新 record・旧 binding」となり、これも不一致ですが、**新しいファイルが binding に無い状態で `WorkingSourceRecord` から参照されます。** 検証済み境界（下記）がすべての読み取りを止めるため実害は同じですが、**削除の規則（DB 先行）と更新の規則を同じ向きに揃えると、「binding があって record が無い」を孤児と「record があって binding が無い」を差し替えと一意に解釈できなくなります。** 更新は台帳先行、削除は DB 先行で固定します。
 
 **`createdAt` を更新するのは、保持期限の起点だからです。** 更新しないと、再選択した直後に 24 時間期限へ到達して再び削除されます。
 
 **`previousSourceFile` を呼び出し側から渡しません。** 呼び出し側が読んだ時点と DB トランザクションの間に別経路が置換すると、**現在使われているファイルを削除対象として渡せます。** 置換対象はトランザクション内で読みます。
 
-**手順 6〜7 を 1 トランザクションにまとめます。** 分けると「新しい素材だが古い顔座標」という状態が観測されます。
-
-手順 7 以降は再検出の既存規則（[アーキテクチャ設計](architecture.md) の 6.1）と同じです。**再選択は再検出を必ず伴うため、確認状態の破棄も自動的に成立します。**
+手順 8 以降は再検出の既存規則（[アーキテクチャ設計](architecture.md) の 6.1）と同じです。**再選択は再検出を必ず伴うため、確認状態の破棄も自動的に成立します。**
 
 ##### 実装の所在
 
@@ -1091,6 +1185,54 @@ struct WorkingSourceBinding: Sendable, Equatable {
 この順序は書き出しの手順 7、24 時間期限の削除、`Project` 削除 Saga、台帳修復のすべてに適用します。**削除の入口ごとに順序を変えません。**
 
 **照合は起動時復旧の手順 4.5 で行います。** コミット復旧（手順 4）より前に置くと、手順 7 を完了させれば消えるはずの `WorkingSourceRecord` を差し替えとして誤検出します（[書き出し Saga](export-saga.md) の 5）。
+
+##### 検証済み境界を通してのみ実体を開く
+
+**起動時と書き出し開始時の 2 点だけでは足りません。** 起動後に DB の `sourceFile` を差し替えると、その間に走る他の読み取りが別画像を掴みます。
+
+```
+起動時の照合を通過
+  → DB の WorkingSourceRecord.sourceFile を別画像へ差し替え
+  → プレビュー・再検出・複製が別画像を読む
+  → 「Free 版として複製」がその別画像をコピーし、新しい Project の正規 binding を作る
+  → 元 Project の署名済み identity が、別画像に対して有効な binding として洗い替わる
+```
+
+**`WorkingSourceRecord` を直接読ませません。** 原寸ファイルを開くすべての入口を検証済み境界へ集約します。
+
+```swift
+// Domain — 処理用実体を開く唯一の入口
+protocol VerifiedWorkingSourceResolver: Sendable {
+    /// binding と実体を照合し、一致した場合だけ参照を返す
+    func resolve(_ projectID: ProjectID) async throws -> VerifiedWorkingSource
+}
+
+struct VerifiedWorkingSource: Sendable, Equatable {
+    let projectID: ProjectID
+    let sourceFile: WorkingSourceFileRef
+    let binding: WorkingSourceBinding      // 照合に使った値
+    let verifiedAt: Date
+}
+```
+
+| 入口 | 検証 |
+| --- | --- |
+| プレビュー表示 | 必須 |
+| 顔検出・再検出 | 必須 |
+| 書き出し（手順 −2 と手順 1） | 必須 |
+| **「Free 版として複製」のコピー元** | **必須** |
+| 履歴サムネイルの生成 | 必須 |
+| その他の原寸ファイル読み込み | 必須 |
+
+| 検証失敗 | 扱い |
+| --- | --- |
+| binding と `sourceFile` が違う / ハッシュ不一致 | `throw`。その `Project` を `paused(.sourceReselectionRequired)` へ |
+| binding が無い | 同上 |
+| 実体が無い | 同上 |
+
+**`VerifiedWorkingSource` を返り値の型にするのは、検証を通らずに `WorkingSourceFileRef` を得る経路を無くすためです。** `ImageEffectRenderer` や `FaceDetector` へ渡す値の出所がこの型に限られます。
+
+**照合は毎回行います。** ハッシュ計算は原寸 1 枚あたり数十ミリ秒であり、プレビューの再描画ごとではなく「ファイルを開くたび」に走ります。同一の `VerifiedWorkingSource` を編集セッション中に使い回すのは、`Project` の binding が変わらない限り許します。
 
 **ハッシュは正規化後ファイルに対して取ります。** `contentFingerprint`（取り込みファイル基準）とは別物です。照合したいのは「いま処理しようとしている実体」であり、取り込み時のバイト列ではありません。
 

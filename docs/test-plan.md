@@ -33,6 +33,8 @@
 - `QuotaPolicy`（月跨ぎ、TZ 変更、時刻巻き戻し、うるう年、月末 23:59:59 → 00:00:00、24 時間境界）
 - `evaluate` が更新後の `UsageLedger` を返し、`unlimited` でも時刻更新と grant 整理が行われること
 - `QuotaPolicy` と開始ゲートが `Plan` を参照せず `ResolvedCapabilities` のみを受け取ること
+- **`evaluate` が `monthlyLimit` を引数で受け取り、リモート設定の変更が判定へ反映されること**
+- **`Domain` が `RemoteConfig` 型そのものを参照しないこと**
 - `monthlyIntegrityLock` が解除条件を満たさないとき、`consumedExportIDs` が空でも `blocked(ledgerIntegrityFailure)` になること
 - **端末時刻をどう変更しても `monthlyIntegrityLock` が解除されないこと。信頼できる時刻の観測だけが解除条件であること**
 - **`trustedMonth` が `nil` のとき封鎖が解除されないこと**
@@ -156,6 +158,9 @@
 - `Domain` が `StampRasterizer` プロトコルのみを持ち、`CoreGraphics` を参照しないこと
 - `StampRasterKey` に位置・回転・不透明度・形状が含まれないこと
 - **`opacity = 0` / `cellSizePx < 2`（特に 1px） / `sigmaPx = 0` / 幅 0 の領域が `throw` されること**
+- **`cellSizePx` が `floor(cellRatio × 領域短辺)` で求まり、1 以下なら 2 へ引き上げられること。引き上げても領域が 2px 未満なら `throw` すること**
+- **`VisibleColor` が `SrgbArgb8888` の別名であり、アルファ 0 が initializer で拒否されること**
+- **`MosaicRatio` / `BlurRatio` / `FeatherRatio` / `ExpansionRatio` / `NormalizedRect` が `throws` の initializer だけを公開し、`NaN` と範囲外を拒否すること**
 - **`RenderOpSpec` / `RenderOp` / `RenderOpDraft` に生の `Double` が残っていないこと**
 - **`NaN` や無限大の座標が `throw` されること**
 - **完全に透明なカスタムスタンプ画像が取り込み時に拒否されること**
@@ -172,6 +177,7 @@
 
 - 設定ハッシュが `Map` のキー順・**`Double.bitPattern`（64 ビット）**・内容ハッシュ参照で正準化され、DB ID に依存しないこと
 - **`Float` へ丸めた場合に区別できなくなる 2 つの `Double` が、異なる設定ハッシュになること**
+- **`RotationDegrees` が `[-180, 180)` へ正規化され、`370` と `10` が同じ設定ハッシュになること**
 - `-0.0` が `+0.0` へ正規化されること
 - プロジェクト設定ハッシュの一致判定により、Free の「変更せず再書き出し」が許可されること
 - **`ExportedSettingsEntry` が署名済み台帳にあり、未署名の DB 行を書き換えても判定が変わらないこと**
@@ -267,6 +273,10 @@
 ### 3.1.1 v1 で追加した中断点
 
 - **`prepared` の `outputFile` が `nil` であり、`fileVerified` 以降は `OutputFileRef` が入っていること。手順 2 で `verifiedOutput` と同時に確定すること**
+- **手順 7 が `published` を書き、コミット行を削除しないこと**
+- **`published` から手順 8・9 を冪等に再実行でき、手順 3 へ戻らないこと**
+- **`published` で 2 つ目の `OutputRecord` が作られないこと**
+- **ゲートの解放が手順 9 またはロールバック完了であること**
 - **手順 1 の途中で落ちた一時ファイルが、どのコミットからも参照されず孤児 GC で回収されること**
 - **`FinalizeExportInput` が `exportID` と `queueItemID` の 2 つだけであり、`OutputRecord` / `ExportRecord` / `Project.updatedAt` を保存済みコミットから導出すること**
 - **`queueItemID` が別 `Project` のキュー項目を指す場合に throw すること。`projectID` / `batchID` / `state == .exporting` をすべて検査すること**
@@ -274,7 +284,12 @@
 - **`loadRecoverySnapshot` が復旧前に一度だけ読まれ、`checkForeignKeys` が復旧後に別途呼ばれること**
 - **`ExportCommitColumns` が生のバイト列であり、署名検証前に `ProjectID` などへデコードされないこと**
 - **手順 7 が `WorkingSourceRecord` を同一トランザクションで削除し、実体を `PendingFileDeletion` へ積むこと**
-- **`AccountingIntent.settingsEntryToApply` が手順 4 で適用され、ロールバックは台帳の `ownerExportID` が対象 `exportID` と一致する場合だけ `previousSettingsEntry` へ戻すこと。元が無ければエントリごと削除されること**
+- **`AccountingIntent.settingsEntryToApply` が手順 4 で `pendingExportedSettingsEntries` へ入り、確定側へは入らないこと**
+- **手順 8 で `ownerExportID` が一致する pending だけが確定側へ昇格すること。既に昇格済みなら何も起きないこと**
+- **ロールバックが `ownerExportID` の一致する pending を削除し、確定側に触れないこと**
+- **署名不正コミットの破棄でも pending が削除されること**
+- **`published` へ到達していないコミットの pending が、起動時の手順 5.5 で削除されること**
+- **一度も成功していない設定が「変更せず再書き出し」の判定に使われないこと**
 - **`AccountingApplied` を単独の根拠にしないこと。`applied` 未保存で落ちても正しくロールバックできること**
 - **`ProjectSourceSnapshot` が書き出しで追加も削除もされず、ロールバックの対象にもならないこと**
 - **台帳を修復した起動では、署名が正常な非終端コミットも含めてすべて破棄され、キュー項目が `failed(.ledgerRepaired)` になること**
@@ -298,6 +313,10 @@
 - **保存待機中に共有が成功して `delivered` になった場合でも、保存失敗の `abandonDeliveryAttempt` が `generated` へ戻さないこと**
 - **`completeLibrarySave` が `DeliveryAttempt` を削除し、`completeShare` は関与しないこと**
 - **`delivered` 維持で `UnknownLibrarySave` が永続化され、再度の異常終了後も案内が残ること**
+- **注記のある `delivered` 出力が起動時に削除されず、ファイルが保持されること**
+- **`loadUnknownLibrarySaves()` で起動時に注記を取得できること**
+- **`requiresDeliveryAttention` が保持条件、`isUndelivered` が件数に使われ、混同されないこと**
+- **注記付き出力も 24 時間で削除され、その際に通知しないこと**
 - **利用者が確認すると `UnknownLibrarySave` が消え、`OutputRecord` 削除でも CASCADE で消えること**
 - **`resolveOrphanedAttempts()` が起動時復旧の手順 7 で必ず呼ばれ、7.5 と 8 がその後に実行されること**
 - **`deliveryUnknown` が未受け渡しとして 24 時間の保持と離脱確認に数えられること**
@@ -367,6 +386,9 @@
 - 「履歴を保存しない」設定で、未受け渡し出力・`UsageLedger`・未完了 `ExportCommit`・トライアル用 `SourceRecord` の 4 つ以外が残らないこと
 - `canDeleteHistoryUnit` が**列挙された全参照元**を保護すること
 - **`Batch` 削除が所属する全 `Project`・キュー項目・`ExportRecord` を 1 トランザクションで削除し、台帳側も全 `projectID` 分を 1 トランザクションで削除すること**
+- **`deleteHistoryUnit` が `DeletionContext` を受け取らず、DB トランザクション内で読み直して再判定すること**
+- **`inspectDeletion` の後・削除の前に新しい `ExportCommit` が作られた場合、削除が throw すること**
+- **`hasUndeliveredOutputRecord` が `delivered` の出力を保護せず、`isUndelivered` のみを見ること**
 - **1 枚でも絶対保護に触れていればバッチ全体が削除されないこと**
 - **編集中 `Project` の破棄が `WorkingSourceRecord`・binding・snapshot をすべて削除すること**
 - `CustomStamp` を削除しても、それを使用したプロジェクトが再書き出しできること
@@ -381,8 +403,13 @@
 - **`ProjectSourceSnapshot` が署名済み台帳にあり、再起動後も `sourceID` を解決できること**
 - **未署名の DB 行を書き換えても `SourceIdentity` が変わらないこと**
 - **`ProjectSourceSnapshot` が、書き出しの完了でも処理用ファイルの 24 時間期限でも削除されないこと**
-- **`WorkingSourceBinding` が `WorkingSourceRecord` と常に同時に作成・削除されること**
+- **`WorkingSourceBinding` の更新が台帳先行、削除が DB 先行で行われること**
+- **更新の中断（台帳のみ進んだ状態）が起動時に `paused(.sourceReselectionRequired)` へ倒れること**
+- **削除の中断（DB のみ進んだ状態）が孤児 binding として手順 5.5 で回収されること**
 - **`sourceFile` を別 `Project` の `.processingTemporary` ファイルへ差し替えると、起動時と書き出し開始時の両方で検出されること**
+- **プレビュー・再検出・複製・サムネイル生成のいずれも `VerifiedWorkingSourceResolver` を経由し、`WorkingSourceRecord` を直接読まないこと**
+- **起動後に差し替えた場合、次の読み取りで検出されて `paused(.sourceReselectionRequired)` になること**
+- **「Free 版として複製」のコピー元が検証を通ること。差し替えた画像を新 `Project` の正規 binding にできないこと**
 - **正規化ファイルの内容を書き換えると、ハッシュ不一致で検出されること**
 - **検出時にその `Project` が `paused(.sourceReselectionRequired)` になり、他の項目が止まらないこと**
 - **`WorkingSourceRecord` があって binding が無い状態が不変条件違反として扱われること**
@@ -463,6 +490,8 @@
 - `StampAsset` の作成が atomic rename を経ること
 - **インポート Saga の手順 1〜3 の途中で終了した場合、作成済みファイルが孤児として起動時 GC で回収されること**
 - **`ProjectSourceSnapshot` が `Project` 行より先に台帳へ保存されること**
+- **インポート手順 4 が同じ台帳トランザクションで `SourceRecord` を解決または作成し、不変条件 9 を満たすこと**
+- **新規写真の初回インポート直後に台帳を保存できること**
 - **DB 登録に失敗した場合、その snapshot が補償削除されること**
 - **補償削除の前に終了しても、対応する `Project` が無い snapshot が起動時復旧の手順 5.5 で回収されること**
 - **同じ走査で孤児 `exportedSettingsEntries` も削除されること**
@@ -475,7 +504,7 @@
 - **複製の DB 失敗で新 snapshot と binding が補償削除されること**
 - **元素材の実体が無い場合、`WorkingSourceRecord` を作らず再接続待ちになること**
 - **複製に `ExportedSettingsEntry` がコピーされないこと**
-- **`Project` 削除で DB が先に確定し、その後に台帳から 2 種類が削除されること**
+- **`Project` 削除で DB が先に確定し、その後に台帳から `ExportedSettingsEntry` / `ProjectSourceSnapshot` / `WorkingSourceBinding` と未参照 `SourceRecord` が削除されること**
 - **DB 確定と台帳削除の間で終了しても、`Project` から認可情報だけが失われる状態にならないこと**
 - **`WorkingSourceRecord` が最初から向き正規化済みの原寸ファイルを指すこと。差し替えが発生しないこと**
 - **`contentFingerprint` が取り込みファイル（正規化前）から計算されること**
@@ -567,7 +596,8 @@
 - **`PHAssetCreationRequest` の成功直後・DB 更新の前に落ちた場合、`previousState` に応じて `deliveryUnknown` または `delivered` へ解決されること**
 - **同じ経路で `delivered` が `deliveryUnknown` へ後退しないこと**
 - **`Project` 削除の DB 確定直後・台帳削除の前に落ちた場合、次回起動で台帳側の 2 種類が回収されること**
-- **再選択 Saga の手順 6（単一トランザクション）の直前・直後で落ちた場合、ファイルと DB の片側だけが進んだ状態にならないこと**
+- **再選択 Saga の手順 7（台帳）と手順 8（DB）の間で落ちた場合、次回起動で `paused(.sourceReselectionRequired)` へ倒れ、素材・設定・検出結果のいずれも壊れないこと**
+- **手順 9 の補償が走った場合、旧 binding へ戻って何も変わらない状態になること**
 
 ---
 
