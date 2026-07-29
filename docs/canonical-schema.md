@@ -128,8 +128,8 @@ struct SignedPayload: Sendable {
 | 型 | 符号化 |
 | --- | --- |
 | `ProjectID` / `BatchID` / `ExportID` / `RegionID` / `SourceID` / `ManagedFileID` | `UUID` の 16 バイト |
-| `FaceTrackID` | `String`（長さ前置き UTF-8） |
-| `ManagedFileRef` | `kind`（`UInt32`）→ `fileID`（16 バイト） |
+| `FaceTrackID` | `UUID` の 16 バイト |
+| `ManagedFileRef` および種別つき参照（`OutputFileRef` ほか） | `kind`（`UInt32`）→ `fileID`（16 バイト） |
 
 ---
 
@@ -224,7 +224,7 @@ struct SignedPayload: Sendable {
 
 | 型 | 順 |
 | --- | --- |
-| `YearMonth` / `TrustedUTCMonth` | `year`（`Int32`）→ `month`（`Int32`） |
+| `YearMonth` / `TrustedUTCMonth` | `year`（`Int32`）→ `month`（`Int32`）。**実型も `Int32`** |
 | `SourceRecord` | `sourceID` → `aliases`（unordered） |
 | `GrantEntry` | `sourceID` → `firstSuccessAt` → `ownerExportID` |
 | `TrialEntry` | `sourceID` → `ownerExportID` |
@@ -269,7 +269,7 @@ struct Entitlement: Sendable, Equatable {
 | 2 | `projectID` | `ProjectID` |
 | 3 | `batchID` | `BatchID?` |
 | 4 | `sourceID` | `SourceID` |
-| 5 | `outputFile` | `ManagedFileRef` |
+| 5 | `outputFile` | `OutputFileRef` |
 | 6 | `authorization` | `ExportAuthorization` |
 | 7 | `verifiedOutput` | `VerifiedOutput?` |
 | 8 | `finalizedAt` | `Date?` |

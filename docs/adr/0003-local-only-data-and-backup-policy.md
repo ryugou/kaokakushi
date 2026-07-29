@@ -14,7 +14,7 @@ Accepted
 
 ## Decision
 
-**アプリが保存するすべてをバックアップ対象外とする。**
+**アプリが所有する DB・画像・保護 blob をバックアップ対象外とする。**
 
 `protected/` と一時ファイルに加えて、**`app.db` / `stamps/` / `thumbnails/` も対象外**とする。
 

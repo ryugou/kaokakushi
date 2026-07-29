@@ -15,7 +15,7 @@
 | --- | --- |
 | **本書** | 目的、技術スタック、モジュール構成と依存方向、並行性、ドメインモデル、永続化、セキュリティ境界、リモート設定、テスト戦略、逸脱と未決事項 |
 | [画像処理アーキテクチャ](image-pipeline.md) | `RenderSpec` / `RenderDraft` / `RenderPlan`、座標・色・合成規約、スタンプラスタライズ、写真選択の境界型 |
-| [書き出し Saga](export-saga.md) | 認可、`ExportCommit` の状態、手順 0〜7、ロールバック、起動時復旧、出力再生成、受け渡し |
+| [書き出し Saga](export-saga.md) | 認可、`ExportCommit` の状態、手順 0〜7、ロールバック、起動時復旧、実体喪失時の扱い、受け渡し |
 | [正準スキーマ](canonical-schema.md) | HMAC 署名対象のバイト表現、型ごとのフィールド順、`enum` の固定番号 |
 | [運用](operations.md) | 更新誘導の運用、審査への配慮、リモート設定の配信規約、診断と Sentry の運用制約 |
 | [商品面の決定](product-decisions.md) | v1 のリリース範囲、動画の扱い、課金訴求の分類、利用者向け表現 |
@@ -610,12 +610,19 @@ func resolveCapabilities(_ state: SubscriptionCacheState) -> CapabilityResolutio
 | `valid` | オフラインでもこのキャッシュで有料機能を維持する |
 | `missing` | RevenueCat へ問い合わせる。成功するまでは `verificationRequired` |
 | `integrityFailure` / `unsupportedSchema`（移行不能） | キャッシュを信頼せず、RevenueCat から再取得する |
-| `temporarilyUnavailable` | 上書きせず再試行する。判定は保留し、既存の `Entitlement` を維持する |
+| `temporarilyUnavailable` | 上書きせず再試行する。**メモリ上に検証済みの `Entitlement` があれば維持し、無ければ `verificationRequired`**（下記） |
 
 - 取得に成功すればキャッシュを置き換える
 - **オフラインで再取得できない場合、有料権限を新規に付与しません**
 - **カスタムスタンプ、履歴、プリセットなどのデータは削除しません**
 - 利用者へは購入状態を確認できない旨を提示し、**再試行**と**購入の復元**への導線を出す
+
+**コールドスタートでは維持する値がありません。** プロセス起動直後はメモリ上の `Entitlement` が存在しないため、「既存を維持する」が成立しません。
+
+| 状況 | 扱い |
+| --- | --- |
+| メモリ上に検証済みの `Entitlement` がある | **維持する**（セッション中の一時障害） |
+| 無い（コールドスタート） | **`verificationRequired`。** 書き出しを開始せず、再試行を提示する |
 
 **Free へ降格したと表示しません。** 検証できない状態と失効した状態は異なります。
 
@@ -687,8 +694,8 @@ Free 範囲のプロジェクトとは、モザイク・ぼかし・黒塗り・
 
 ```swift
 struct YearMonth: Sendable, Hashable, Comparable {
-    let year: Int
-    let month: Int          // 1...12
+    let year: Int32
+    let month: Int32        // 1...12。端末の TimeZone で算出する
 }
 
 struct UsageLedger: Sendable, Equatable {
@@ -978,7 +985,7 @@ Free および Standard の利用者は、Pro の中核である一括処理を�
 
 - **同じ元素材について、初回の正常生成時にだけ 1 クレジットを消費する**
 - 使い切るまで有効。失敗した写真では消費しない
-- 全件失敗または利用者が中止した場合、クレジットは減らない
+- **中止した場合、手順 7 が未完了の写真は消費しない。既に手順 7 まで完了した写真のクレジットは戻さない**
 - Pro へ加入済みの場合は消費しない
 
 **クレジットの消費判定は `sourceID`（6.4）に従います。** 加工内容が異なっても、同じ元写真であれば追加消費しません。
@@ -1184,7 +1191,7 @@ sourceLeases      の sourceID → 勝者
 
 ##### `providerAssetKeyHash`
 
-**平文で保存しません。** 端末内でソルト付きハッシュへ変換し、元の値を復元できない形で持ちます。**ソルトは台帳署名とは別の鍵から派生させます**（9.1）。
+**平文で保存しません。** 端末内で**派生鍵による HMAC-SHA256** へ変換し、元の値を復元できない形で持ちます。**鍵は台帳署名とは別のラベルから派生させます**（9.1）。アルゴリズムと出力形式は [正準スキーマ](canonical-schema.md) が正本です。
 ##### `contentFingerprint`
 
 **ファイル全体の SHA-256 とファイルサイズ・撮影日時の複合とします。** バイト表現の正本は [正準スキーマ](canonical-schema.md) です。
@@ -1423,6 +1430,13 @@ enum ExportQueueState: Sendable, Equatable {
     case paused(QueuePauseReason)
 }
 
+/// 失敗の理由。再試行の可否を型で持つ
+struct ExportQueueFailure: Sendable, Equatable {
+    let errorCode: AppErrorCode      // 9.2 の列挙
+    let isRetryable: Bool
+    let occurredAt: Date
+}
+
 enum QueuePauseReason: Sendable, Equatable {
     case entitlementExpired            // Pro 契約の終了（書き出し Saga 1.4）
     case storageInsufficient
@@ -1502,15 +1516,18 @@ struct BatchID:     Sendable, Hashable { let rawValue: UUID }
 struct ExportID:    Sendable, Hashable { let rawValue: UUID }
 struct RegionID:    Sendable, Hashable { let rawValue: UUID }
 struct SourceID:    Sendable, Hashable { let rawValue: UUID }   // 素材の正規 ID（6.4）
-struct FaceTrackID: Sendable, Hashable { let rawValue: String } // Vision の observation UUID 文字列
+struct FaceTrackID: Sendable, Hashable { let rawValue: UUID }
+
+/// 出力へ影響する設定の正準ハッシュ（正準スキーマ 5.2）
+struct ProjectSettingsHash: Sendable, Hashable { let rawValue: Data }   // SHA-256 の 32 バイト
 ```
 
-`FaceTrackID` だけ `String` なのは、値の出所が `observation.uuid.uuidString` でありアプリが採番しないためです。
+**`FaceTrackID` も `UUID` です。** 自動検出は `observation.uuid` をそのまま使い、手動領域はアプリが採番します。文字列にすると 2 つの出所で表現が揺れます。
 
 | 理由 | 内容 |
 | --- | --- |
 | 誤った受け渡しの防止 | `exportID` を期待する引数へ `projectID` を渡せない。**コンパイルで止まる** |
-| DB 結合の一意性 | 2 つの DB を跨ぐ整合検査（7.1）の対象が型で決まる |
+| DB 結合の一意性 | 外部キーと結合の対象が型で決まる（7.1） |
 | 正準化の一意性 | HMAC 対象の各 ID を「`UUID` の 16 バイト」として符号化できる（9.1） |
 | ログ禁止の強制 | 分析イベントのフィールド型にしないことで、送信経路へ入れられない（9.2） |
 
@@ -1921,7 +1938,7 @@ tmp/raster/
 
 ##### バックアップ
 
-**アプリが保存するすべてを対象外とします**（ADR 0003）。
+**アプリが所有する DB・画像・保護 blob を対象外とします**（ADR 0003）。下表が対象の全体であり、`UserDefaults` や第三者 SDK の保存領域は含みません（それらに保護すべきデータを置かないことは 9.2 で担保します）。
 
 | パス | 根拠 |
 | --- | --- |
@@ -2140,7 +2157,6 @@ func canDeleteHistoryUnit(
 | **`OutputRecord`** | 未受け渡し出力の実体だけが残り、レコードが孤児になる |
 | **非終端の `ExportCommit`** | 復旧の手がかりを失い、会計を戻せなくなる |
 | **`WorkingSourceRecord`**（[画像処理](image-pipeline.md)） | 処理用の元素材が消え、キューを復元できない |
-| **出力再生成の対象**（[書き出し Saga](export-saga.md)） | 再生成中の対象が消える |
 | 24 時間のやり直し保証 | やり直しができなくなる |
 
 **判定と削除は同一トランザクション内で行います。** 別トランザクションに分けると、判定と削除の間に新しい参照が生まれます。外部キーの `RESTRICT`（7.1）が二重の防御として働きます。
@@ -2335,6 +2351,18 @@ EXIF の撮影日時を一律に削除すると、加工後の写真がすべて
 | XMP / IPTC / MakerNote の全 namespace | **コピーしない** |
 | 上記以外のすべて | **コピーしない** |
 
+```swift
+/// 出力メタデータ。許可フィールド以外を構造的に持てない
+struct OutputMetadata: Sendable, Equatable {
+    let pixelSize: PixelSize
+    let iccProfile: Data?              // 色が変わる場合のみ埋める
+    let dateTimeOriginalUTCMillis: Int64?   // 設定で保持を選んだ場合のみ
+    // 向きは常に通常値（1）として書くため、フィールドを持たない
+}
+```
+
+**`ImageEncoder` はこの型だけを受け取ります**（[画像処理](image-pipeline.md)）。元のメタデータ辞書を渡せる形にすると、コピーして削除する実装が可能になります。
+
 **保存後に読み返し、許可されていない namespace とキーが 1 つも無いことを検査します。** 検査に失敗した出力は完成扱いにせず、[書き出し Saga](export-saga.md) の手順 1 の検証失敗として扱います。
 
 **カスタムスタンプも同じ方針で再エンコードします。** 取り込み時に縮小・変換するため、そこで元のメタデータを捨てます。スタンプ画像は出力へ合成されるだけですが、実体がアプリ内に残る以上、位置情報を保持する理由がありません。
@@ -2512,7 +2540,7 @@ Sentry Cocoa SDK は `Domain` が定義する `CrashReporter` プロトコルの
 
 **HMAC が防げるのは改変であって、リプレイではありません。** 過去の正しい署名済み台帳をファイルごと保存しておき、枠を使い切ったあとで書き戻す攻撃は、署名が正当なため検出できません。完全に防ぐにはサーバー照合か端末外の単調増加カウンタが必要ですが、仕様 14.5 は不正利用防止のためだけの端末識別子収集を禁じています。
 
-> **対象とする:** DB の直接編集、値の書き換え、`UsageLedger` / `SubscriptionState` / `ExportCommit` / `RemoteConfigState` の相互の付け替え。
+> **対象とする:** 署名対象 payload（`UsageLedger` / `SubscriptionState` / `RemoteConfigState`）と署名付き `ExportCommit` 行の値改変、および 4 種の相互の付け替え。
 >
 > **対象としない:** ルート化 / Jailbreak 済み端末で、過去の正規 blob を丸ごと復元するリプレイ攻撃。
 
@@ -2602,7 +2630,7 @@ pub struct DiagnosticsContext {
 
 ```swift
 struct RemoteConfigEnvelope: Sendable, Decodable {
-    let schemaVersion: Int
+    let schemaVersion: Int32
     let configVersion: Int64
     let issuedAt: Date
     let expiresAt: Date
@@ -2682,10 +2710,10 @@ struct RemoteConfigState: Sendable {
 
 - 6.5 の確認画面（`reviewRequired` の解消なしに書き出せない）
 - 6.1 の全顔初期マスク
-- 8.3 のファイル検証（サイズ・SHA-256・デコード）
-- 8.3 のコミットジャーナルと最終確定境界
-- 5.3 の未解決 `bitmapID` によるエラー
-- 6.7 の「未受け渡し出力があるときは受け渡し導線を先に出す」
+- [書き出し Saga](export-saga.md) のファイル検証（サイズ・SHA-256・デコード）
+- [書き出し Saga](export-saga.md) のコミットジャーナルと最終確定境界
+- [画像処理](image-pipeline.md) の未解決 `bitmapID` によるエラー
+- [運用](operations.md) の「未受け渡し出力があるときは受け渡し導線を先に出す」
 
 **これらに対応する設定キー自体を `RemoteConfig` に持たせません。** 「フラグはあるが既定で有効」ではなく、**フラグを存在させない**という形にします。
 

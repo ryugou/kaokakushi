@@ -10,7 +10,7 @@
 **エフェクトの数学をすべて `Domain` に置き、`MediaKit` には描画プリミティブのみを残します。** 目的は、エフェクトの計算をシミュレータなしでテストできる状態に保つことです。Core Image を呼び出す層に強度計算が混ざると、そのテストに実機が要ります。
 
 ```
-MediaKit   Vision で顔検出 → 正規化座標の矩形群 + 頭部回転角 + 信頼度 + 小顔フラグ（5.1）
+MediaKit   Vision で顔検出 → 正規化座標の矩形群 + 頭部回転角 + 信頼度 + 小顔フラグ（1 章）
     ↓
 Domain     拡張率適用、形状決定、切り抜きと背景処理の決定
            → RenderSpec（正規化座標・相対強度のまま）
@@ -51,7 +51,7 @@ Vision の型（`FaceObservation`）を `Domain` へ流しません。
 ```swift
 struct DetectedFace: Sendable, Equatable {
     let faceTrackID: FaceTrackID  // 6.6
-    let bounds: NormalizedRect    // 左上原点へ変換済み（5.4）
+    let bounds: NormalizedRect    // 左上原点へ変換済み（4 章）
     let confidence: Double        // 0.0〜1.0
     let yawDegrees: Double
     let pitchDegrees: Double
@@ -64,8 +64,8 @@ struct DetectedFace: Sendable, Equatable {
 
 ```swift
 DetectedFace(
-    faceTrackID: FaceTrackID(rawValue: observation.uuid.uuidString),
-    bounds: convertBounds(observation.boundingBox),   // Y 軸反転（5.4）
+    faceTrackID: FaceTrackID(rawValue: observation.uuid),
+    bounds: convertBounds(observation.boundingBox),   // Y 軸反転（4 章）
     confidence: Double(observation.confidence),
     yawDegrees: observation.yaw.converted(to: .degrees).value,
     pitchDegrees: observation.pitch.converted(to: .degrees).value,
@@ -86,7 +86,7 @@ DetectedFace(
 - 検出品質と一定の相関がある
 - 常に `1.0` ではない
 
-**この条件を満たさない場合、`lowConfidence` をトリアージから外します。** 意味のない値で警告を出すと、警告の総量だけが増えて `smallFace` や `extremePose` まで流し読みされます。閾値は 12.5 の未決事項です。
+**この条件を満たさない場合、`lowConfidence` をトリアージから外します。** 意味のない値で警告を出すと、警告の総量だけが増えて `smallFace` や `extremePose` まで流し読みされます。閾値は [アーキテクチャ設計](architecture.md) の未決事項です。
 
 ##### 拡張率の適用
 
@@ -113,11 +113,11 @@ struct RenderSpec: Sendable, Equatable {
     let sourceCrop: NormalizedRect       // 元画像のどこを切り出すか
     let scaleMode: SourceScaleMode       // fit / fill
     let background: BackgroundSpec
-    let regions: [RenderRegionSpec]      // 順序に意味がある（9.1 の ordered）
+    let regions: [RenderRegionSpec]      // 順序に意味がある（[正準スキーマ](canonical-schema.md) の ordered）
 }
 
 struct RenderRegionSpec: Sendable, Equatable {
-    let bounds: NormalizedRect           // 拡張率適用済み。出力キャンバス基準（5.4）
+    let bounds: NormalizedRect           // 拡張率適用済み。出力キャンバス基準（4 章）
     let rotationDegrees: RotationDegrees
     let shape: MaskShape                 // ellipse / circle / rectangle / rounded(cornerRatio)
     let featherRatio: FeatherRatio       // 領域短辺に対する比。0 を許す
@@ -227,7 +227,7 @@ struct RenderRegion: Sendable {
     let rotationDegrees: RotationDegrees
     let shape: MaskShape
     let featherPx: FeatherPx
-    let order: Int                       // 描画順（5.4）
+    let order: Int                       // 描画順（4 章）
     let op: RenderOp
 }
 
@@ -333,7 +333,7 @@ struct EffectOpacity: Sendable, Equatable {
 - 同一モジュール内でも直接生成しない規約とし、lint で検出する
 - **永続データのデコード時にも同じ検証を通す**（`Decodable` の `init(from:)` で `throws` 版を呼ぶ）
 
-**利用者が「この顔は隠さない」と選ぶ経路は別に存在します。** `isMasked = false` にするか、`ReviewResolution.unmaskedExportConfirmed` を記録するか（6.1）です。`isMasked == true` の顔に no-op 相当の値が渡された場合、`compileRenderDraft` が `throw` します。
+**利用者が「この顔は隠さない」と選ぶ経路は別に存在します。** `isMasked = false` にするか、`ReviewResolution.unmaskedExportConfirmed` を記録するか（[アーキテクチャ設計](architecture.md) の 6.1）です。`isMasked == true` の顔に no-op 相当の値が渡された場合、`compileRenderDraft` が `throw` します。
 
 ## 3. スタンプラスタライズ
 
@@ -376,9 +376,8 @@ protocol StampRasterizer: Sendable {
 ```swift
 struct RasterizedStampAsset: Sendable {
     let bitmapID: String
-    let rasterFile: ManagedFileRef   // kind は .rasterTemporary（7.3）
-    let pixelSize: PixelSize
-    let rowBytes: Int
+    let rasterFile: RasterFileRef
+    let descriptor: RawBitmapDescriptor
 }
 
 protocol ImageEffectRenderer: Sendable {
@@ -595,14 +594,14 @@ enum RawColorSpace: Sendable { case sRGB }
 
 /// ImageEffectRenderer の戻り値。エンコード前のビットマップ
 struct RenderedImage: Sendable {
-    let file: ManagedFileRef          // kind は .rasterTemporary
+    let file: RasterFileRef
     let descriptor: RawBitmapDescriptor
 }
 
 /// 受け渡し対象。MediaSaver と SharePresenter が受け取る
 struct OutputFile: Sendable {
     let exportID: ExportID
-    let file: ManagedFileRef          // kind は .output
+    let file: OutputFileRef
     let format: ImageFormat
     let byteSize: Int64
     let suggestedCreationDate: Date?  // 写真ライブラリ保存時の creationDate（5 章）
@@ -663,7 +662,7 @@ protocol ImageEncoder: Sendable {
         format: ImageFormat,
         quality: Double,
         metadata: OutputMetadata
-    ) async throws -> ManagedFileRef      // kind は .output
+    ) async throws -> OutputFileRef
 }
 
 protocol MediaSaver: Sendable {
@@ -696,7 +695,7 @@ protocol AdPresenter: AnyObject {
 
 | プロトコル | 実装モジュール | 使用 API |
 | --- | --- | --- |
-| `SharePresenter` | `MediaKit` | `UIActivityViewController`（8.8） |
+| `SharePresenter` | `MediaKit` | `UIActivityViewController`（[書き出し Saga](export-saga.md) の受け渡し） |
 | `AdPresenter` | `Ads` | Google Mobile Ads |
 
 `OutputDeliveryCoordinator`（`actor`）から `await` して呼びます。`@MainActor` の型はアクタによって状態が保護されるため `Sendable` として扱えます。
@@ -709,10 +708,10 @@ protocol AdPresenter: AnyObject {
 | --- | --- | --- |
 | `PhotosPicker` の提示 | `App` | `PhotosPickerItem` は `App` の外へ出さない |
 | `fileImporter` の提示 | `App` | 外部 `URL` は `App` の外へ出さない |
-| `PrivacyShield` | `App` | `scenePhase` に紐づく（9.3） |
+| `PrivacyShield` | `App` | `scenePhase` に紐づく（[アーキテクチャ設計](architecture.md) の 9.3） |
 
 ```swift
-// App — 境界サービス。View から呼べるのはこの 2 つだけ（3.2）
+// App — 境界サービス。View から呼べるのはこの 2 つだけ（[アーキテクチャ設計](architecture.md) の 3.2）
 @MainActor final class PhotoSelectionBridge { }   // PhotosPickerItem → PickedPhotoInput
 @MainActor final class FileSelectionBridge { }    // security-scoped URL → ManagedFileRef
 ```
@@ -761,7 +760,7 @@ protocol PickedPhotoLoader: Sendable {
 )
 ```
 
-それでも `Optional` として扱い、取得できない場合は `SourceIdentity.providerAssetKeyHash` を `nil` として `contentFingerprint` だけで判定します（6.4）。
+それでも `Optional` として扱い、取得できない場合は `SourceIdentity.providerAssetKeyHash` を `nil` として `contentFingerprint` だけで判定します（[アーキテクチャ設計](architecture.md) の 6.4）。
 
 **`fileImporter` が返す `URL` は security-scoped です。** 利用前にアクセスを開始し、処理後に必ず解放します。start と stop を均衡させないとカーネル資源をリークします。
 
@@ -784,8 +783,8 @@ defer {
 ```swift
 struct WorkingSourceRecord: Sendable {
     let projectID: ProjectID
-    let sourceFile: ManagedFileRef    // kind は .processingTemporary
-    let createdAt: Date
+    let sourceFile: WorkingSourceFileRef
+    let createdAt: Date               // 保持期限の起点（下記）
 }
 ```
 
@@ -805,14 +804,52 @@ struct WorkingSourceRecord: Sendable {
 
 | 順 | 操作 | 保存先 | 失敗時 |
 | --- | --- | --- | --- |
-| 1 | `ManagedFileStore` で処理用ファイルを作成する | ファイルシステム | 選択を失敗として返す。副作用なし |
-| 2 | DB トランザクションで `Project`・キュー項目・`WorkingSourceRecord` を作成する | DB | 手順 3 へ |
-| 3 | 手順 2 が失敗したら、作成したファイルを削除する。削除に失敗したら `PendingFileDeletion` へ追加する | ファイルシステム / DB | 起動時 GC へ委ねる |
-| 4 | **手順 2 の完了後にのみ、選択処理の成功を呼び出し元へ返す** | — | — |
+| 1 | `ManagedFileStore` で取り込みファイルを作成する（ピッカーの生データ） | ファイルシステム | 選択を失敗として返す。副作用なし |
+| 2 | `contentFingerprint` と EXIF を読む | — | 同上 |
+| 3 | **向きを正規化した原寸ファイルを作成する** | ファイルシステム | 手順 6 へ |
+| 4 | DB トランザクションで `Project`・キュー項目・`WorkingSourceRecord`（**正規化ファイルを指す**）を作成する | DB | 手順 6 へ |
+| 5 | **取り込みファイルを削除する**（`PendingFileDeletion` 経由） | ファイルシステム | 起動時 GC へ委ねる |
+| 6 | 失敗したら、作成済みのファイルを削除するか `PendingFileDeletion` へ追加する | ファイルシステム / DB | 起動時 GC へ委ねる |
+| 7 | **手順 4 の完了後にのみ、選択処理の成功を呼び出し元へ返す** | — | — |
 
-**手順 1 と 2 の間で終了した場合、ファイルはどの `WorkingSourceRecord` からも参照されません。** 起動時の孤児 GC が回収します（[アーキテクチャ設計](architecture.md) の孤児ファイル GC）。**「ファイルはあるが行が無い」は容量を食うだけで、復旧不能な損失を生みません。**
+**`WorkingSourceRecord` は最初から向き正規化済みの原寸ファイルを指します。** 取り込みファイルを一度登録してから差し替える構成にすると、差し替えトランザクションと、その途中で終了した場合にどちらを正とするかの規則が追加で要ります。**手順 3 を DB 登録の前へ置けば、差し替えが存在しません。**
+
+`contentFingerprint` は**取り込みファイル**（ピッカーが返した実データ）から計算します（[アーキテクチャ設計](architecture.md) の 6.4）。正規化後のファイルから計算すると、デコード実装が変わったときに同じ写真が別素材になります。
+
+**手順 1〜3 の途中で終了した場合、ファイルはどの `WorkingSourceRecord` からも参照されません。** 起動時の孤児 GC が回収します。**「ファイルはあるが行が無い」は容量を食うだけで、復旧不能な損失を生みません。**
 
 逆順（行を先に作る）は採りません。実体が無い `WorkingSourceRecord` を参照するキュー項目ができ、復元時に必ず `paused(.sourceReselectionRequired)` へ落ちます。**失っても復旧できないほうを避ける**という規則（[アーキテクチャ設計](architecture.md) の DB とファイルの更新順序）と同じ向きです。
+
+##### `detectionSource` の寿命
+
+**`detectionSource` は永続化しません。** `FaceDetector` の呼び出しが終わった時点で削除します。
+
+| 項目 | 規約 |
+| --- | --- |
+| 生成 | `PickedPhotoLoader.load` の中。`kind` は `.processingTemporary` |
+| 寿命 | 検出の呼び出しから復帰までのスコープ |
+| 削除 | 検出の成功・失敗にかかわらず、`LoadedPhoto` を使い終えた時点で呼び出し元が削除する |
+| DB への登録 | **しない。** `WorkingSourceRecord` が指すのは原寸だけ |
+| 再検出 | そのつど作り直す |
+
+**縮小画像を残す理由がありません。** 再検出は利用者が明示的に行う操作であり頻度が低く、原寸から作り直す費用は 1 回分の縮小だけです。残せば、未加工の顔画像がもう 1 つ端末に増えます。
+
+##### 未完了作業の保持期限
+
+**`createdAt` を期限判定に使います。** 書き出しも破棄もされないプロジェクトを放置すると、**未加工の顔画像が無期限に残ります。**
+
+| 項目 | 規約 |
+| --- | --- |
+| 保持期限 | `createdAt` から **24 時間** |
+| 判定に使う時刻 | `retentionNow`。`nil` の間は削除しない（[アーキテクチャ設計](architecture.md) の 6.3） |
+| 期限到達時 | **処理用ファイルを削除**し、`WorkingSourceRecord` の行も削除する |
+| キュー項目 | `paused(.sourceReselectionRequired)` へ遷移させる |
+| `Project` | **削除しない。** 設定と検出結果は履歴の保存期間に従う |
+| 判定の契機 | 起動時の孤児 GC と同じタイミング |
+
+24 時間は未受け渡し出力の保持期間と揃えます。**利用者から見た「作業を再開できる窓」を 1 つにするためです。**
+
+`Project` を残すのは、設定と検出結果が未加工画像を含まないためです。同じ写真を選び直せば、`sourceID` が一致して grant による無料の再書き出しも成立します。
 
 ##### 写真ライブラリの読み取り権限
 
@@ -829,8 +866,8 @@ struct WorkingSourceRecord: Sendable {
 
 | 用途 | 取得元 |
 | --- | --- |
-| クォータ用 `contentFingerprint`（6.4） | **EXIF の `DateTimeOriginal` のみ。** 無ければ `null` |
-| 写真ライブラリ保存時の `creationDate`（7.5） | `PHAsset.creationDate`（権限がある場合のみ）→ EXIF → 設定しない |
+| クォータ用 `contentFingerprint`（[アーキテクチャ設計](architecture.md) の 6.4） | **EXIF の `DateTimeOriginal` のみ。** 無ければ `null` |
+| 写真ライブラリ保存時の `creationDate`（[アーキテクチャ設計](architecture.md) の 7.5） | `PHAsset.creationDate`（権限がある場合のみ）→ EXIF → 設定しない |
 
 前者を権限に依存させると、権限を得る前後で同じ写真の fingerprint が変わり、無料枠を二重に消費します。
 
@@ -849,8 +886,8 @@ struct ProjectSourceLocator: Sendable, Equatable {
 | 項目 | 規約 |
 | --- | --- |
 | 保存先 | **`app.db` の `Project` のみ** |
-| バックアップ | 対象外（7.4） |
-| ログ・分析・診断 | **一切出さない。** 分析イベントのフィールド型にしない（9.2） |
+| バックアップ | 対象外（[アーキテクチャ設計](architecture.md) の 7.4） |
+| ログ・分析・診断 | **一切出さない。** 分析イベントのフィールド型にしない（[アーキテクチャ設計](architecture.md) の 9.2） |
 | `UsageLedger` への保存 | **しない。** クォータ側は `providerAssetKeyHash` のまま |
 | `nil` の場合 | 再編集で再選択を求める |
 | `Project` の削除 | 同じ行なので同時に消える |

@@ -124,6 +124,8 @@
 - `plan = standard` かつ `status = pending` で `singleExportAccess == .metered` になること
 - `CapabilityResolution.verificationRequired` で書き出し認可が開始されず、Free 降格の表示も出ないこと
 - キャッシュ `missing` かつオフラインで `verificationRequired` になること
+- **`temporarilyUnavailable` かつメモリ上に検証済み `Entitlement` が無い（コールドスタート）とき `verificationRequired` になること**
+- **メモリ上に検証済み値があるときは維持されること**
 - `canEdit` が能力で判定され、`requiredPlan` の戻り値比較で可否を決めないこと
 - バッチ内の 1 枚を単体編集するとき `canEdit` に従うこと
 - `requiredPlan` が設定内容から導かれ、作成時のプランに依存しないこと
@@ -153,6 +155,9 @@
 - 永続データのデコード時にも検証済み値型の `throws` 版が呼ばれること
 - **境界型（`ImageSource` / `LoadedPhoto` / `DetectionResult` / `RenderedImage` / `OutputFile`）が `URL` もパス文字列も持たないこと**
 - **`ImageSource` に未正規化を表す値が存在しないこと**（`OrientationState` を持たない）
+- **`ExportCommit.outputFile` / `OutputRecord.outputFile` が `OutputFileRef`、`WorkingSourceRecord.sourceFile` が `WorkingSourceFileRef`、`RasterizedStampAsset.rasterFile` が `RasterFileRef` であること**
+- **`RasterizedStampAsset` が `pixelSize` / `rowBytes` を重複して持たず、`descriptor` だけを持つこと**
+- **`YearMonth` / `TrustedUTCMonth` の実型が `Int32` であること。`FaceTrackID` が `UUID` であること**
 - **`RenderedImage` と `RasterizedStampAsset` が `RawBitmapDescriptor` を持ち、チャネル順・アルファ・色空間・bit depth が型で決まること**
 
 ### 2.6 設定ハッシュと正準化（6.4 / 9.1）
@@ -256,14 +261,13 @@
 - **署名不正行の `outputFile` / `projectID` が参照されず、他の正常な出力と履歴が削除されないこと**
 - **署名不正行がある間、孤児予約と孤児 lease の自動回収が保留されること**
 
-### 3.4 出力再生成（8.7）
+### 3.4 コミット確定後の実体喪失（8.7）
 
-- **`restoreOutput` が `UsageLedger` を 1 バイトも変更せず、`generatedAt` / `expiresAt` を延長せず、`ExportRecord` を追加しないこと**
-- **`restoreOutput` が atomic replace → DB update の順で実行されること**
-- **その 2 手順の間で中断した場合、「ファイルはあるが記録値と不一致」を再生成の途中として扱い、手順 1 からやり直すこと**（破損として扱わない）
-- **`retentionNow == nil` のとき、`restoreOutput` も期限切れ削除も行わないこと**
-- **`retentionNow >= originalExpiresAt` なら `restoreOutput` を実行せず、`OutputRecord` を削除すること**
-- `restoreOutput` がキューの成功件数を増やさないこと
+- **実体が無い、または記録値と一致しないとき、`OutputRecord` を削除すること**
+- **`UsageLedger` を 1 バイトも変更しないこと**（月間枠・grant・トライアルのいずれも戻さない）
+- **`retentionNow == nil` の間は削除も判定も保留すること**
+- **自動再生成を行わないこと。** 利用者へは新しい書き出しとして案内すること
+- 24 時間以内の同一素材なら、やり直しが `freeMonthlyReexport` になること
 
 ### 3.5 トライアル予約（6.3）
 
@@ -272,7 +276,7 @@
 - 手順 0 の `prepared` 保存失敗で、補償トランザクションが**予約・`SourceLease`・未参照 `SourceRecord`** をすべて取り消すこと
 - 同じ素材が `trialEntries` と `trialReservations` の両方に存在しないこと
 - 同じ素材の再書き出しでトライアルクレジットが二重に減らないこと
-- トライアルクレジットが成功枚数分だけ減り、失敗と中止では減らないこと
+- **中止時点で手順 7 が未完了の写真は消費せず、既に手順 7 まで完了した写真のクレジットは戻らないこと**
 
 ### 3.6 保護ストアの読み込み失敗（7.2）
 
@@ -289,7 +293,7 @@
 - 受け渡し成功後も完了画面を離れるまで出力が保持され、保存と共有を任意の順序で実行できること
 - 異常終了後の起動時、`generated` では復旧案内が出て、`delivered` では出ないこと
 - 「履歴を保存しない」設定で、未受け渡し出力・`UsageLedger`・未完了 `ExportCommit`・トライアル用 `SourceRecord` の 4 つ以外が残らないこと
-- `canDeleteHistoryUnit` が非終端キュー・`OutputRecord`・非終端 `ExportCommit`・`WorkingSourceRecord`・再生成対象を保護すること
+- `canDeleteHistoryUnit` が非終端キュー・`OutputRecord`・非終端 `ExportCommit`・`WorkingSourceRecord` を保護すること
 - `CustomStamp` を削除しても、それを使用したプロジェクトが再書き出しできること
 - `StampAsset` が**最終保存バイト列**の内容ハッシュで重複排除され、参照カウントが 0 になったときのみ削除されること
 - **`CustomStamp` の登録で参照が 1 増え、一覧削除で 1 減ること。一覧でしか使われていない実体が一覧削除で消えること**
@@ -298,6 +302,8 @@
 - 一括削除が `CustomStamp` のみを対象とし、参照中の `StampAsset` を消さないこと
 - 削除で DB が先に更新され、`PendingFileDeletion` が同じトランザクションへ記録されること
 - `WorkingSourceRecord` の実体が欠けたとき、そのキュー項目が `paused(.sourceReselectionRequired)` へ遷移すること。バッチ全体が止まらないこと
+- **`createdAt` から 24 時間で処理用ファイルと `WorkingSourceRecord` が削除され、キュー項目が `paused(.sourceReselectionRequired)` になること**
+- **その削除で `Project` が消えないこと。`retentionNow == nil` の間は削除しないこと**
 - **`isTerminal` が `completed` / `failed` / `canceled` のみ真であり、履歴削除の保護と完了判定が同じ述語を使うこと**
 
 ### 3.8 更新誘導との順序（6.7）
@@ -323,11 +329,12 @@
 
 - 手順 7 の DB トランザクションが原子的であり、`OutputRecord` / `ExportRecord` / キュー状態 / `Project` の更新とコミット削除が同時に成立すること
 - 「コミットあり・`OutputRecord` なし」または「コミットなし・`OutputRecord` あり」以外の状態が観測されないこと
-- 両スキーマの `journal_mode` が非 WAL であり、いずれかが WAL なら復旧エラーになること
-- 両スキーマの `synchronous` が設定・検証されること
+- `app.db` の `journal_mode` が非 WAL であり、WAL なら復旧エラーになること
+- `synchronous = EXTRA` と `foreign_keys = ON` が設定され、起動時に読み返して検証されること
 - スキーマ移行が単一トランザクションで確定し、途中適用が観測されないこと
 - **外部キー制約が有効であり、`Project` の削除が `OutputRecord` / `ExportCommit` の存在で RESTRICT されること**
-- DB 間参照の整合検査が、`OutputRecord` / `ExportQueueItem` は孤児削除、`ExportCommit` は復旧エラーへ分岐すること
+- **`Project` の削除が `OutputRecord` / `ExportCommit` の存在で RESTRICT され、`ExportQueueItem` / `ExportRecord` / `ProjectStampAsset` は CASCADE すること**
+- `PRAGMA foreign_key_check` が起動時に実行され、違反があれば復旧エラーになること
 
 ### 4.3 署名と鍵（9.1 / 7.2）
 
@@ -338,6 +345,7 @@
 - **blob `missing` / 鍵 `missing` で新規台帳が作られること**
 - **blob `missing` / 鍵 `existing` でも新規台帳が作られ、復旧エラーにならないこと**
 - **`ProtectedBlobKey<UsageLedger>` へ `SubscriptionState` を渡すコードがコンパイルできないこと**（型検査）
+- **`OutputMetadata` に許可フィールド以外を渡せないこと。`ImageEncoder` が元のメタデータ辞書を受け取らないこと**
 - **読み込み時に `payloadType` と `schemaVersion` が型の宣言と一致することを確認し、不一致を `integrityFailure` とすること**
 - **HMAC-SHA256 の署名長が 32 バイトであること。HKDF-SHA256 の派生鍵が 32 バイトで、用途ごとに異なること**
 - **`providerAssetKeyHash` が小文字 16 進 64 文字であること**
@@ -354,7 +362,10 @@
 - `ManagedFileStore` が保存のたびに `isExcludedFromBackup` と `FileProtectionType` を設定し、読み返して検証すること
 - 属性の検証に失敗したファイルが完成扱いにならないこと
 - `StampAsset` の作成が atomic rename を経ること
-- **インポート Saga の手順 1 と 2 の間で終了した場合、処理用ファイルが孤児として起動時 GC で回収されること**
+- **インポート Saga の手順 1〜3 の途中で終了した場合、作成済みファイルが孤児として起動時 GC で回収されること**
+- **`WorkingSourceRecord` が最初から向き正規化済みの原寸ファイルを指すこと。差し替えが発生しないこと**
+- **`contentFingerprint` が取り込みファイル（正規化前）から計算されること**
+- **`detectionSource` が検出の完了後に削除され、DB へ登録されないこと**
 - **DB 登録の完了前に、選択処理の成功が呼び出し元へ返らないこと**
 
 ### 4.5 メタデータ（7.5 / 6.4）

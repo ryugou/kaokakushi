@@ -4,7 +4,7 @@
 | --- | --- |
 | 目的 | 書き出しの認可、状態遷移、処理順、ロールバック、起動時復旧を一意に定める |
 | 読者 | `Application` 層の実装者、障害注入テストの作成者 |
-| 正本の範囲 | `ExportCommit` の型と状態、手順 0〜7、ロールバック順序、起動時復旧順序、署名不正コミットの扱い、出力再生成、受け渡し |
+| 正本の範囲 | `ExportCommit` の型と状態、手順 0〜7、ロールバック順序、起動時復旧順序、署名不正コミットの扱い、実体喪失時の扱い、受け渡し |
 | 関連 | [アーキテクチャ設計](architecture.md)（`UsageLedger`、`ResolvedCapabilities`、`ManagedFileRef`）、[正準スキーマ](canonical-schema.md)（署名バイト表現）、[テスト計画](test-plan.md) |
 
 書き出しの完了で確定する事柄は、**保存先が 3 つに分かれています。**
@@ -59,6 +59,8 @@ protocol ExportSagaStore: Sendable {
 **手順 7 を複数の Repository 呼び出しとして `Application` 側で組み立てません。** そうすると単一 DB トランザクションを保証できず、「出力は公開済みだがキューは `exporting`」が残ります。
 
 ```swift
+struct ExportQueueItemID: Sendable, Hashable { let rawValue: UUID }
+
 struct FinalizeExportInput: Sendable {
     let exportID: ExportID
     let outputRecord: OutputRecord
@@ -66,11 +68,50 @@ struct FinalizeExportInput: Sendable {
     let queueItemID: ExportQueueItemID?
     let projectUpdatedAt: Date
 }
+
+/// 台帳の更新結果と、同じ排他区間で取り出す値を 1 つにまとめる
+struct LedgerTransaction<R: Sendable>: Sendable {
+    let ledger: UsageLedger      // 保存する新しい台帳
+    let result: R                // 認可結果など、呼び出し元が必要とする値
+}
+
+/// 署名検証前の行を含む、起動時の一括読み取り
+struct RecoverySnapshot: Sendable {
+    let commits: [SignedCommitRow]
+    let outputRecords: [OutputRecord]
+    let nonTerminalQueueItems: [ExportQueueItemSnapshot]
+    let workingSources: [WorkingSourceRecord]
+    let foreignKeyViolations: [ForeignKeyViolation]   // PRAGMA foreign_key_check の結果
+}
+
+/// 署名検証はまだ通っていない。rowID は破棄のためだけに使う（6 章）
+struct SignedCommitRow: Sendable {
+    let rowID: Int64
+    let rawColumns: ExportCommitColumns
+    let signature: Data
+}
+
+struct ExportQueueItemSnapshot: Sendable {
+    let id: ExportQueueItemID
+    let batchID: BatchID
+    let projectID: ProjectID
+    let state: ExportQueueState
+}
+
+struct ForeignKeyViolation: Sendable {
+    let table: String
+    let rowID: Int64
+    let parentTable: String
+}
 ```
 
 `finalizeExport` の実装が、`OutputRecord` の insert・`ExportRecord` の insert・キュー項目の `completed` 更新・`Project` の最終更新時刻・`ExportCommit` の delete を **1 回の DB トランザクション**で行います。**この境界が手順 7 の正本です。**
 
-`RecoverySnapshot` は起動時に一度だけ読む値で、署名検証前の全 `ExportCommit`（行 ID つき）、`OutputRecord`、非終端キュー項目、`WorkingSourceRecord`、DB 間参照の検査結果を含みます。**復旧中に個別クエリを繰り返さないのは、手順の途中で DB が変化しないことを保証するためです。**
+**`RecoverySnapshot` は起動時に一度だけ読みます。** 復旧中に個別クエリを繰り返さないのは、手順の途中で DB が変化しないことを保証するためです。
+
+**`SignedCommitRow` は検証前の生の列を持ちます。** `ExportCommit` としてデコードしてしまうと、署名不正行のフィールドを使う経路ができます（6 章）。検証を通った行だけが `ExportCommit` になります。
+
+`foreignKeyViolations` は `PRAGMA foreign_key_check` の結果です。**単一 `app.db` では外部キーが実制約として効くため、違反は通常発生しません。** 検出した場合は復旧エラーとし、自動修復しません。
 
 そのほかのポート（`ManagedFileStore` / `CryptoKeyStore` / `ProtectedBlobStore` / `CrashReporter` / 履歴削除の原子的操作）は [アーキテクチャ設計](architecture.md) が正本です。
 
@@ -311,7 +352,7 @@ struct ExportCommit: Sendable {
     let projectID: ProjectID
     let batchID: BatchID?
     let sourceID: SourceID
-    let outputFile: ManagedFileRef          // 種別つきの参照
+    let outputFile: OutputFileRef
     let authorization: ExportAuthorization  // 開始前に固定する
     let verifiedOutput: VerifiedOutput?     // prepared では nil。fileVerified 以降は必須
     let finalizedAt: Date?                  // finalizing で確定する usageNow
@@ -511,7 +552,7 @@ struct OutputRecord: Sendable {
     let exportID: ExportID
     let projectID: ProjectID
     let batchID: BatchID?
-    let outputFile: ManagedFileRef          // 種別つきの参照
+    let outputFile: OutputFileRef
     let outputByteSize: Int64               // verifiedOutput からコピー
     let outputSHA256: Data                  // verifiedOutput からコピー
     let state: OutputState
@@ -750,7 +791,7 @@ sourceLeases      のうち exportID == 対象 exportID の要素を削除
 
 これは未加工の顔画像を最大 24 時間追加で保持することを意味し、**プライバシーと容量の複雑性が v1 の利得に釣り合いません。** 同じ素材の再書き出しは grant により追加消費なしで行えるため、利用者の損失は「もう一度操作する手間」に限られます。
 
-v2 で保持コストを許容できる場合は、`ExportSnapshot` を不変オブジェクトとして導入し、会計を持たない `OutputRecoveryCommit` で再生成の中断復旧を扱う設計へ拡張します。
+v2 で保持コストを許容できる場合は、不変のスナップショットと専用の復旧ジャーナルを導入する設計へ拡張します。v1 の文書には契約を置きません。
 ---
 
 ## 8. 利用者への受け渡し

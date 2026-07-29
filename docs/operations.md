@@ -88,9 +88,9 @@ SwiftUI の `openURL` 環境値で開きます。`itms-apps://` スキームは�
 | `trialBatchSizeLimit` | 5 | 1 | **50** |
 | `trialCreditCount` | 5 | 0 | 50 |
 | `batchConcurrencyLimit` | 1 | 1 | **2** |
-| `lowConfidenceThreshold` | 未定（12.2） | 0.0 | 1.0 |
-| `extremePoseYawDegrees` | 未定（12.2） | 0.0 | 90.0 |
-| `extremePosePitchDegrees` | 未定（12.2） | 0.0 | 90.0 |
+| `lowConfidenceThreshold` | 未定（[アーキテクチャ設計](architecture.md) の 12.2） | 0.0 | 1.0 |
+| `extremePoseYawDegrees` | 未定（[アーキテクチャ設計](architecture.md) の 12.2） | 0.0 | 90.0 |
+| `extremePosePitchDegrees` | 未定（[アーキテクチャ設計](architecture.md) の 12.2） | 0.0 | 90.0 |
 | `historyStorageLimitBytes` | 200MB | 10MB | 2GB |
 | `customStampLimit` | 100 | 0 | **100** |
 | `customStampMaxEdgePixels` | 1,024 | 256 | 4,096 |
