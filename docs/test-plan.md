@@ -35,6 +35,9 @@
 - `QuotaPolicy` と開始ゲートが `Plan` を参照せず `ResolvedCapabilities` のみを受け取ること
 - `monthlyIntegrityLock` が解除条件を満たさないとき、`consumedExportIDs` が空でも `blocked(ledgerIntegrityFailure)` になること
 - **端末時刻をどう変更しても `monthlyIntegrityLock` が解除されないこと。信頼できる時刻の観測だけが解除条件であること**
+- **`trustedMonth` が `nil` のとき封鎖が解除されないこと**
+- **月境界付近でタイムゾーンを変更しても、`TrustedUTCMonth` が動かないこと**
+- **`observeTime` が `trustedNow` と `trustedMonth` を別フィールドとして返し、`usageNow` から由来を推測しないこと**
 - `ExportGrant` が能力を問わず作成されること
 - 同一素材の再書き出しで `firstSuccessAt` が更新されないこと
 - 月末の初回成功から 24 時間以内なら、月をまたいでも `freeReexport` になること
@@ -68,8 +71,9 @@
 - **`paidUnlimited` の書き出し中に `SourceRecord` が GC されないこと**（`SourceLease` が効いていること）
 - 台帳の不変条件 1〜8 が、保存前と署名検証直後の両方で検査されること
 - **同じ `sourceID` の `SourceLease` が 2 件以上あるとき、通常状態として通さず復旧エラーになること**
-- `contentFingerprint` が長さ前置き・ビッグエンディアン・UTC epoch ms で計算されること
-- 64KB 未満のファイルで先頭・末尾チャンクが重複しても正しく計算されること
+- `contentFingerprint` が**ファイル全体の SHA-256** を含み、長さ前置き・ビッグエンディアン・UTC epoch ms で計算されること
+- **中央部分だけが異なる 2 ファイルが、別の `contentFingerprint` になること**（部分ハッシュでは衝突する素材で検証する）
+- ファイル全体をチャンク読みで投入しても、一括読み込みと同じダイジェストになること
 - 撮影日時が無い場合に長さ 0 のフィールドとして扱われること
 - **撮影日時の取得元が EXIF のみであり、PhotoKit 権限の有無で変わらないこと**
 - ファイル更新日時を使わないこと
@@ -148,7 +152,8 @@
 - **`isMasked == true` の顔に no-op 相当の値が渡されたとき `compileRenderDraft` が `throw` すること**
 - 永続データのデコード時にも検証済み値型の `throws` 版が呼ばれること
 - **境界型（`ImageSource` / `LoadedPhoto` / `DetectionResult` / `RenderedImage` / `OutputFile`）が `URL` もパス文字列も持たないこと**
-- **`ImageSource.orientation` が常に `.normalized` であること。未正規化の画像が境界を越えないこと**
+- **`ImageSource` に未正規化を表す値が存在しないこと**（`OrientationState` を持たない）
+- **`RenderedImage` と `RasterizedStampAsset` が `RawBitmapDescriptor` を持ち、チャネル順・アルファ・色空間・bit depth が型で決まること**
 
 ### 2.6 設定ハッシュと正準化（6.4 / 9.1）
 
@@ -292,7 +297,8 @@
 - **保存値の `referenceCount` が導出値と一致すること。不一致なら導出値を正として書き直すこと**
 - 一括削除が `CustomStamp` のみを対象とし、参照中の `StampAsset` を消さないこと
 - 削除で DB が先に更新され、`PendingFileDeletion` が同じトランザクションへ記録されること
-- `WorkingSourceRecord` の実体が欠けたとき、そのキュー項目が `reselectionRequired` へ遷移すること
+- `WorkingSourceRecord` の実体が欠けたとき、そのキュー項目が `paused(.sourceReselectionRequired)` へ遷移すること。バッチ全体が止まらないこと
+- **`isTerminal` が `completed` / `failed` / `canceled` のみ真であり、履歴削除の保護と完了判定が同じ述語を使うこと**
 
 ### 3.8 更新誘導との順序（6.7）
 
@@ -319,7 +325,8 @@
 - 「コミットあり・`OutputRecord` なし」または「コミットなし・`OutputRecord` あり」以外の状態が観測されないこと
 - 両スキーマの `journal_mode` が非 WAL であり、いずれかが WAL なら復旧エラーになること
 - 両スキーマの `synchronous` が設定・検証されること
-- 両 DB を変更する移行が `ATTACH` 済みの単一トランザクションで実行されること
+- スキーマ移行が単一トランザクションで確定し、途中適用が観測されないこと
+- **外部キー制約が有効であり、`Project` の削除が `OutputRecord` / `ExportCommit` の存在で RESTRICT されること**
 - DB 間参照の整合検査が、`OutputRecord` / `ExportQueueItem` は孤児削除、`ExportCommit` は復旧エラーへ分岐すること
 
 ### 4.3 署名と鍵（9.1 / 7.2）
@@ -330,6 +337,10 @@
 - HKDF による鍵の用途分離（`payload-signing-v1` / `source-provider-key-v1`）が実際に別の鍵を導くこと
 - **blob `missing` / 鍵 `missing` で新規台帳が作られること**
 - **blob `missing` / 鍵 `existing` でも新規台帳が作られ、復旧エラーにならないこと**
+- **`ProtectedBlobKey<UsageLedger>` へ `SubscriptionState` を渡すコードがコンパイルできないこと**（型検査）
+- **読み込み時に `payloadType` と `schemaVersion` が型の宣言と一致することを確認し、不一致を `integrityFailure` とすること**
+- **HMAC-SHA256 の署名長が 32 バイトであること。HKDF-SHA256 の派生鍵が 32 バイトで、用途ごとに異なること**
+- **`providerAssetKeyHash` が小文字 16 進 64 文字であること**
 - **`ProtectedBlobKey` から固定の内部ファイルへ解決され、再起動後も同じ blob を読めること**
 - **`ManagedFileID` を外部へ保存しなくても 3 種の blob を発見できること**
 

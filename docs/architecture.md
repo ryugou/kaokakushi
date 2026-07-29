@@ -269,6 +269,35 @@ actor FileUsageLedgerStore: UsageLedgerStore {
 
 **チェックを 2 回入れます。** permit 取得直後だけだと、その後の `transact` 開始までの間にキャンセルされた場合を拾えません。認可の直前が最後の安全な中断点です。
 
+##### 登録前キャンセルを取りこぼさない
+
+**キャンセルハンドラがキューから削除するだけでは足りません。** 次の順序が起こりえます。
+
+```
+1. waiter ID を作る
+2. タスクがキャンセルされ、キャンセルハンドラが動く
+3. まだ登録されていないので、削除対象が無い
+4. その後 continuation がキューへ登録される
+5. 二度目のキャンセル通知は来ない → キャンセル済み waiter が残る
+```
+
+**actor 内部に tombstone を持ちます。**
+
+```swift
+actor FileUsageLedgerStore: UsageLedgerStore {
+    private var waiters: [Waiter] = []            // FIFO
+    private var canceledWaiterIDs: Set<UUID> = [] // 登録前キャンセルの記録
+}
+```
+
+| 契機 | 操作 |
+| --- | --- |
+| キャンセルハンドラ | キューに居れば除去して resume。**居なければ `canceledWaiterIDs` へ記録する** |
+| enqueue 時 | `canceledWaiterIDs` に自分が居るか、`Task.isCancelled` が真なら、**登録せず即座に `CancellationError` で resume する** |
+| 記録の掃除 | resume した時点で `canceledWaiterIDs` から除く |
+
+**`Task.isCancelled` の確認だけでは不足です。** `withTaskCancellationHandler` の登録と `Task.isCancelled` の読み取りの間にもキャンセルは起こりえます。tombstone と併用して、どちらの経路でも捕捉します。
+
 ##### 二重 resume の防止
 
 キャンセルと permit 解放が競合すると、同じ continuation を 2 回 resume してクラッシュします。actor 内部で次の順に行います。
@@ -277,7 +306,7 @@ actor FileUsageLedgerStore: UsageLedgerStore {
 2. **除去できた場合だけ** `CancellationError` で resume する
 3. permit 解放側は、キューの先頭から取り出す時点で存在を確認し、既に除去済みの waiter を resume しない
 
-「除去できたか」を resume の条件にすることで、どちらの経路が先に走っても resume は 1 回に収まります。
+「除去できたか」を resume の条件にすることで、どちらの経路が先に走っても resume は 1 回に収まります。**登録前キャンセルの経路でも、tombstone を確認した側だけが resume します。**
 
 **`CancellationError` は業務エラーとして扱いません。** Sentry へ送らず（9.2）、キュー項目を `canceled` へ遷移させる制御フローとします。
 
@@ -672,7 +701,7 @@ struct UsageLedger: Sendable, Equatable {
     let sourceLeases: [SourceLease]              // 認可中の書き出しによる参照（6.4）
     let lastObservedAt: Date                     // 後退させない基準時刻
     let monthlyIntegrityLock: MonthlyIntegrityLock  // 破損修復による月間枠の封鎖
-    let lastTrustedMonth: YearMonth?             // 信頼できる時刻から導出した最新の年月
+    let lastTrustedMonth: TrustedUTCMonth?       // 信頼できる時刻から導出した最新の UTC 年月
     let trialIntegrityLocked: Bool               // 破損修復によりトライアルを封じたか
 }
 
@@ -746,6 +775,7 @@ func evaluate(
     access: SingleExportAccess,      // Plan ではない。6.2 が解決した能力
     sourceID: SourceID,              // 6.4 で解決済み
     usageNow: Date,                  // 正規化済み。端末時刻を直接渡さない
+    trustedMonth: TrustedUTCMonth?,  // 封鎖の解除判定に使う。端末時刻由来の値を渡さない
     timeZone: TimeZone
 ) -> QuotaEvaluation
 ```
@@ -796,6 +826,12 @@ struct ObservedTime: Sendable {
     /// 削除・保持期間用。信頼できる時刻を得られない異常ジャンプ中は nil
     let retentionNow: Date?
 
+    /// サーバーまたは RevenueCat から得た絶対時刻。得られなければ nil
+    let trustedNow: Date?
+
+    /// trustedNow を UTC で年月へ落としたもの。整合性封鎖の解除に使う唯一の値
+    let trustedMonth: TrustedUTCMonth?
+
     let updatedAnchor: TimeAnchor
 }
 
@@ -842,21 +878,51 @@ usageNow = max(
 **封鎖の解除条件を端末年月との比較にすると、年月を作れる側が解除条件を作れます。** 時計を過去月へ変更 → 台帳を破損 → その月として修復 → 時計を戻す、で即座に解除できます。
 
 ```swift
+/// 封鎖専用。端末タイムゾーンに依存しない
+struct TrustedUTCMonth: Sendable, Equatable, Comparable {
+    let year: Int32
+    let month: Int32          // 1...12。UTC で算出する
+}
+
 enum MonthlyIntegrityLock: Sendable, Equatable {
     case none
 
-    /// 指定した年月より後の「信頼できる年月」を観測するまで封鎖
-    case lockedUntilTrustedMonthAfter(YearMonth)
+    /// 指定した年月より後の「信頼できる UTC 年月」を観測するまで封鎖
+    case lockedUntilTrustedMonthAfter(TrustedUTCMonth)
 
     /// 端末時刻だけでは解除できない。再インストールを要する
     case lockedUntilReinstall
 }
 ```
 
+**封鎖の年月に `YearMonth` を使いません。** `YearMonth` は端末の `TimeZone` で算出するため、信頼できる絶対時刻を得ても、**月境界付近でタイムゾーンを変えるだけ**で `封鎖の年月 < 観測した年月` を成立させられます。
+
+| 用途 | 年月の型 | 算出 |
+| --- | --- | --- |
+| 通常クォータの `period` | `YearMonth` | 端末の `TimeZone`（利用者の感覚に合わせる） |
+| **整合性封鎖の基準と解除** | **`TrustedUTCMonth`** | **UTC 固定。端末タイムゾーンを一切使わない** |
+
+`lastTrustedMonth` も `TrustedUTCMonth` とします。**封鎖基準と解除観測の両方を UTC で算出することが要点です。** 片方だけ UTC にしても、もう片方が動けば差を作れます。
+
+##### 由来を型で区別する
+
+**`usageNow` だけを渡すと、それが信頼時刻由来か端末時刻由来かを受け手が判別できません。** `usageNow` は `max(now, lastObservedAt, trusted)` なので、信頼時刻が無くても値は入ります。封鎖の解除に使えば、端末時刻で解除できてしまいます。
+
+`observeTime` は `trustedNow` と `trustedMonth` を**別のフィールドとして**返し、`QuotaPolicy.evaluate` は両方を受け取ります。
+
+| 判定 | 使う値 |
+| --- | --- |
+| 24 時間の窓、月次更新、`finalizedAt` | `usageNow` |
+| 削除・保持期間 | `retentionNow` |
+| **整合性封鎖の解除** | **`trustedMonth`。`nil` なら解除しない** |
+| リモート設定の `expiresAt` | `trustedNow ?? usageNow` |
+
+**`trustedMonth` が `nil` のとき、封鎖は解除されません。** 「信頼時刻を一度も得られなければ封鎖が続く」という規則が、型の上で自明になります。
+
 | 規則 | 内容 |
 | --- | --- |
-| 解除に使える年月 | **信頼できる時刻から導出した年月のみ** |
-| 端末時刻由来の年月 | **解除に使わない。** 何度変更しても封鎖は解けない |
+| 解除に使える年月 | **信頼できる時刻から UTC で導出した `TrustedUTCMonth` のみ** |
+| 端末時刻・端末タイムゾーン由来の年月 | **解除に使わない。** 何度変更しても封鎖は解けない |
 | 封鎖の基準年月 | **端末年月を使わない**（下記） |
 | 信頼できる時刻を一度も得られない | 封鎖は維持される |
 
@@ -974,8 +1040,8 @@ v1 は全体排他ゲート（[書き出し Saga](export-saga.md)）により同
 | --- | --- | --- |
 | `lastObservedAt` | **信頼時刻** | 検出時点の端末時刻 |
 | `period` | **信頼時刻の年月** | 検出時点の端末年月 |
-| `lastTrustedMonth` | **信頼時刻の年月** | `nil` |
-| `monthlyIntegrityLock` | `.lockedUntilTrustedMonthAfter(信頼時刻の年月)` | **`.lockedUntilReinstall`** |
+| `lastTrustedMonth` | **信頼時刻の UTC 年月** | `nil` |
+| `monthlyIntegrityLock` | `.lockedUntilTrustedMonthAfter(信頼時刻の UTC 年月)` | **`.lockedUntilReinstall`** |
 | `trialIntegrityLocked` | `true` | `true` |
 | `grants` / `consumedExportIDs` / `trialEntries` / `trialReservations` / `sourceRecords` / `sourceLeases` | **すべて空** | **すべて空** |
 
@@ -1013,7 +1079,7 @@ struct SourceIdentity: Sendable, Hashable {
     /// 取得できない場合（ファイル取り込み等）は nil
     let providerAssetKeyHash: String?
 
-    /// サイズ・先頭 64KB・末尾 64KB・撮影日時から算出
+    /// ファイルサイズ・全体 SHA-256・撮影日時から算出（正準スキーマ）
     let contentFingerprint: String
 }
 ```
@@ -1119,42 +1185,24 @@ sourceLeases      の sourceID → 勝者
 ##### `providerAssetKeyHash`
 
 **平文で保存しません。** 端末内でソルト付きハッシュへ変換し、元の値を復元できない形で持ちます。**ソルトは台帳署名とは別の鍵から派生させます**（9.1）。
-
 ##### `contentFingerprint`
 
-`ファイルサイズ + 先頭 64KB + 末尾 64KB + 撮影日時` の複合とします。48 メガピクセルの HEIC を全読みする負荷を避けるためです。
+**ファイル全体の SHA-256 とファイルサイズ・撮影日時の複合とします。** バイト表現の正本は [正準スキーマ](canonical-schema.md) です。
 
-| 項目 | 規則 |
-| --- | --- |
-| アルゴリズム | **SHA-256** |
-| 形式 | 長さ前置きのバイナリ連結（下記） |
-| 整数のバイト順 | **ビッグエンディアン** |
-| スキーマバージョン | 先頭に `UInt32` で含める（現行 `1`） |
-| 撮影日時 | **UTC の epoch milliseconds を `Int64`**。取得元は **EXIF の `DateTimeOriginal` のみ**（[画像処理](image-pipeline.md)） |
-| 撮影日時が無い | 長さ 0 のフィールドとして書く（値 0 で埋めない） |
-| 対象データ | ピッカーが返した実データ |
+**部分ハッシュ（先頭・末尾 64KB）を採りません。** 中央部分だけが異なる 2 枚が同一素材と判定されます。同じカメラの連写では先頭の EXIF ブロック・末尾のパディング・ファイルサイズ・撮影日時が揃いやすく、**無料枠を回避する経路として現実的な難易度になります。**
 
-```
-schemaVersion : UInt32
-fileSize      : UInt32(8)  + Int64
-headChunk     : UInt32(n)  + bytes    // 先頭 min(65536, fileSize) バイト
-tailChunk     : UInt32(n)  + bytes    // 末尾 min(65536, fileSize) バイト
-capturedAt    : UInt32(8)  + Int64    // 無ければ UInt32(0) のみ
-```
-
-長さを前置きするのは、フィールド境界を曖昧にしないためです。単純連結だと、末尾チャンクの終わりと日時の始まりを区別できず、異なる入力が同じバイト列になりえます。
-
-**64KB 未満のファイルでは重なりを許容し、両方ともファイル全体を書きます。** 「重複を除く」規則を入れると分岐が増え、境界で取り違えます。
+全体を読む費用はストリーム投入で吸収できます（メモリは一定）。計算は選択直後のインポート Saga で 1 回だけ行います（[画像処理](image-pipeline.md)）。
 
 **`PHAsset.creationDate` を入力にしません。** 権限の有無で取得元が変われば、同じ写真が別の `contentFingerprint` になり、無料枠を二重に消費します（[画像処理](image-pipeline.md)）。**ファイル更新日時も使いません。** コピーや同期で容易に変わります。
+
+理論上の衝突時は「別素材なのに無料で再書き出しできる」方向へ倒れます。SHA-256 の全体ハッシュであれば、これは意図的に作れる衝突ではありません。
 
 ##### 入力の取得契約
 
 ```swift
 struct SourceFingerprintInput: Sendable {
     let fileSize: Int64
-    let headBytes: Data
-    let tailBytes: Data
+    let contentDigest: Data           // ファイル全体の SHA-256（32 バイト）
     let capturedAtUTCMillis: Int64?
     let representation: SourceRepresentation
 }
@@ -1361,7 +1409,42 @@ struct BatchReviewState: Sendable { let overviewConfirmed: Bool }
 
 ##### キューと付随機能
 
-キューの進行状態は仕様 16.6 の 8 種（`waiting` / `analyzing` / `review_required` / `exporting` / `completed` / `failed` / `canceled` / `paused`）とし、状態機械を `Domain` に置きます。
+キューの進行状態は仕様 16.6 の 8 種とし、状態機械を `Domain` に置きます。**状態を増やしません。**
+
+```swift
+enum ExportQueueState: Sendable, Equatable {
+    case waiting
+    case analyzing
+    case reviewRequired
+    case exporting
+    case completed
+    case failed(ExportQueueFailure)
+    case canceled
+    case paused(QueuePauseReason)
+}
+
+enum QueuePauseReason: Sendable, Equatable {
+    case entitlementExpired            // Pro 契約の終了（書き出し Saga 1.4）
+    case storageInsufficient
+    case userPaused
+    /// 処理用の元素材が失われた。同じ写真を選び直せば再開できる
+    case sourceReselectionRequired
+}
+
+extension ExportQueueState {
+    /// 終端かどうかの判定を 1 か所に置く
+    var isTerminal: Bool {
+        switch self {
+        case .completed, .failed, .canceled: return true
+        case .waiting, .analyzing, .reviewRequired, .exporting, .paused: return false
+        }
+    }
+}
+```
+
+**処理用ファイルが失われた場合も新しい状態を作りません。** `paused(.sourceReselectionRequired)` へ遷移させます。`paused` は「利用者の操作を待って再開できる」という意味であり、再選択を求める状況はこれに当てはまります。**バッチ全体ではなく該当項目だけが `paused` になります。**
+
+**`isTerminal` を各所で書き下しません。** 履歴削除の可否判定（7.5）、バッチの完了判定、復旧の対象選定がすべてこの 1 つの述語を使います。列挙を書き下すと、状態を追加したときに一部だけ更新される事故が起こります。
 
 **キューの進行状態と 6.1 の 2 軸は別物です。**
 
@@ -1472,65 +1555,98 @@ func evaluateUpdate(
 
 ## 7. 永続化
 
-### 7.1 runtime.db / user-data.db
+### 7.1 app.db
 
-**バックアップの単位はファイルであり、テーブルではありません。** 保存するデータの性質でファイルを分けます（ADR 0002 / 0003）。
+GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-single-database.md) にあります。
 
-**`runtime.db`**
-
-| テーブル | 備考 |
-| --- | --- |
-| `ExportCommit` | 書き出しのコミットジャーナル。行に HMAC を付ける（[書き出し Saga](export-saga.md)） |
-| `OutputRecord` | 写真ごとの出力状態。`exportID` でコミットと対応づける（[書き出し Saga](export-saga.md)） |
-| `ExportQueueItem` | 一括処理のキュー状態（6.5） |
-| `WorkingSourceRecord` | 処理用にアプリ領域へ複製した元素材。キューの再起動復元に必須（[画像処理](image-pipeline.md)） |
-| `PendingFileDeletion` | 参照 0 になった実体の削除候補（7.5） |
-
-**`user-data.db`**
+**アプリのリレーショナルデータを 1 つの `app.db` へ収めます。**
 
 | テーブル | 備考 |
 | --- | --- |
-| `Project` | 仕様 19.1。再編集用の `ProjectSourceLocator` を持つ（[画像処理](image-pipeline.md)）。**ここにのみ平文の `localIdentifier` が存在する** |
-| `FaceTrack` | 仕様 19.2 |
+| `Project` | 仕様 19.1。`projectRevision` と再編集用の `ProjectSourceLocator` を持つ（[画像処理](image-pipeline.md)）。**ここにのみ平文の `localIdentifier` が存在する** |
+| `FaceTrack` | 仕様 19.2。手動領域は `createdManually = true` |
 | `EffectSetting` | 仕様 19.4 |
 | `ExportSetting` | 仕様 19.5 |
 | `CustomStamp` | 仕様 19.6。スタンプ一覧の項目（7.5） |
 | `StampAsset` | プロジェクトが参照する不変の画像実体のメタデータ。内容ハッシュを主キーとする（7.5） |
-| `ProjectStampAsset` | プロジェクトと `StampAsset` の対応。`UNIQUE(projectID, assetHash)`（7.5） |
+| `ProjectStampAsset` | プロジェクトと `StampAsset` の対応（7.5） |
 | `ExportRecord` | 仕様 19.7。`batchID` を追加 |
 | `Batch` | バッチ単位の履歴 |
 | `BatchPreset` | 一括設定プリセット |
+| `ExportCommit` | 書き出しのコミットジャーナル。行に HMAC を付ける（[書き出し Saga](export-saga.md)） |
+| `OutputRecord` | 写真ごとの出力状態。`exportID` でコミットと対応づける |
+| `ExportQueueItem` | 一括処理のキュー状態（6.5） |
+| `WorkingSourceRecord` | 処理用にアプリ領域へ複製した元素材（[画像処理](image-pipeline.md)） |
+| `PendingFileDeletion` | 参照 0 になった実体の削除候補（7.5） |
 
-**両方ともバックアップ対象外です**（7.4）。`runtime.db` を復元してはいけない理由は特に明確で、`ExportCommit` を別端末へ復元しても対応する一時ファイルは存在せず、`UsageLedger` との整合も失われ、復元された途端に全件が復旧エラーになります。
+**`app.db` 全体がバックアップ対象外です**（7.4）。復元してはいけない理由は 2 つあり、どちらも DB を分けても解消しません。
 
-##### 1 接続と `ATTACH DATABASE`
+- `ExportCommit` を別端末へ復元しても、対応する一時ファイルは存在せず、`UsageLedger`（同じくバックアップ対象外）との整合も失われる
+- 写真ライブラリ参照（`ProjectSourceLocator` / `providerAssetKeyHash`）は別端末で意味を持たず、履歴を復元しても再編集できない
 
-手順 7 の単一トランザクション（[書き出し Saga](export-saga.md)）は `OutputRecord`・`ExportRecord`・キュー状態・`Project` を同時に更新しますが、このうち `ExportRecord` と `Project` は `user-data.db` 側です。**`ATTACH DATABASE` を使い、1 つの接続から両ファイルを扱います。**
+##### DB を分けない
 
-**「`ATTACH` すれば原子的」ではありません。** 複数 DB トランザクションがクラッシュをまたいで原子的になるのは条件を満たす場合だけで、**特に WAL では、DB ごとの原子性は保たれても複数 DB の一部だけがコミットされることがあります。**
+**「バックアップの単位はファイルなので分ける」という理由は成立しません。** 両方とも対象外である以上、分割の根拠になりません。保護クラスも両方 `.complete` で同じです（7.4）。
+
+分けないことで次が得られます。
+
+| 得られるもの | 内容 |
+| --- | --- |
+| **実の外部キー制約** | `OutputRecord.projectID` → `Project`、`ExportQueueItem.batchID` → `Batch` を SQLite が強制する。アプリ側の起動時検査が不要になる |
+| 単一トランザクション | 手順 7（[書き出し Saga](export-saga.md)）が `ATTACH` なしで成立する |
+| 単一の `DatabaseMigrator` | 2 つの DB のスキーマバージョンが食い違う状態が存在しない |
+| 検証の単純化 | `PRAGMA` の確認がスキーマ 1 つで済む |
+
+**将来バックアップを実装する場合も分割は不要です。** [ADR 0003](adr/0003-local-only-data-and-backup-policy.md) のとおり、OS による生ファイルのバックアップではなく検証可能なアーカイブとして書き出す設計を採るため、**対象テーブルを選ぶだけで足ります。**
+
+##### 一意制約と外部キー
+
+**不変条件をアプリのコードだけで守りません。** DB 制約として固定できるものは固定します。
+
+| 対象 | 制約 |
+| --- | --- |
+| `ExportCommit.exportID` | **PRIMARY KEY** |
+| `OutputRecord.exportID` | **PRIMARY KEY** |
+| `OutputRecord.projectID` | **UNIQUE**（1 プロジェクト 1 出力） |
+| `WorkingSourceRecord.projectID` | **PRIMARY KEY** |
+| `PendingFileDeletion(kind, fileID)` | **UNIQUE** |
+| `ProjectStampAsset(projectID, assetHash)` | **UNIQUE** |
+| `StampAsset.contentHash` | **PRIMARY KEY** |
+| `ExportQueueItem(batchID, projectID)` | **UNIQUE** |
+
+外部キーは `PRAGMA foreign_keys = ON` で有効化し、次を宣言します。
+
+| 子 | 親 | 削除時 |
+| --- | --- | --- |
+| `OutputRecord.projectID` | `Project` | **RESTRICT**（未受け渡し出力があるプロジェクトを消さない。7.5） |
+| `ExportCommit.projectID` | `Project` | **RESTRICT** |
+| `WorkingSourceRecord.projectID` | `Project` | CASCADE |
+| `ExportQueueItem.batchID` | `Batch` | CASCADE |
+| `ExportRecord.projectID` | `Project` | CASCADE |
+| `ProjectStampAsset.projectID` | `Project` | CASCADE |
+| `ProjectStampAsset.assetHash` | `StampAsset` | RESTRICT |
+
+**`RESTRICT` を使うのは、削除可否の判定（7.5）を DB 側でも二重に担保するためです。** アプリ側の判定を通り抜けた削除は制約違反として失敗します。
+
+**「同一 `sourceID` の非終端コミットは 1 件」は DB 制約にできません。** `sourceID` は署名対象であり、部分インデックスで状態を条件にすると署名不正行まで巻き込みます。これは開始ゲート（[書き出し Saga](export-saga.md)）と台帳の不変条件 8 で担保します。
+
+**手順 0 の再試行は同じ `exportID` で冪等です。** `PRIMARY KEY` 制約により二重 insert は失敗し、再試行時は既存行の状態を読んで続きから進めます。
+
+##### 接続と journal
 
 | 項目 | 規約 |
 | --- | --- |
 | 接続 | **`DatabaseQueue` を 1 つだけ**使う |
-| main database | **`runtime.db`**（`:memory:` にしない） |
-| attach | 接続確立のたびに `user-data.db` を `ATTACH` する |
-| `journal_mode` | **`DELETE` / `TRUNCATE` / `PERSIST` のいずれか** |
-| WAL | **使用しない** |
-| `DatabasePool` | **使用しない**（複数接続になり `ATTACH` の前提が崩れる） |
-| 配置 | 両ファイルを**同一ファイルシステム・同一 VFS 上**に置く |
+| `journal_mode` | **`DELETE` / `TRUNCATE` / `PERSIST` のいずれか。WAL を使わない**（下記） |
 | `synchronous` | **`EXTRA`** |
-| 起動時検査 | **両スキーマの `journal_mode` と `synchronous` を検証する** |
+| `foreign_keys` | **`ON`** |
+| 起動時検査 | `journal_mode` / `synchronous` / `foreign_keys` を読み返して検証する |
 
-**`PRAGMA journal_mode` はスキーマ単位です。** 片方だけ確認しても意味がありません。
+**WAL を使わない理由は、サイドカーファイルを増やさないことです。** WAL は `-wal` と `-shm` を DB と同じディレクトリへ作ります。これらにも**バックアップ除外とデータ保護クラスを個別に設定・検証する必要**が生じ、7.3 の「すべてのファイル生成を `ManagedFileStore` へ通す」から外れた経路が 2 つ増えます。rollback journal も同様のサイドカーを作りますが、`DELETE` ならトランザクション終了時に消えるため、常時存在するファイルが増えません。
 
-```sql
-PRAGMA main.journal_mode;
-PRAGMA user_data.journal_mode;
-PRAGMA main.synchronous;
-PRAGMA user_data.synchronous;
-```
+本アプリの DB アクセスは書き出しの前後に集中し、同時読み書きの負荷が高くないため、WAL の並行性は必要ありません。
 
-いずれかが WAL なら復旧エラーとし、書き出しを開始しません。マイグレーションツールや将来の GRDB が既定で WAL へ切り替える可能性があるため、**設定したつもりが変わっていた**を検出できる形にします。
+`DatabasePool`（複数接続）も使いません。`synchronous = EXTRA` の効果と書き込み順序の推論を単純に保ちます。
 
 ##### 耐久性の水準
 
@@ -1538,36 +1654,13 @@ PRAGMA user_data.synchronous;
 
 | 障害 | 保証の水準 | 根拠 |
 | --- | --- | --- |
-| **プロセス強制終了**（`_exit` / SIGKILL / jetsam） | **保証する** | コミット Saga と単一トランザクション（8 章） |
+| **プロセス強制終了**（`_exit` / SIGKILL / jetsam） | **保証する** | コミット Saga と単一トランザクション |
 | **OS クラッシュ・電源断** | **best effort の耐久性** | `synchronous = EXTRA`、ファイルと親ディレクトリの同期 |
-| 復帰後の整合 | **回復する** | コミットジャーナルと起動時復旧（[書き出し Saga](export-saga.md)） |
+| 復帰後の整合 | **回復する** | コミットジャーナルと起動時復旧 |
 
 **要点は「書き込みが必ず届く」ことではなく、「どこで切れても整合を回復できる」ことです。** 電源断で最後の書き込みが失われた場合、その書き出しは 1 つ前の状態から再開されます。
 
 v1 では、**出力ファイルと保護ブロブについてもファイルと親ディレクトリを同期します。** 台帳と出力の整合が崩れると不変条件が壊れるため、DB と同じ水準に揃えます。**同期方式（`F_FULLFSYNC` か通常の `fsync` か）は実機計測後に決めます**（12.2）。
-
-##### 外部キーはスキーマ境界をまたげない
-
-**SQLite の外部キー制約は `ATTACH` した別 DB を参照できません。** したがって、この整合性はアプリ側が保証します。
-
-| 保証する場所 | 内容 |
-| --- | --- |
-| 手順 7（[書き出し Saga](export-saga.md)） | 同一トランザクション内で両 DB を更新し、参照先が存在する状態でのみコミットする |
-| 起動時検査（[書き出し Saga](export-saga.md) の起動時復旧 手順 5） | 下記の不一致を検出する |
-
-起動時に次を検査します。
-
-- `OutputRecord.projectID` に対応する `Project` が存在する
-- `ExportQueueItem.batchID` に対応する `Batch` が存在する
-- `ExportCommit.projectID` に対応する `Project` が存在する
-
-| 状況 | 扱い |
-| --- | --- |
-| `OutputRecord` の参照先が無い | **孤児として削除する**（7.5 の経路。ファイルも削除） |
-| `ExportCommit` の参照先が無い | **復旧エラー。** 会計済みか判断できないため自動削除しない |
-| `ExportQueueItem` の参照先が無い | 孤児として削除する |
-
-`ExportCommit` だけ扱いが違うのは、それが会計の根拠だからです。
 
 ### 7.2 ProtectedBlobStore
 
@@ -1581,7 +1674,7 @@ v1 では、**出力ファイルと保護ブロブについてもファイルと
 
 | 役割 | プロトコル | 実装 |
 | --- | --- | --- |
-| 鍵 | `CryptoKeyStore` | Keychain（`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`） |
+| 鍵 | `CryptoKeyStore` | Keychain（`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`。7.4） |
 | 署名済みデータ本体 | `ProtectedBlobStore` | アプリ専用ディレクトリ上のファイル（原子的置換） |
 
 原子的な置き換えができることを要件とします。台帳は 1 つのオブジェクトとして丸ごと差し替えるため、部分更新の途中状態が観測されてはいけません。実装は一時ファイルへ書いてから `FileManager.replaceItemAt` です。
@@ -1593,28 +1686,52 @@ v1 では、**出力ファイルと保護ブロブについてもファイルと
 **`ProtectedBlobStore` は固定の論理キーで解決します。**
 
 ```swift
-enum ProtectedBlobKey: UInt32, Sendable {
-    case usageLedger = 1
-    case subscriptionState = 2
-    case remoteConfigState = 3
+/// 署名対象になれる型。正準化とデコードの方法を型が持つ
+protocol ProtectedPayload: Sendable {
+    static var blobKeyRawValue: UInt32 { get }   // ファイル名の決定に使う
+    static var payloadType: PayloadType { get }
+    static var schemaVersion: UInt32 { get }
+
+    init(canonicalBytes: Data) throws
+    func canonicalBytes() -> Data
+}
+
+extension UsageLedger: ProtectedPayload { }
+extension SubscriptionState: ProtectedPayload { }
+extension RemoteConfigState: ProtectedPayload { }
+
+/// 値の型がキーに結びついている。型引数を取り違えられない
+struct ProtectedBlobKey<Value: ProtectedPayload>: Sendable {
+    static var usageLedger: ProtectedBlobKey<UsageLedger> { .init() }
+    static var subscriptionState: ProtectedBlobKey<SubscriptionState> { .init() }
+    static var remoteConfigState: ProtectedBlobKey<RemoteConfigState> { .init() }
 }
 
 protocol ProtectedBlobStore: Sendable {
-    func load<T: Sendable>(_ key: ProtectedBlobKey) async -> ProtectedLoadResult<T>
-    func save<T: Sendable>(_ value: T, for key: ProtectedBlobKey) async throws
+    func load<Value>(
+        _ key: ProtectedBlobKey<Value>
+    ) async -> ProtectedLoadResult<Value>
+
+    func save<Value>(
+        _ value: Value,
+        for key: ProtectedBlobKey<Value>
+    ) async throws
 }
 ```
 
+**`Sendable` だけでは足りません。** 型引数が自由だと `.usageLedger` を `SubscriptionState` として読むコードがコンパイルを通り、デコード方法も決まりません。`ProtectedPayload` が正準バイト列との相互変換を持ち、`ProtectedBlobKey<Value>` がキーと型を結びつけます。**取り違えはコンパイルで止まります。**
+
 | 項目 | 規約 |
 | --- | --- |
-| キーからの解決 | **論理キーごとに固定された内部ファイル名**（`protected/` 配下） |
+| キーからの解決 | **`blobKeyRawValue` ごとに固定された内部ファイル名**（`protected/` 配下） |
 | ID の保存 | **不要。** `ManagedFileID` を外部へ持ち出さない |
 | `ManagedFileStore` との関係 | 原子的書き込み・保護属性の設定・バックアップ除外の**共通処理だけを共有する** |
 | `ManagedFileKind` | `.protectedBlob`。ディレクトリの決定にのみ使う |
+| 検証 | 読み込み時に `payloadType` と `schemaVersion` が型の宣言と一致することを確認する |
 
 **`ProtectedBlobStore` までランダム UUID で管理する必要はありません。** 論理キーは 3 つに固定されており、増減はスキーマ変更を伴います。ID による間接参照は、任意個のファイルを扱う `ManagedFileStore` の要件であって、この 3 つには当てはまりません。
 
-`ProtectedBlobKey` の生値は `UInt32` で固定します。ファイル名の決定に使うため、`case` の宣言順が変わってもファイルの対応が変わってはいけません。
+`blobKeyRawValue` は `UInt32` で固定します。ファイル名の決定に使うため、宣言順が変わってもファイルの対応が変わってはいけません。`payloadType` の検証と併せて、**種別をまたいだ付け替えを実行時にも弾きます**（9.1）。
 
 ##### 読み込み結果の分類
 
@@ -1712,18 +1829,23 @@ struct PendingFileDeletion: Sendable {
 
 ##### 保存の順序
 
+**属性の設定を rename の後だけに置けません。** 書き込み中や rename 前に終了した場合、**一時ファイルが無保護のまま残ります。** 未加工の顔画像や未受け渡し出力を扱う以上、完成ファイルだけを保護しても足りません。
+
 | 順 | 操作 |
 | --- | --- |
-| 1 | 一時ファイルへ書く |
-| 2 | atomic rename / `replaceItemAt` で最終 URL へ移す |
-| 3 | **最終 URL へ `isExcludedFromBackup` を設定する** |
-| 4 | **最終 URL へ `FileProtectionType` を設定する** |
-| 5 | 属性を**読み返して検証する** |
-| 6 | 検証に失敗したら**完成扱いにしない**（一時ファイルとして残し、GC 対象とする） |
+| 1 | **最終ファイルと同じディレクトリ内に**一時ファイルを作る |
+| 2 | **書き込み前に** `isExcludedFromBackup` と `FileProtectionType` を設定し、読み返して確認する |
+| 3 | データを書き、ファイルと親ディレクトリを同期する |
+| 4 | atomic rename / `replaceItemAt` で最終 URL へ移す |
+| 5 | **最終 URL へ属性を再設定する** |
+| 6 | 属性を**読み返して検証する** |
+| 7 | 失敗したら `ManagedFileRef` を返さず、即時削除するか孤児 GC の対象にする |
 
-**手順 3 と 4 を rename の後に行います。** `replaceItemAt` は置換先の属性を引き継ぐとは限らないため、置換前に設定しても意味がありません。
+**手順 1 で同じディレクトリを使うのは、ディレクトリの既定保護クラスを最初から効かせるためです。** 別ディレクトリで作ってから移すと、その間だけ保護レベルが下がります。
 
-**手順 5 の読み返しを省きません。** 設定が反映されなかった場合、次回起動まで気づけません。
+**手順 2 と 5 の両方で設定します。** `replaceItemAt` は置換先の属性を引き継ぐとは限らないため rename 後の再設定が要り、rename 前の設定は中断時の保護のために要ります。どちらも省けません。
+
+**手順 6 の読み返しを省きません。** 設定が反映されなかった場合、次回起動まで気づけません。
 
 対象は次のすべてです。**個別に `FileManager` を呼ぶ実装を許しません。**
 
@@ -1732,6 +1854,50 @@ struct PendingFileDeletion: Sendable {
 
 SQLite のファイル群は GRDB が生成するため `ManagedFileStore` を通せません。ディレクトリの既定保護クラスで覆い、起動時に DB ファイルの属性を検証します。
 
+##### スコープ付きアクセス
+
+**「パスを返さない」だけでは、`MediaKit` と `Rendering` がファイルを開けません。** Image I/O、Core Image、`CGDataProvider(url:)` はいずれも `URL` を要求します。
+
+**永続的な `URL` は公開せず、処理中だけ有効なスコープを渡します。**
+
+```swift
+protocol ManagedFileStore: Sendable {
+    /// 読み取り。body の実行中だけ URL が有効
+    func withReadAccess<R: Sendable>(
+        _ ref: ManagedFileRef,
+        _ body: @Sendable (URL) async throws -> R
+    ) async throws -> R
+
+    /// 新規作成。body が書いた一時ファイルを、復帰後に上の順序で確定する
+    func createFile<R: Sendable>(
+        kind: ManagedFileKind,
+        _ body: @Sendable (URL) async throws -> R
+    ) async throws -> (ref: ManagedFileRef, result: R)
+
+    func delete(_ ref: ManagedFileRef) async throws
+}
+```
+
+| 規約 | 内容 |
+| --- | --- |
+| `URL` の寿命 | `body` の実行中のみ。外へ保持したら未定義動作とする |
+| 保護データ利用不可 | `withReadAccess` が `ProtectedDataAvailability` を確認し、`unavailable` なら専用エラーを投げる（7.4） |
+| 存在しない `ref` | エラー。空ファイルを作らない |
+| `createFile` の失敗 | `ref` を返さない。一時ファイルは削除するか孤児 GC へ |
+
+##### 種別つきの参照
+
+`ManagedFileRef` を汎用のまま各所へ渡すと、**`kind` の取り違えをコンパイラが検出できません。**
+
+```swift
+struct OutputFileRef: Sendable, Hashable { let ref: ManagedFileRef }        // .output
+struct WorkingSourceFileRef: Sendable, Hashable { let ref: ManagedFileRef } // .processingTemporary
+struct RasterFileRef: Sendable, Hashable { let ref: ManagedFileRef }        // .rasterTemporary
+struct StampAssetFileRef: Sendable, Hashable { let ref: ManagedFileRef }    // .stampAsset
+```
+
+各 initializer は `kind` を検証し、一致しなければ `nil` を返します。**デコード時も同じ検証を通し、`kind` 不一致の行は不正として扱います。** `OutputRecord.outputFile` は `OutputFileRef`、`WorkingSourceRecord.sourceFile` は `WorkingSourceFileRef` を持ちます。
+
 ### 7.4 ファイル保護とバックアップ
 
 ##### 配置
@@ -1739,18 +1905,17 @@ SQLite のファイル群は GRDB が生成するため `ManagedFileStore` を�
 **SQLite の journal と super-journal を確実に除外するため、DB をディレクトリで分けます。** これらは DB と同じディレクトリに作られるため、DB ファイルだけを指定しても覆えません。
 
 ```
-Library/Application Support/runtime/runtime.db
-Library/Application Support/runtime/processing/
-Library/Application Support/user-data/user-data.db
-Library/Application Support/user-data/stamps/
-Library/Application Support/user-data/thumbnails/
+Library/Application Support/db/app.db
+Library/Application Support/working/
+Library/Application Support/stamps/
+Library/Application Support/thumbnails/
 Library/Application Support/outputs/
 Library/Application Support/protected/
 Library/Caches/stamp-thumbnails/
 tmp/raster/
 ```
 
-同一ファイルシステム上にあるため、`ATTACH` の条件（7.1）は維持されます。
+**DB を専用ディレクトリへ置くのは、rollback journal と super-journal を確実に覆うためです。** これらは DB と同じディレクトリに作られるため、ファイル単位の指定では届きません。
 
 **処理中ファイルを `tmp/` に置きません。** `tmp/` は OS がいつでも削除でき、再起動のたびにキューの復元が失敗します（[画像処理](image-pipeline.md)）。`raster/` は `tmp/` のままです。1 回の `render` 呼び出し内でのみ有効であり、消えて困る状況が存在しません。
 
@@ -1760,12 +1925,13 @@ tmp/raster/
 
 | パス | 根拠 |
 | --- | --- |
-| `runtime/`（`processing/` を含む） | 復元しても整合しない |
+| `db/`（`app.db` と journal） | 復元しても整合しない（7.1） |
+| `working/` | 処理中の元素材。復元しても意味がない |
 | `tmp/raster/` | `render` 呼び出し内でのみ有効 |
 | `Library/Caches/stamp-thumbnails/` | 実体から再生成できるキャッシュ |
 | `outputs/` | 24 時間で消えるもの。復元しても期限切れ |
 | `protected/` | HMAC 鍵と寿命を揃えるため |
-| **`user-data/`（DB・スタンプ・サムネイルを含む）** | 商品説明との整合、復元の同時点性、参照の失効、復旧 Saga の増加 |
+| **`stamps/` / `thumbnails/`** | 商品説明との整合、復元の同時点性、参照の失効、復旧 Saga の増加 |
 
 **設定画面と初回起動時に、履歴とマイスタンプが端末内にのみ保存され、アプリの削除や端末の変更では引き継がれないことを明示します。** 黙って失われる状態を作りません。
 
@@ -1775,19 +1941,26 @@ tmp/raster/
 
 バックアップ対象外にしても、端末が盗まれてロック画面の状態で解析されれば、保護クラスが低いファイルは読めます。
 
+**アプリが置くファイルはすべて `.complete` とします。**
+
 | 対象 | 保護クラス |
 | --- | --- |
-| 処理中の元画像コピー（`runtime/processing/`） | **`.complete`** |
-| 未受け渡し出力（`outputs/`） | **`.complete`** |
-| ラスタ一時ファイル（`tmp/raster/`） | **`.complete`** |
-| カスタムスタンプ実体（`user-data/stamps/`） | **`.complete`** |
-| 履歴サムネイル（`user-data/thumbnails/`） | **`.complete`** |
-| `runtime/` / `user-data/` の DB | `.completeUntilFirstUserAuthentication` |
-| `ProtectedBlobStore` | `.completeUntilFirstUserAuthentication` |
+| 処理中の元画像コピー（`working/`） | `.complete` |
+| 未受け渡し出力（`outputs/`） | `.complete` |
+| ラスタ一時ファイル（`tmp/raster/`） | `.complete` |
+| カスタムスタンプ実体（`stamps/`） | `.complete` |
+| 履歴サムネイル（`thumbnails/`） | `.complete` |
+| **`db/` の `app.db` と journal** | **`.complete`** |
+| **`ProtectedBlobStore`** | **`.complete`** |
+| **HMAC マスター鍵**（Keychain） | **`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`** |
 
-**アプリ全体の既定を `.completeUntilFirstUserAuthentication` にし、画像系ファイルだけ `.complete` へ上書きします。** 既定を低いままにして個別に引き上げる構成だと、設定漏れが「保護が弱い」方向へ倒れます。SQLite の rollback journal、super-journal、一時 DB ファイルにも同じ保護が必要で、これらは自動生成されるため**ディレクトリの既定保護クラス**で覆う必要があります。
+**アプリ全体の既定を `.complete` にします。** 設定漏れが「保護が弱い」方向へ倒れないためです。SQLite の rollback journal、super-journal、一時 DB ファイルにも同じ保護が必要で、これらは自動生成されるため**ディレクトリの既定保護クラス**で覆います。
 
-**DB を `.complete` にしません。** `.complete` はロック中に読み書きできず、**ロック中に起動時復旧を実行できません。** 復旧の完了が不定になり、その間の新規書き出しをブロックし続けることになります。DB は画像そのものを含まない（サムネイルは別ファイル）ため、この差を許容します。
+**DB を下げる理由がありません。** 起動時復旧の最初の手順は「保護データが利用可能になるまで待つ」であり、その後に DB を開きます（[書き出し Saga](export-saga.md) の起動時復旧）。v1 は `BGProcessingTask` を使わずフォアグラウンド継続を前提とするため、**ロック中に DB を開く必要が現在の設計にはありません。**
+
+`app.db` には写真ライブラリの平文 `localIdentifier`、顔領域、編集内容が入ります。これらを `.completeUntilFirstUserAuthentication` に置く理由は、実行モデルと照らして残っていません。
+
+**ロック中の復旧を要件にする場合は、手順 −4 より前に DB を開く別設計が必要です。** 両方を同時には満たせません。その場合は実行時状態だけを別 DB へ切り出して `.completeUntilFirstUserAuthentication` とし、利用者データと `ProtectedBlobStore` は `.complete` を維持します。v1 では採りません。
 
 ##### ロック中のアクセス
 
@@ -1963,14 +2136,14 @@ func canDeleteHistoryUnit(
 | --- | --- |
 | お気に入り | 利用者が明示的に保護した履歴が消える |
 | 編集中のプロジェクト | 編集画面が参照先を失う |
-| **非終端のキュー項目**（`waiting` / `exporting` / `paused`） | 処理中のバッチが消える |
+| **非終端のキュー項目**（`isTerminal == false`。6.5） | 処理中のバッチが消える |
 | **`OutputRecord`** | 未受け渡し出力の実体だけが残り、レコードが孤児になる |
 | **非終端の `ExportCommit`** | 復旧の手がかりを失い、会計を戻せなくなる |
 | **`WorkingSourceRecord`**（[画像処理](image-pipeline.md)） | 処理用の元素材が消え、キューを復元できない |
 | **出力再生成の対象**（[書き出し Saga](export-saga.md)） | 再生成中の対象が消える |
 | 24 時間のやり直し保証 | やり直しができなくなる |
 
-**判定と削除は `ATTACH` した同一トランザクション内で行います。** 2 つの DB を跨いで見る必要があり、別トランザクションに分けると判定と削除の間に新しい参照が生まれます。
+**判定と削除は同一トランザクション内で行います。** 別トランザクションに分けると、判定と削除の間に新しい参照が生まれます。外部キーの `RESTRICT`（7.1）が二重の防御として働きます。
 
 **判定の入口を 1 つにします。** 容量超過による自動削除、期限削除、利用者による手動削除のいずれもこの関数を通します。手動削除だけを例外にしません。
 
@@ -2016,7 +2189,7 @@ func canDeleteHistoryUnit(
 
 | 項目 | 規約 |
 | --- | --- |
-| ディレクトリ | `user-data/thumbnails/` |
+| ディレクトリ | `thumbnails/` |
 | 参照 | ファイル名ではなく `ManagedFileRef(.historyThumbnail, ...)`（`Project` が保持） |
 | 保護クラス | `.complete`（加工後とはいえ顔を含む画像） |
 | バックアップ | 対象外 |
@@ -2146,6 +2319,26 @@ EXIF の撮影日時を一律に削除すると、加工後の写真がすべて
 
 `PHAssetCreationRequest.creationDate` は保存時に明示指定できるため、**EXIF から日時を消してもライブラリ側の日時を引き継げば並び順は保たれます。**
 
+##### 出力メタデータは許可リストで構築する
+
+**元のメタデータ辞書をコピーして既知キーだけ削除する実装を許しません。** 未知の EXIF タグ、XMP、IPTC、メーカー固有情報（MakerNote）が残ります。削除リストは、知らないキーを取りこぼす方向へ倒れます。
+
+**出力メタデータ辞書を空から構築します。**
+
+| 分類 | 扱い |
+| --- | --- |
+| ICC プロファイル | **必要な場合のみ含める**（色が変わらないようにするため） |
+| ピクセル寸法 | 含める |
+| `DateTimeOriginal` | **設定で保持を選んだ場合のみ**含める |
+| 向き（Orientation） | ピクセルへ適用済みなので**通常値（1）を書く** |
+| GPS / `Make` / `Model` / `Software` / `UserComment` / `Artist` / `Copyright` | **コピーしない** |
+| XMP / IPTC / MakerNote の全 namespace | **コピーしない** |
+| 上記以外のすべて | **コピーしない** |
+
+**保存後に読み返し、許可されていない namespace とキーが 1 つも無いことを検査します。** 検査に失敗した出力は完成扱いにせず、[書き出し Saga](export-saga.md) の手順 1 の検証失敗として扱います。
+
+**カスタムスタンプも同じ方針で再エンコードします。** 取り込み時に縮小・変換するため、そこで元のメタデータを捨てます。スタンプ画像は出力へ合成されるだけですが、実体がアプリ内に残る以上、位置情報を保持する理由がありません。
+
 **`PHAsset.creationDate` は `Optional` です。** 優先順位を定めます。
 
 | 順 | 取得元 | 条件 |
@@ -2221,14 +2414,17 @@ struct SignedPayload: Sendable {
 
 **`JSONEncoder` や binary plist を正準形として使いません。** 集合と配列の順序、`Date` の表現、辞書のキー順が実装とバージョンに依存し、**同じ意味の値から別の署名が出れば正規の起動が `integrityFailure` になります。**
 
-##### 鍵の用途を分離する
+##### 鍵と派生
 
-| 用途 | 派生ラベル |
+**アルゴリズム・鍵長・派生ラベル・出力形式の正本は [正準スキーマ](canonical-schema.md) の 1.1 です。** 要点だけを示します。
+
+| 項目 | 値 |
 | --- | --- |
-| 台帳・購入状態・コミット・リモート設定の署名 | `payload-signing-v1` |
-| `providerAssetKeyHash` のソルト（6.4） | `source-provider-key-v1` |
+| 署名 | HMAC-SHA256（32 バイト固定） |
+| 鍵導出 | HKDF-SHA256。マスター鍵 256 bit、派生鍵 32 バイト、`salt` は空 |
+| 用途の分離 | 署名（`payload-signing-v1`）と `providerAssetKeyHash` のソルト（`source-provider-key-v1`）を別の派生鍵にする |
 
-`CryptoKeyStore` が保持するマスター鍵から **HKDF** で派生させます。**署名とソルトを分けるのは、性質が違うからです。** ソルトは値の秘匿が目的、署名鍵は完全性の保証が目的であり、同じ鍵を使うと片方の運用（ローテーション等）がもう片方へ波及します。
+**署名とソルトを分けるのは、性質が違うからです。** ソルトは値の秘匿が目的、署名鍵は完全性の保証が目的であり、同じ鍵を使うと片方の運用（ローテーション等）がもう片方へ波及します。
 
 ### 9.2 ログ・分析・診断
 

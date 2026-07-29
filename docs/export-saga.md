@@ -19,7 +19,120 @@
 
 ---
 
+## 0. Application が使う永続化ポート
+
+`Application` は `Domain` のプロトコルだけを使います（[アーキテクチャ設計](architecture.md) の 4.3）。Saga が必要とする操作を、**トランザクション境界ごと**に切ります。
+
+```swift
+// Domain — Foundation のみ
+
+protocol UsageLedgerStore: Sendable {
+    func transact<R: Sendable>(
+        _ transform: @Sendable (UsageLedger) throws -> LedgerTransaction<R>
+    ) async throws -> R
+}
+
+protocol ExportSagaStore: Sendable {
+    /// 手順 0。expectedProjectRevision と一致しなければ throw（1.1）
+    func insertPrepared(
+        _ commit: ExportCommit,
+        expectedProjectRevision: Int64
+    ) async throws
+
+    /// 手順 2 / 3 / 5 / 6。同じ exportID の行を置き換える
+    func updateCommit(_ commit: ExportCommit) async throws
+
+    /// 手順 7。単一 DB トランザクションで実行する
+    func finalizeExport(_ input: FinalizeExportInput) async throws
+
+    /// 起動時復旧の入力（5 章）
+    func loadRecoverySnapshot() async throws -> RecoverySnapshot
+
+    /// ロールバックの手順 3〜5 を 1 トランザクションで実行する
+    func rollbackCommit(_ exportID: ExportID) async throws
+
+    /// 署名不正行を DB 内部の行 ID で削除する（6 章）
+    func deleteCommitByRowID(_ rowID: Int64) async throws
+}
+```
+
+**手順 7 を複数の Repository 呼び出しとして `Application` 側で組み立てません。** そうすると単一 DB トランザクションを保証できず、「出力は公開済みだがキューは `exporting`」が残ります。
+
+```swift
+struct FinalizeExportInput: Sendable {
+    let exportID: ExportID
+    let outputRecord: OutputRecord
+    let exportRecord: ExportRecord
+    let queueItemID: ExportQueueItemID?
+    let projectUpdatedAt: Date
+}
+```
+
+`finalizeExport` の実装が、`OutputRecord` の insert・`ExportRecord` の insert・キュー項目の `completed` 更新・`Project` の最終更新時刻・`ExportCommit` の delete を **1 回の DB トランザクション**で行います。**この境界が手順 7 の正本です。**
+
+`RecoverySnapshot` は起動時に一度だけ読む値で、署名検証前の全 `ExportCommit`（行 ID つき）、`OutputRecord`、非終端キュー項目、`WorkingSourceRecord`、DB 間参照の検査結果を含みます。**復旧中に個別クエリを繰り返さないのは、手順の途中で DB が変化しないことを保証するためです。**
+
+そのほかのポート（`ManagedFileStore` / `CryptoKeyStore` / `ProtectedBlobStore` / `CrashReporter` / 履歴削除の原子的操作）は [アーキテクチャ設計](architecture.md) が正本です。
+
+---
+
 ## 1. 認可
+
+**認可は 2 つの独立した検査を通ります。**
+
+| 検査 | 対象 | 失敗時 |
+| --- | --- | --- |
+| **確認の一致**（1.1） | 利用者が確認したプレビューが、いま書き出そうとしている設定と同じか | 開始しない。台帳へ触れない |
+| **権限とクォータ**（1.2 以降） | 能力・月間枠・トライアル | `.blocked`。lease と予約を補償して終了 |
+
+**順序は確認の一致が先です。** 台帳を触る前に弾けば、補償が不要になります。
+
+### 1.1 確認済みの設定でのみ書き出す
+
+検出漏れはアプリ側で判定できないため、**利用者が加工後プレビューを確認したことが安全性の前提です**（[アーキテクチャ設計](architecture.md) の 6.1）。しかし「確認した」という事実だけでは、**確認後に設定を変えて古いプレビューのまま書き出す経路**を塞げません。
+
+**確認の対象を型で固定します。**
+
+```swift
+/// 書き出そうとしている入力の同一性
+struct ExportInputSnapshot: Sendable, Equatable {
+    let projectID: ProjectID
+    let projectRevision: Int64        // Project の変更ごとに増える
+    let detectionRevision: Int64      // 再検出ごとに増える
+    let settingsHash: ProjectSettingsHash
+}
+
+/// 利用者が確認したプレビューの同一性
+struct PreviewConfirmation: Sendable, Equatable {
+    let projectRevision: Int64
+    let detectionRevision: Int64
+    let settingsHash: ProjectSettingsHash
+}
+```
+
+`ProjectSettingsHash` は出力へ影響する全設定の正準ハッシュです（[正準スキーマ](canonical-schema.md)）。
+
+| 処理 | 開始条件 |
+| --- | --- |
+| 単体 | 現在の `ExportInputSnapshot` の 3 値が `PreviewConfirmation` と**すべて一致する** |
+| バッチ | 各写真について上記が一致し、かつモードごとの確認条件（`reviewed` / `overviewConfirmed`）を満たす |
+
+**`settingsHash` だけでは足りません。** 再検出すると顔の集合が変わりますが、設定が同じなら `settingsHash` は変化しません。`detectionRevision` を含めることで、**確認したプレビューと違う顔集合で書き出す経路**を塞ぎます。`projectRevision` は、手動領域の追加・削除など `settingsHash` の対象外の変更を捕まえます。
+
+##### 開始後に設定を変えられないようにする
+
+一致を確認しただけでは、**確認から `prepared` の保存までの間に設定を変更**できます。
+
+| 順 | 操作 |
+| --- | --- |
+| 1 | 確認の一致を検査する |
+| 2 | 権限とクォータを認可する（1.3 のゲート内） |
+| 3 | **手順 0 で `Project` の revision を再取得し、`ExportCommit` の insert と同一 DB トランザクションで固定する**（`insertPrepared(_:expectedProjectRevision:)`） |
+| 4 | revision が変わっていれば insert が失敗する。**台帳の lease・予約を補償して終了する** |
+
+**非終端の `ExportCommit` が存在する間、対象 `Project` を変更できません。** 編集操作は拒否し、書き出しの完了またはキャンセルを求めます。これにより手順 1〜7 の途中で設定が変わる経路が消えます。
+
+### 1.2 権限とクォータ
 
 **`blocked` になりうる評価を、生成が終わったあとに行いません。**
 
@@ -73,7 +186,7 @@ enum ExportAccountingMode: Sendable {
 
 **`ExportStartBlock` は開始を止める理由だけを持ちます。** `QuotaDecision` を連想値にすると `.blocked(.unlimited)` のような無意味な値が構築でき、型で分けた目的を果たしません。`QuotaPolicy.evaluate` が `.blocked(reason:limit:)` を返した場合に開始トランザクションが写し、`unlimited` / `freeReexport` / `consume` はいずれも `ExportAccountingMode` へ写ります。
 
-### 1.1 勘定の使い分け
+### 1.3 勘定の使い分け
 
 | 勘定 | 月間枠 | トライアル台帳 | grant |
 | --- | --- | --- | --- |
@@ -116,7 +229,7 @@ enum GrantAction: Sendable {
 
 会計時点で認可時の grant が既に期限切れになっていた場合は、**再登録せずそのまま落とします。** 無料で開始したその 1 回は完了させますが、次回の再書き出し権は与えません。
 
-### 1.2 開始後の権限変化
+### 1.4 開始後の権限変化
 
 開始後に有料契約の失効・月間上限への到達・リモート設定の変更が起きても、その書き出しは開始時の権限で完了させます。**認可の粒度は写真ごとの `exportID` です。**
 
@@ -127,7 +240,7 @@ enum GrantAction: Sendable {
 
 契約期間の終了時に未完了のバッチが残っている場合はキューを `paused` にし、完了済みの写真と履歴は保持します。
 
-### 1.3 開始ゲート
+### 1.5 開始ゲート
 
 **「同時 1 件」という規則だけでは競合を防げません。** 認可を通ってから `prepared` を書くまでの間に、別の書き出しが同じ認可を通過できます。**認可の前にゲートを取ります。**
 
@@ -157,16 +270,17 @@ protocol ExportStartGate: Sendable {
 開始の順序です。
 
 1. 復旧完了ゲートを確認する（5 章）
-2. **`withExclusivePermit` を取得する**
-3. **その内側で** `transact` を 1 回実行し、`ExportStartDecision` を得る
-4. `.blocked` なら生成せずに終える。ゲートは解放する
-5. `ExportCommit(prepared)` を保存する
-6. 処理を開始する
-7. 手順 7 の完了またはロールバック完了で**ゲートを解放する**
+2. **確認の一致を検査する**（1.1）。不一致なら台帳へ触れずに終える
+3. **`withExclusivePermit` を取得する**
+4. **その内側で** `transact` を 1 回実行し、`ExportStartDecision` を得る
+5. `.blocked` なら生成せずに終える。ゲートは解放する
+6. `ExportCommit(prepared)` を保存する（`expectedProjectRevision` つき）
+7. 処理を開始する
+8. 手順 7 の完了またはロールバック完了で**ゲートを解放する**
 
 **ゲートは認可の完了では解放しません。コミット行の削除またはロールバックの完了まで保持します。** ロールバックの途中で次の認可が走ると、戻す前の台帳を根拠に判定してしまいます。
 
-### 1.4 同一素材の直列化
+### 1.6 同一素材の直列化
 
 **同じ素材の非終端 `ExportCommit` は同時に 1 件だけとします。** この不変条件がないと所有者方式が壊れます。Export A が grant を作り所有者になる → 同じ素材の Export B も正常完了する（既存 grant を使うので所有者にならない）→ A のファイル異常でロールバックし A 所有の grant を削除する → **B は成功しているのに grant が消える。**
 
@@ -178,7 +292,7 @@ protocol ExportStartGate: Sendable {
 
 この不変条件は台帳側では **「同一 `sourceID` の `SourceLease` は最大 1 件」** として現れます。v1 は全体ゲートによりこれを自動的に満たします。
 
-### 1.5 並列数を 2 へ上げるときの移行
+### 1.7 並列数を 2 へ上げるときの移行
 
 | 段 | ゲート | 内容 |
 | --- | --- | --- |
@@ -480,15 +594,15 @@ sourceLeases      のうち exportID == 対象 exportID の要素を削除
 | 順 | 操作 | 依存 |
 | --- | --- | --- |
 | −4 | **保護データが利用可能になるまで待つ** | — |
-| −3 | `runtime.db` を開き、`user-data.db` を `ATTACH` する | −4 の完了 |
-| −2 | 両スキーマの `journal_mode` と `synchronous` を設定・検証する | −3 の完了 |
-| −1 | **両 DB のスキーマ移行を実行する**（5.1） | −2 の完了 |
+| −3 | `app.db` を開く | −4 の完了 |
+| −2 | `journal_mode` / `synchronous` / `foreign_keys` を設定・検証する | −3 の完了 |
+| −1 | **DB のスキーマ移行を実行する**（5.1） | −2 の完了 |
 | 0 | **`ProtectedBlobStore` のスキーマ移行を実行する** | −1 の完了 |
 | 1 | `UsageLedger` を読み込み、検証し、必要なら修復する | 0 の完了 |
 | 2 | `ExportCommit` を読み込み、行ごとの署名を検証する | 0 の完了 |
 | 3 | **有効なコミットに対応しない `trialReservations` と `sourceLeases` を削除する** | 1・2 の完了 |
 | 4 | 有効な未完了コミットを復旧する（5.2） | 1・2・3 の完了 |
-| 5 | **DB 間参照の整合を検査する** | 4 の完了 |
+| 5 | `PRAGMA foreign_key_check` で外部キー違反が無いことを確認する | 4 の完了 |
 | 6 | `PendingFileDeletion` と孤児ファイルを回収する | 5 の完了 |
 | 7 | 未受け渡し出力を復元する | 5 の完了 |
 | 8 | **`evaluateUpdate` を実行する** | 7 の完了。`generated` の件数が必要 |
@@ -496,15 +610,33 @@ sourceLeases      のうち exportID == 対象 exportID の要素を削除
 
 - **手順 −4 を最初に置くのは、`.complete` のファイルがロック中に読めないためです。** DB を開く前に待ちます
 - **手順 3 を手順 4 より前に置きます。** 孤児予約はクレジットを占有したままなので、回収前に新しい認可を許可すると、実際には空いているクレジットを「使用中」と判定します
-- **手順 5 を手順 4 の後に置きます。** ロールバックが `OutputRecord` を削除するため、先に検査すると存在しない不一致を検出します
+- **手順 5 を手順 4 の後に置きます。** ロールバックが `OutputRecord` を削除するため、先に検査すると存在しない違反を検出します
 - **手順 6 を手順 5 の後に置きます。** ロールバックと孤児削除が `PendingFileDeletion` へ行を追加しうるため、先に GC を走らせるとその回で回収できません
 - **署名検証に失敗したコミットに対応する予約と lease は、手順 3 で自動削除しません**（6 章）
 
-### 5.1 2 つの DB の移行は 1 トランザクションで行う
+### 5.1 スキーマ移行
 
-**個別の `DatabaseMigrator` を順に commit しません。** 片方だけ移行が済んだ状態で落ちると、2 つの DB のスキーマバージョンが食い違い、次回起動でどちらを正とするか決められません。
+`app.db` は 1 つなので `DatabaseMigrator` も 1 系列です。各移行ステップは単一トランザクションで確定し、途中適用が観測されません。
 
-両 DB を変更する移行は、**`ATTACH` 済みの単一トランザクション**で実行します。片方の DB だけを変更する移行は、その DB に閉じたトランザクションで構いません。ただし**移行の版番号は 1 系列で管理し**、どちらの DB を変更したかを記録します。
+
+
+##### 署名付き行の移行
+
+**手順 −1（スキーマ移行）は手順 2（署名検証）より前にあります。** `ExportCommit` の署名対象カラムを通常の SQL migration で先に変換すると、**旧 canonical bytes を再現できなくなり、正規の行がすべて検証失敗します。**
+
+署名付き行の移行は、通常の SQL migration とは別の経路で行います。
+
+| 順 | 操作 |
+| --- | --- |
+| 1 | **旧 schema のまま**、旧 canonical 形式で署名を検証する |
+| 2 | 検証を通った行だけ、値を新しい型へ変換する |
+| 3 | **新 canonical 形式で再署名する** |
+| 4 | 行の更新と schema version の更新を**同一 DB トランザクション**で確定する |
+| 5 | 検証できなかった行は**変換せず**、復旧エラーとして残す（6 章） |
+
+**検証不能な行を自動変換しません。** 変換すれば新しい署名が付き、改ざんされた内容が正規の行として通ります。
+
+この規則は `ProtectedBlobStore` の payload（手順 0）にも同じく適用します。
 
 ### 5.2 状態別の復旧
 
@@ -588,70 +720,37 @@ sourceLeases      のうち exportID == 対象 exportID の要素を削除
 
 ---
 
-## 7. 出力再生成
+## 7. コミット確定後に出力実体が失われた場合
 
-ジャーナルを消したあとで `OutputRecord` と実体が食い違うことは、外部要因（OS によるキャッシュ削除、ストレージ障害）で起こりえます。**この経路では `UsageLedger` を変更しません。**
+ジャーナルを消したあとで `OutputRecord` と実体が食い違うことは、外部要因（OS によるキャッシュ削除、ストレージ障害）で起こりえます。
 
-```swift
-enum ExportOperation: Sendable {
-    /// 通常の書き出し。手順 −2〜7 をすべて実行する
-    case newExport(ExportAuthorization)
+**v1 では自動再生成を行いません。**
 
-    /// 失われた出力の再生成。会計を一切変更しない
-    case restoreOutput(
-        originalGeneratedAt: Date,
-        originalExpiresAt: Date
-    )
-}
-```
-
-**通常の `ExportAccountingMode` では実行できません。** どの勘定を選んでも Saga は台帳と履歴を更新し、grant を新規作成または延長し、`OutputRecord` を insert し、`ExportRecord` を追加し、`generatedAt` / `expiresAt` を更新し、キューの成功件数を増やします。
-
-| 項目 | 規則 |
+| 状況 | 扱い |
 | --- | --- |
-| `UsageLedger` | **変更しない。** 手順 −2 と手順 4 を実行しない |
-| `ExportCommit` | 作らない（会計を戻す必要がないため） |
-| `OutputRecord` | **update する。** insert しない |
-| `generatedAt` / `expiresAt` | **元の値を維持する。** 延長しない |
-| `ExportRecord` | **追加しない** |
-| キューの成功件数 | **増やさない** |
-| 開始ゲート | 通常の書き出しと同じゲートを取得する（同じ素材への同時操作を避ける） |
+| 実体が無い、または `outputByteSize` / `outputSHA256` と一致しない | **`OutputRecord` を削除する**（4 章のロールバックではなく、7.5 の出力削除経路） |
+| `UsageLedger` | **変更しない。** 月間枠・grant・トライアルクレジットのいずれも戻さない |
+| 利用者への提示 | 出力を復元できないこと、および**新しい書き出しになる**ことを示す |
+| 24 時間以内の同一素材 | grant により `freeMonthlyReexport` が成立するため、追加消費なしでやり直せる |
 
-### 7.1 実行の順序と中断復旧
+`retentionNow == nil` の間は削除も判定も保留します（時計異常中に破壊的削除を行わないため）。
 
-**ファイルと DB は同時に更新できません。** 会計を持たない分だけ単純ですが、順序は固定します。
+### 7.1 自動再生成を持たない理由
 
-| 順 | 操作 | 保存先 |
-| --- | --- | --- |
-| 1 | 新しい一時ファイルを生成し、サイズ・SHA-256・デコードを検証する | ファイルシステム |
-| 2 | 対象の出力ファイルへ **atomic replace** する | ファイルシステム |
-| 3 | DB トランザクションで `OutputRecord.outputByteSize` と `outputSHA256` を update する | DB |
-| 4 | 一時ファイルを回収する | ファイルシステム |
+**現在保持しているデータでは再生成できません。**
 
-**手順 2 と 3 の間で終了した場合、次回起動時に「ファイルは存在するが `OutputRecord` の記録値と一致しない」状態が観測されます。** これを破損として扱いません。**再生成の途中**として扱い、手順 1 からやり直します。
-
-| 起動時に観測される状態 | 扱い |
+| 必要なもの | 現状 |
 | --- | --- |
-| ファイルが無い | 再生成の対象（本章の入口） |
-| ファイルはあるが記録値と不一致 | **再生成の途中。** 手順 1 からやり直す |
-| ファイルがあり記録値と一致 | 正常。何もしない |
+| 元画像 | `WorkingSourceRecord` は書き出し完了時に削除される（[画像処理](image-pipeline.md)） |
+| `RenderSpec` | `OutputRecord` は保持しない。`Project` 側は編集で変化しうる |
+| `ExportSetting`（形式・品質・メタデータ） | `OutputRecord` は保持しない |
+| `OutputFile.format` / `suggestedCreationDate` | `OutputRecord` に無く、受け渡しに必要 |
 
-**`ExportCommit` を作らないため、この判定はファイルと `OutputRecord` の突き合わせだけで成立します。** 会計を戻す必要がないので、ジャーナルが持つ「どこまで進んだか」の情報は不要です。
+再生成を成立させるには、**出力の期限まで不変のスナップショット**（正確な `RenderSpec` と `ExportSetting`、元画像の再取得手段または処理用コピー、出力形式と登録日時、再取得権限が無い場合の利用者操作）を保持する必要があります。
 
-`outputSHA256` を先に書いてからファイルを置き換える順序は採りません。DB が新しい値を持ちファイルが古いままだと、**正常な出力が破損と誤判定されます。** ファイルを先に確定すれば、不一致は常に「再生成の途中」を意味します。
+これは未加工の顔画像を最大 24 時間追加で保持することを意味し、**プライバシーと容量の複雑性が v1 の利得に釣り合いません。** 同じ素材の再書き出しは grant により追加消費なしで行えるため、利用者の損失は「もう一度操作する手間」に限られます。
 
-### 7.2 期限切れの扱い
-
-**単なる「過去なら削除」にしません。時計異常中に破壊的削除を行わないためです。**
-
-| 条件 | 扱い |
-| --- | --- |
-| `retentionNow == nil` | **削除しない。再生成もしない。** 判断を保留する |
-| `retentionNow >= originalExpiresAt` | **再生成しない。** 期限切れとして `OutputRecord` を削除する |
-| それ以外 | **再生成する** |
-
-期限切れで再生成すると即座に削除されるだけであり、「作り直せた」と見せてから消えるほうが体験として悪くなります。この場合は、期限切れであることと新しい書き出しとして扱われることを提示します。
-
+v2 で保持コストを許容できる場合は、`ExportSnapshot` を不変オブジェクトとして導入し、会計を持たない `OutputRecoveryCommit` で再生成の中断復旧を扱う設計へ拡張します。
 ---
 
 ## 8. 利用者への受け渡し

@@ -556,38 +556,47 @@ func makeCIRect(_ rect: PixelRect, canvasHeight: Int) -> CGRect {
 
 enum ImageFormat: Sendable, Hashable { case jpeg, heic, png }
 
-enum OrientationState: Sendable {
-    case normalized       // EXIF 回転を適用済み。座標規約（4 章）の基準
-    case asStored         // 未適用。PickedPhotoLoader の入力だけが取りうる
-}
-
-/// レンダラーへ渡す入力画像。実体は ManagedFileRef からのみ解決する
+/// レンダラーへ渡す入力画像。実体は ManagedFileRef からのみ解決する。
+/// この型を作れる時点で向きは正規化済み。未正規化の画像は表現できない
 struct ImageSource: Sendable {
     let file: ManagedFileRef
     let pixelSize: PixelSize          // 向き正規化後
     let format: ImageFormat
-    let orientation: OrientationState // 常に .normalized
 }
 
 /// PickedPhotoLoader の戻り値。検出用の縮小画像を含む
 struct LoadedPhoto: Sendable {
-    let source: ImageSource           // 原寸（向き正規化後）
-    let detectionSource: ImageSource  // 長辺 1,920 程度へ縮小したもの
+    let source: ImageSource           // 向き正規化済みの原寸。WorkingSourceRecord が指す実体
+    let detectionSource: ImageSource  // 長辺 1,920 程度へ縮小。検出のスコープ限り
     let capturedAtUTCMillis: Int64?   // EXIF の DateTimeOriginal のみ（5 章）
 }
 
 /// FaceDetector の戻り値
 struct DetectionResult: Sendable, Equatable {
     let faces: [DetectedFace]
-    let detectionPixelSize: PixelSize  // isSmallFace の判定に使った寸法
+    let detectionPixelSize: PixelSize   // isSmallFace の判定に使った寸法
     let revision: FaceDetectorRevision  // 採用した Vision リビジョン
 }
+
+/// 生ビットマップの形式。RenderedImage と RasterizedStampAsset が共有する
+struct RawBitmapDescriptor: Sendable, Equatable {
+    let pixelSize: PixelSize
+    let rowBytes: Int                 // >= pixelSize.width * 4
+    let channelOrder: RawChannelOrder
+    let alpha: RawAlphaMode
+    let bitDepth: RawBitDepth
+    let colorSpace: RawColorSpace
+}
+
+enum RawChannelOrder: Sendable { case rgba, bgra }
+enum RawAlphaMode: Sendable { case straight, premultiplied }
+enum RawBitDepth: Sendable { case eightPerChannel }
+enum RawColorSpace: Sendable { case sRGB }
 
 /// ImageEffectRenderer の戻り値。エンコード前のビットマップ
 struct RenderedImage: Sendable {
     let file: ManagedFileRef          // kind は .rasterTemporary
-    let pixelSize: PixelSize
-    let rowBytes: Int
+    let descriptor: RawBitmapDescriptor
 }
 
 /// 受け渡し対象。MediaSaver と SharePresenter が受け取る
@@ -603,11 +612,73 @@ struct OutputFile: Sendable {
 | 規約 | 内容 |
 | --- | --- |
 | 実体の参照 | **`ManagedFileRef` のみ。** `URL` もパス文字列も持たない |
-| 向き | `ImageSource.orientation` は常に `.normalized`。未正規化の画像が境界を越えない |
+| 向き | `ImageSource` を作れる時点で正規化済み。**未正規化を表す case を持たない** |
 | 寸法 | すべて向き正規化後の値。`compileRenderDraft` の `sourceSize` はここから取る |
-| メタデータ | 境界型は EXIF を保持しない。`ImageEncoder` が `ExportSetting` に従って付与・除去する |
+| メタデータ | 境界型は EXIF を保持しない。`ImageEncoder` が `ExportSetting` に従って付与する |
 
 **`OutputFile` に `suggestedCreationDate` を持たせるのは、`MediaSaver` が `PHAssetCreationRequest.creationDate` を設定するために必要だからです。** 取得できなかった場合は `nil` とし、`MediaSaver` は `creationDate` を設定しません（5 章）。
+
+##### 生ビットマップの形式を型で固定する
+
+**「RGBA8888」だけでは実装が一意に定まりません。** チャネル順、アルファの前乗算、色空間、bit depth のどれか 1 つでも食い違うと、半透明のスタンプが暗くなる、色がずれる、といった形で表面化します。
+
+v1 が生成する生ビットマップは常に次の値をとります。
+
+| フィールド | v1 の値 |
+| --- | --- |
+| `channelOrder` | `.rgba` |
+| `alpha` | **`.straight`**（Core Graphics の既定は premultiplied。保存前に変換する） |
+| `bitDepth` | `.eightPerChannel` |
+| `colorSpace` | `.sRGB` |
+| `rowBytes` | `>= width * 4`。アライメントのため大きくてよい |
+
+**型として持つのは、将来 BGRA や premultiplied を扱う経路が増えたときに、暗黙の前提で壊れないようにするためです。** 読み手は `descriptor` を見て変換の要否を判断します。
+
+ファイルの構造（ヘッダなし raw bytes、上から下、左から右、`rowBytes * height` に一致、行末パディングのゼロ初期化）は 3 章が正本です。
+
+##### プロトコルのシグネチャ
+
+```swift
+protocol PickedPhotoLoader: Sendable {
+    /// 物質化済みファイルを読み、向きを正規化して返す。選択そのものは扱わない
+    func load(_ file: ManagedFileRef) async throws -> LoadedPhoto
+}
+
+protocol FaceDetector: Sendable {
+    func detect(_ source: ImageSource) async throws -> DetectionResult
+}
+
+protocol ImageEffectRenderer: Sendable {
+    func render(
+        source: ImageSource,
+        plan: RenderPlan,
+        rasterAssets: [String: RasterizedStampAsset]   // bitmapID → 実体
+    ) async throws -> RenderedImage
+}
+
+protocol ImageEncoder: Sendable {
+    /// メタデータは許可リストで構築する（アーキテクチャ設計 7.5）
+    func encode(
+        _ image: RenderedImage,
+        format: ImageFormat,
+        quality: Double,
+        metadata: OutputMetadata
+    ) async throws -> ManagedFileRef      // kind は .output
+}
+
+protocol MediaSaver: Sendable {
+    /// 追加のみの権限で足りる。読み取り権限を要求しない（5 章）
+    func saveToPhotoLibrary(_ file: OutputFile) async throws
+}
+
+protocol StampRasterizer: Sendable {
+    func rasterize(
+        _ keys: Set<StampRasterKey>
+    ) async throws -> [StampRasterKey: RasterizedStampAsset]
+}
+```
+
+`OutputMetadata` は許可リストで構築した出力メタデータで、ICC プロファイルの有無、ピクセル寸法、保持する場合の `DateTimeOriginal` だけを持ちます（[アーキテクチャ設計](architecture.md) の 7.5）。**`ImageEncoder` は元画像のメタデータ辞書を受け取りません。** 受け取れる形にすると、コピーして削除する実装が可能になります。
 
 ##### `@MainActor` のプロトコル
 
@@ -720,13 +791,13 @@ struct WorkingSourceRecord: Sendable {
 
 | 項目 | 規約 |
 | --- | --- |
-| 保存先 | `runtime.db`。実体は `runtime/processing/` |
+| 保存先 | `app.db`。実体は `working/` |
 | 参照 | キュー項目・編集中プロジェクトの元素材 |
 | 削除 | 書き出し完了時またはプロジェクト破棄時に `PendingFileDeletion` へ |
 | 起動時 | どのプロジェクトからも参照されない行を回収し、実体も削除する |
-| 実体が欠けている | そのキュー項目を **`reselectionRequired`** へ遷移させる。エラーで止めない |
+| 実体が欠けている | そのキュー項目を **`paused(.sourceReselectionRequired)`** へ遷移させる。エラーで止めない |
 
-`tmp/` に置くと OS がいつでも削除でき、再起動のたびにキューの復元が失敗します。それでもディスク不足で消える可能性はゼロにならないため、`reselectionRequired` を逃げ道として残し、**該当項目だけを再選択対象としてバッチ全体を失いません。**
+`tmp/` に置くと OS がいつでも削除でき、再起動のたびにキューの復元が失敗します。それでもディスク不足で消える可能性はゼロにならないため、`paused(.sourceReselectionRequired)` を逃げ道として残し、**該当項目だけを再選択対象としてバッチ全体を失いません。**
 
 ##### インポート Saga
 
@@ -741,7 +812,7 @@ struct WorkingSourceRecord: Sendable {
 
 **手順 1 と 2 の間で終了した場合、ファイルはどの `WorkingSourceRecord` からも参照されません。** 起動時の孤児 GC が回収します（[アーキテクチャ設計](architecture.md) の孤児ファイル GC）。**「ファイルはあるが行が無い」は容量を食うだけで、復旧不能な損失を生みません。**
 
-逆順（行を先に作る）は採りません。実体が無い `WorkingSourceRecord` を参照するキュー項目ができ、復元時に必ず `reselectionRequired` へ落ちます。**失っても復旧できないほうを避ける**という規則（[アーキテクチャ設計](architecture.md) の DB とファイルの更新順序）と同じ向きです。
+逆順（行を先に作る）は採りません。実体が無い `WorkingSourceRecord` を参照するキュー項目ができ、復元時に必ず `paused(.sourceReselectionRequired)` へ落ちます。**失っても復旧できないほうを避ける**という規則（[アーキテクチャ設計](architecture.md) の DB とファイルの更新順序）と同じ向きです。
 
 ##### 写真ライブラリの読み取り権限
 
@@ -777,7 +848,7 @@ struct ProjectSourceLocator: Sendable, Equatable {
 
 | 項目 | 規約 |
 | --- | --- |
-| 保存先 | **`user-data.db` の `Project` のみ** |
+| 保存先 | **`app.db` の `Project` のみ** |
 | バックアップ | 対象外（7.4） |
 | ログ・分析・診断 | **一切出さない。** 分析イベントのフィールド型にしない（9.2） |
 | `UsageLedger` への保存 | **しない。** クォータ側は `providerAssetKeyHash` のまま |

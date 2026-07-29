@@ -44,6 +44,54 @@ struct SignedPayload: Sendable {
 
 ---
 
+## 1.1 暗号アルゴリズムと鍵
+
+**アルゴリズムを名前とビット長で固定します。** 「HMAC」「HKDF」だけでは実装が一意に定まりません。
+
+| 項目 | 値 |
+| --- | --- |
+| 署名 | **HMAC-SHA256** |
+| 署名長 | **32 バイト固定** |
+| 鍵導出 | **HKDF-SHA256**（RFC 5869。extract → expand の両段） |
+| マスター鍵 | **256 bit（32 バイト）**。`SecRandomCopyBytes` で生成し Keychain へ保存 |
+| 派生鍵の長さ | **32 バイト** |
+| HKDF の `salt` | **空（長さ 0）** |
+| HKDF の `info` | 用途ごとの派生ラベルの UTF-8 バイト列 |
+| 検証 | バイト列の**定数時間比較**（`timingsafe_bcmp` 相当） |
+
+**`salt` を空にするのは、マスター鍵が既に一様乱数だからです。** HKDF の `salt` は入力鍵材料のエントロピーが偏る場合に効きます。`SecRandomCopyBytes` の出力へ salt を足しても強度は上がらず、salt をどこへ保存するかという問題だけが増えます。
+
+派生ラベルです。
+
+| 用途 | `info`（UTF-8） |
+| --- | --- |
+| 台帳・購入状態・コミット・リモート設定の署名 | `payload-signing-v1` |
+| `providerAssetKeyHash` のソルト | `source-provider-key-v1` |
+
+**署名とソルトを分けるのは、性質が違うからです。** ソルトは値の秘匿が目的、署名鍵は完全性の保証が目的であり、同じ鍵を使うと片方の運用（ローテーション等）がもう片方へ波及します。
+
+##### `providerAssetKeyHash`
+
+| 項目 | 規約 |
+| --- | --- |
+| アルゴリズム | **HMAC-SHA256**（鍵は `source-provider-key-v1` の派生鍵） |
+| 入力 | `PHAsset.localIdentifier` の UTF-8 バイト列 |
+| 出力形式 | **32 バイトを小文字 16 進の 64 文字へ**（`String` として保持する） |
+
+**16 進固定にするのは、`SourceAlias.provider(String)` として台帳へ入り、正準化で UTF-8 バイト列として符号化されるためです。** Base64 や大文字混在を許すと、同じ入力から別の alias ができます。
+
+##### 時刻の丸め
+
+| 項目 | 規約 |
+| --- | --- |
+| 表現 | UTC epoch milliseconds の `Int64` |
+| 丸め | **floor**（ミリ秒未満を切り捨てる） |
+| 負の値 | 1970 年より前も floor（`-0.5ms` は `-1`） |
+
+**floor に固定するのは、`Date` の内部表現が `Double` 秒だからです。** 丸め方向が実装依存だと、同じ `Date` から別のバイト列が出ます。`round` は境界で振れるため使いません。
+
+---
+
 ## 2. 基本型の符号化
 
 | 型 | 符号化 |
@@ -101,7 +149,7 @@ struct SignedPayload: Sendable {
 | case | 番号 | 連想値 |
 | --- | --- | --- |
 | `none` | 1 | — |
-| `lockedUntilTrustedMonthAfter` | 2 | `YearMonth` |
+| `lockedUntilTrustedMonthAfter` | 2 | `TrustedUTCMonth` |
 | `lockedUntilReinstall` | 3 | — |
 
 ### `ExportCommitState`
@@ -169,14 +217,14 @@ struct SignedPayload: Sendable {
 | 7 | `sourceLeases` | unordered collection of `SourceLease` |
 | 8 | `lastObservedAt` | `Date` |
 | 9 | `monthlyIntegrityLock` | `MonthlyIntegrityLock` |
-| 10 | `lastTrustedMonth` | `YearMonth?` |
+| 10 | `lastTrustedMonth` | `TrustedUTCMonth?` |
 | 11 | `trialIntegrityLocked` | `Bool` |
 
 要素型のフィールド順です。
 
 | 型 | 順 |
 | --- | --- |
-| `YearMonth` | `year`（`Int32`）→ `month`（`Int32`） |
+| `YearMonth` / `TrustedUTCMonth` | `year`（`Int32`）→ `month`（`Int32`） |
 | `SourceRecord` | `sourceID` → `aliases`（unordered） |
 | `GrantEntry` | `sourceID` → `firstSuccessAt` → `ownerExportID` |
 | `TrialEntry` | `sourceID` → `ownerExportID` |
@@ -309,38 +357,109 @@ struct KillSwitches: Sendable, Decodable, Equatable {
 
 ### 5.1 `contentFingerprint`
 
+**ファイル全体を SHA-256 へ入れます。部分ハッシュにしません。**
+
 | 項目 | 規則 |
 | --- | --- |
-| アルゴリズム | SHA-256 |
+| アルゴリズム | **SHA-256** |
+| 入力 | **ファイルの全バイト**（ストリームで逐次投入する） |
 | 整数のバイト順 | ビッグエンディアン |
 | 撮影日時 | UTC epoch milliseconds の `Int64`。取得元は **EXIF の `DateTimeOriginal` のみ** |
 
 ```
-schemaVersion : UInt32                // 現行 1
+schemaVersion : UInt32                // 現行 2
 fileSize      : UInt32(8)  + Int64
-headChunk     : UInt32(n)  + bytes    // 先頭 min(65536, fileSize) バイト
-tailChunk     : UInt32(n)  + bytes    // 末尾 min(65536, fileSize) バイト
+contentDigest : UInt32(32) + bytes    // ファイル全体の SHA-256（32 バイト）
 capturedAt    : UInt32(8)  + Int64    // 無ければ UInt32(0) のみ
 ```
 
-長さを前置きするのは、単純連結だと末尾チャンクの終わりと日時の始まりを区別できず、異なる入力が同じバイト列になりうるためです。
+長さを前置きするのは、単純連結だとフィールド境界を区別できず、異なる入力が同じバイト列になりうるためです。
 
-**64KB 未満のファイルでは重なりを許容し、両方ともファイル全体を書きます。** 「重複を除く」規則を入れると境界で取り違えます。
+##### 部分ハッシュを採らない
 
-### 5.2 プロジェクト設定ハッシュ
+先頭 64KB と末尾 64KB だけを入力にすると、**中央部分だけが異なる 2 枚の写真が同一素材と判定されます。** 判定が「同一素材なのに二重消費」ではなく「別素材なのに無料で再書き出しできる」方向へ倒れるため、当初は許容していました。
+
+しかしこれは**意図的に作れる衝突**です。同じカメラで撮った 2 枚は、先頭の EXIF ブロックと末尾のパディングが一致しやすく、ファイルサイズも近くなります。撮影日時が同じ連写であれば `capturedAt` も一致します。**無料枠を回避する経路として現実的な難易度になります。**
+
+全体ハッシュの費用は、48 メガピクセルの HEIC でおおむね数 MB から 20MB 程度の読み取りです。**ストリームで投入すればメモリは一定に保てます。** 選択直後に 1 回だけ計算し、`contentFingerprint` として保持します。
+
+| 項目 | 規約 |
+| --- | --- |
+| 読み取り | `FileHandle` からのチャンク読み（1MB 程度）で `SHA256` へ逐次投入する |
+| 計算時点 | 物質化の直後、インポート Saga の中（[画像処理](image-pipeline.md)） |
+| 対象 | **物質化したファイルの全バイト**。表示用の派生画像ではない |
+| メモリ | チャンクサイズ分のみ。ファイル全体を載せない |
+
+`schemaVersion` を 2 とし、旧形式（`1`）のデコーダは残しません。**v1 リリース前の変更であり、移行対象となる既存データが存在しません。**
+
+### 5.2 プロジェクト設定ハッシュ（`ProjectSettingsHash`）
+
+**このハッシュは権限制御に使います。** 有料スタンプを含むプロジェクトを Free で「変更せず再書き出し」できるかの判定、および書き出し前のプレビュー確認の一致判定（[書き出し Saga](export-saga.md) の 1.1）がこれに依存します。**含めるフィールドの取りこぼしは、そのまま権限の迂回になります。**
 
 アルゴリズムと形式は `contentFingerprint` と同じ（SHA-256、長さ前置き、`schemaVersion` 付き）です。
+
+##### 含めるフィールドと順序（`schemaVersion` 1）
+
+| 順 | フィールド | 型 |
+| --- | --- | --- |
+| 1 | `sourceCrop` | `NormalizedRect`（`left` → `top` → `rightExclusive` → `bottomExclusive`。各 `Double`） |
+| 2 | `scaleMode` | `SourceScaleMode`（`fit = 1` / `fill = 2`） |
+| 3 | `background` | `BackgroundSpec`（下記） |
+| 4 | `regions` | **ordered**。要素数を前置きし、各要素を下記の順で書く |
+| 5 | `outputAspect` | `OutputAspect`（`original = 1` / `square = 2` / `fourFive = 3` / `nineSixteen = 4`） |
+| 6 | `outputFormat` | `ImageFormat`（`jpeg = 1` / `heic = 2` / `png = 3`） |
+| 7 | `compressionQuality` | `Double` |
+| 8 | `metadataPolicy` | `MetadataPolicy`（下記） |
+
+`RenderRegionSpec`（4 の各要素）の順です。
+
+| 順 | フィールド |
+| --- | --- |
+| 1 | `bounds`（`NormalizedRect`） |
+| 2 | `rotationDegrees`（`Double`） |
+| 3 | `shape`（`MaskShape`。`ellipse = 1` / `circle = 2` / `rectangle = 3` / `rounded = 4` ＋ `cornerRatio: Double`） |
+| 4 | `featherRatio`（`Double`） |
+| 5 | `origin`（`RegionOrigin`。`auto = 1` / `manual = 2`） |
+| 6 | `op`（`RenderOpSpec`。下記） |
+
+`RenderOpSpec` の case 番号と連想値です。
+
+| case | 番号 | 連想値の順 |
+| --- | --- | --- |
+| `mosaic` | 1 | `cellRatio`（`Double`） |
+| `blur` | 2 | `sigmaRatio`（`Double`） |
+| `solid` | 3 | `color`（`UInt32`）→ `opacity`（`Double`） |
+| `stamp` | 4 | `source` → `opacity`（`Double`） |
+
+`StampSource` は `builtIn = 1` ＋ `code`（`String`）、`custom = 2` ＋ **`StampAsset` の内容ハッシュ**（32 バイト固定長）です。**DB の採番 ID を使いません。**
+
+`BackgroundSpec` は `none = 1` / `blur = 2` ＋ `sigmaRatio`（`Double`）/ `solid = 3` ＋ `color`（`UInt32`）です。
+
+`MetadataPolicy` は `removeLocation` → `removeDeviceInfo` → `removeSoftwareInfo` → `keepCaptureDate` の 4 つの `Bool` です。
+
+##### 含めないフィールド
+
+出力へ影響しない値は含めません。**含めると、名前を変えただけで「変更した」と判定されます。**
+
+- プロジェクト名、作成日時、更新日時、お気に入りフラグ
+- `DetectionStatus` / `ReviewStatus` / `ReviewDecision` / `overviewConfirmed`
+- `detectionRevision` / `projectRevision`（これらは `ExportInputSnapshot` が別に持つ）
+- サムネイルの `ManagedFileRef`、`ProjectSourceLocator`
+- DB の自動採番 ID
+
+##### 規則
 
 | 要因 | 規則 |
 | --- | --- |
 | `Map` の反復順 | キーの辞書順でソートしてから書く |
-| 浮動小数 | **IEEE 754 の 64 ビット `Double.bitPattern`**。`Float` へ丸めない |
-| DB の自動採番 ID | **含めない**（アプリ更新やデータ移行で変わる） |
-| スタンプの参照 | DB ID ではなく `StampAsset` の内容ハッシュ |
+| 浮動小数 | **IEEE 754 の 64 ビット `Double.bitPattern`**。`Float` へ丸めない。`-0.0` は `+0.0` へ |
 | 欠損値 | 長さ 0 のフィールドとして明示する |
-| `RenderSpec.regions` | ordered。順序を保持する |
+| `regions` | ordered。順序を保持する |
+| フィールド追加 | **末尾のみ。** 出力へ影響する設定を追加したら必ずここへ加え、`schemaVersion` を上げる |
 
 **`Float`（32 ビット）へ丸めません。** `0.1500000000000000` と `0.1500000059604645` が同じハッシュになり、**設定を変えたのに無料の再書き出しとして通します。**
+
+各 `schemaVersion` について、既知の `RenderSpec` と `ExportSetting` から生成したゴールデンバイト列をテストへ埋め込みます。
 
 ### 5.3 `StampAsset` の内容ハッシュ
 
