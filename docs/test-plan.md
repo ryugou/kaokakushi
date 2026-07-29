@@ -28,7 +28,7 @@
 
 純粋関数と状態機械のみ。ストレージもプロセスも関与しません。
 
-### 2.1 クォータ・grant・トライアル（6.3）
+### 2.1 クォータ・grant・トライアル（[アーキテクチャ設計](architecture.md) の 6.3）
 
 - `QuotaPolicy`（月跨ぎ、TZ 変更、時刻巻き戻し、うるう年、月末 23:59:59 → 00:00:00、24 時間境界）
 - `evaluate` が更新後の `UsageLedger` を返し、`unlimited` でも時刻更新と grant 整理が行われること
@@ -59,9 +59,9 @@
 - `batchTrial(false)` でも `GrantAction.ensure` になること
 - `freeMonthlyReexport` の `grantAction` が `preserveAuthorized` になること
 - 破棄しても無料枠とトライアルクレジットが戻らないこと
-- 顔 0 件の案内が `QuotaDecision` で分岐すること（6.1）
+- 顔 0 件の案内が `QuotaDecision` で分岐すること（[アーキテクチャ設計](architecture.md) の 6.1）
 
-### 2.2 素材同一性（6.4）
+### 2.2 素材同一性（[アーキテクチャ設計](architecture.md) の 6.4）
 
 - **`isSameSource` を直接使わず、`sourceID` で同一性を判定していること**
 - **provider 一致と content 一致が別レコードを指す場合に、1 件へ統合されること**
@@ -71,10 +71,10 @@
 - **`paidUnlimited` の書き出し中に `SourceRecord` が GC されないこと**（`SourceLease` が効いていること）
 - 台帳の**全不変条件**が、保存前と署名検証直後の両方で検査されること
 - **同じ `sourceID` の `SourceLease` が 2 件以上あるとき、通常状態として通さず復旧エラーになること**
-- `contentFingerprint` が**ファイル全体の SHA-256** を含み、長さ前置き・ビッグエンディアン・UTC epoch ms で計算されること
+- `contentFingerprint` が**ドメイン分離子 `content-fingerprint-v2` をファイル全バイトの前へ置いた SHA-256** であること
 - **中央部分だけが異なる 2 ファイルが、別の `contentFingerprint` になること**（部分ハッシュでは衝突する素材で検証する）
 - ファイル全体をチャンク読みで投入しても、一括読み込みと同じダイジェストになること
-- 撮影日時が無い場合に長さ 0 のフィールドとして扱われること
+- **撮影日時が `OriginalCaptureMetadata` として別に保持され、`contentFingerprint` の入力に入らないこと**
 - **撮影日時の取得元が EXIF のみであり、PhotoKit 権限の有無で変わらないこと**
 - ファイル更新日時を使わないこと
 - `representation` が `contentFingerprint` の入力に含まれないこと
@@ -88,7 +88,7 @@
 - **`ContentFingerprint` / `StampAssetHash` が 32 バイト固定であること**
 - OS がトランスコードした写真を新規素材として数えないこと
 
-### 2.3 レビュー状態とトリアージ（6.1 / 6.5）
+### 2.3 レビュー状態とトリアージ（[アーキテクチャ設計](architecture.md) の 6.1 / 6.5）
 
 - `BatchTriagePolicy`（6 つの要確認理由の各単独・複合、空集合）
 - `triage` の入力が 5.1 の共通モデルだけであること。OS 固有の値に依存しないこと
@@ -107,7 +107,7 @@
 - `DetectionStatus` と `ReviewIssue` が利用者の判断で変化しないこと
 - 理由別の一括対応で、その理由の `ReviewIssue` が 1 件も取りこぼされないこと
 - 1 枚ずつ確認で `normal` の写真が「確認して次へ」により `reviewed` になること
-- 顔の初期状態が常に加工対象であること（6.1 の不変条件）
+- 顔の初期状態が常に加工対象であること（[アーキテクチャ設計](architecture.md) の 6.1 の不変条件）
 - 背景処理の変更で `reviewed` が解除されること。メタデータ設定の変更では解除されないこと
 - `requiresUserReview` の導出がモードで異なること。1 枚ずつ確認では `normal` の未確認写真も含むこと
 - 確認状態の解除が変更範囲に限定されること。`hasOverride` の写真が共通設定変更で `unreviewed` にならないこと
@@ -116,7 +116,7 @@
 - 書き出しの成立条件がモードごとに異なること。1 枚ずつ確認では末尾到達と確認ボタンを求めないこと
 - 確認段階から設定へ戻っても検出結果が保持されること。この経路で写真の選択を変更できないこと
 
-### 2.4 バッチ選択と能力（6.2 / 6.5）
+### 2.4 バッチ選択と能力（[アーキテクチャ設計](architecture.md) の 6.2 / 6.5）
 
 - トライアルの選択判定が「総枚数 5 枚」と「新規写真 ≤ 残クレジット」の 2 条件であること。残 0 枚でも消費済みの写真は選べること
 - `canEnterBatch` が `canUseProBatch` / `canUseBatchTrial` / `trialIntegrityLocked` / 残数 / entry の有無から導かれること
@@ -138,7 +138,7 @@
 - 追加スタンプとカスタムスタンプで、降格後の再書き出し可否が同一であること
 - `AdFrequencyPolicy`（表示禁止条件、初回書き出し、連続表示の抑止）
 
-### 2.5 レンダリング（5.2 / 5.4）
+### 2.5 レンダリング（[画像処理](image-pipeline.md) の 2 / 4）
 
 - 拡張率適用、`RenderSpec` 生成、`compileRenderDraft`、座標正規化
 - `compileRenderDraft` が `RenderPlan` へ絶対ピクセル値のみを入れ、比率を残さないこと。**`SourcePlacement.sourceRect` と `BackgroundOp.blurFromSource.sourceRect` も `PixelRect` であること**
@@ -163,7 +163,7 @@
 - **`YearMonth` / `TrustedUTCMonth` の実型が `Int32` であること。`FaceTrackID` が `UUID` であること**
 - **`RenderedImage` と `RasterizedStampAsset` が `RawBitmapDescriptor` を持ち、チャネル順・アルファ・色空間・bit depth が型で決まること**
 
-### 2.6 設定ハッシュと正準化（6.4 / 9.1）
+### 2.6 設定ハッシュと正準化（[アーキテクチャ設計](architecture.md) の 6.4、[正準スキーマ](canonical-schema.md) の 5.2）
 
 - 設定ハッシュが `Map` のキー順・**`Double.bitPattern`（64 ビット）**・内容ハッシュ参照で正準化され、DB ID に依存しないこと
 - **`Float` へ丸めた場合に区別できなくなる 2 つの `Double` が、異なる設定ハッシュになること**
@@ -176,7 +176,7 @@
 - **`PreviewConfirmation` と `overviewConfirmed` が再起動後に保持されず、再確認を求めること**
 - **出力へ影響する子行（`FaceTrack` / `EffectSetting` / `ExportSetting` / `ProjectStampAsset`）の変更で、同一トランザクション内に `projectRevision` が増えること**
 
-### 2.7 HMAC canonical bytes のゴールデンテスト（9.1）
+### 2.7 HMAC canonical bytes のゴールデンテスト（[正準スキーマ](canonical-schema.md) の 6）
 
 **各 `schemaVersion` について、固定の canonical bytes と HMAC 値をテストへ埋め込みます。**
 
@@ -189,7 +189,7 @@
 
 対象 payload は `UsageLedger` / `SubscriptionState` / `ExportCommit` / `RemoteConfigState` の 4 種すべて。
 
-### 2.8 更新誘導（6.7）
+### 2.8 更新誘導（[アーキテクチャ設計](architecture.md) の 6.7）
 
 - `AppVersion` の比較が数値の組で行われ、`1.10.0 > 1.9.0` になること
 - `CFBundleShortVersionString` のパース失敗で `.none` になり、強制更新へ倒れないこと
@@ -203,11 +203,11 @@
 
 - ストレージ必要量計算、`ExportQueue` 状態機械
 - 履歴の保存期間と容量判定。24 時間のやり直し保証が容量超過時にも守られること
-- `canDeleteHistoryUnit` が 8 種類の参照元すべてを見ること（7.5）
+- `canDeleteHistoryUnit` が列挙された全参照元を見ること（[アーキテクチャ設計](architecture.md) の 7.5）
 - 未保存バッチが 1 件までに制限されること
 - 一括処理の開始が推定必要容量の 1.2 倍の空き容量を要求すること
 - 未保存出力がある状態では、単体・一括を問わず新規加工を開始できないこと
-- 完了画面の離脱確認が `generated` の残数で判定されること。一部保存済みでも出ること
+- 完了画面の離脱確認が `isUndelivered`（`generated` と `deliveryUnknown`）の残数で判定されること。一部保存済みでも出ること
 - 復旧案内の枚数が `generated` の枚数であり、バッチ総枚数ではないこと
 - 共有結果が `.completed` のときだけ `delivered` へ遷移すること。`.unknown` では維持されること
 - リモート設定のフォールバック
@@ -243,16 +243,21 @@
 - コミット削除済みの Export A のファイル欠損で、同一素材を再書き出しした Export B の grant が消えないこと
 - 生成完了後の異常終了では消費が戻らないこと
 - 消費確定が手順 7 であり、保存や共有の回数に影響されないこと
-- **`unavailable` のまま復旧を開始した場合に待機へ入ること**（7.4）
+- **`unavailable` のまま復旧を開始した場合に待機へ入ること**（[アーキテクチャ設計](architecture.md) の 7.4）
 
 ### 3.1.1 v1 で追加した中断点
 
-- **`prepared` の `outputFile` が `nil` であり、手順 2 で `verifiedOutput` と同時に確定すること**
+- **`prepared` の `outputFile` が `nil` であり、`fileVerified` 以降は `OutputFileRef` が入っていること。手順 2 で `verifiedOutput` と同時に確定すること**
 - **手順 1 の途中で落ちた一時ファイルが、どのコミットからも参照されず孤児 GC で回収されること**
 - **`finalizeExport` が入力を信用せず、保存済みコミットの `state` / HMAC / `projectID` / `verifiedOutput` を再確認してから導出すること**
 - **`loadRecoverySnapshot` が復旧前に一度だけ読まれ、`checkForeignKeys` が復旧後に別途呼ばれること**
 - **`ExportCommitColumns` が生のバイト列であり、署名検証前に `ProjectID` などへデコードされないこと**
+- **手順 7 が `WorkingSourceRecord` を同一トランザクションで削除し、実体を `PendingFileDeletion` へ積むこと**
+- **`AccountingIntent.settingsEntryToApply` が手順 4 で適用され、`applied.settingsEntryReplaced` が真のときだけロールバックで `previousSettingsEntry` へ戻ること。元が無ければエントリごと削除されること**
+- **`workingSnapshotToRemove` の削除がロールバックで復元され、素材が「編集中」のまま維持されること**
 - **台帳を修復した起動では、署名が正常な非終端コミットも含めてすべて破棄され、キュー項目が `failed` になること**
+- **同じ起動で `WorkingSourceRecord` もすべて破棄され、実体が `PendingFileDeletion` へ積まれること**
+- **その破棄が署名不正行の規則（行 ID だけで削除し、フィールドを使わない）と同じ手順で行われること**
 - **その破棄で `UsageLedger` へ触れないこと（整合性封鎖のまま）**
 - **`DeliveryAttempt` が残った起動で `deliveryUnknown` になり、自動再保存しないこと**
 - **`deliveryUnknown` が未受け渡しとして 24 時間の保持と離脱確認に数えられること**
@@ -272,7 +277,7 @@
 - 待機中にキャンセルされた waiter がキューから除去され、permit を取得しないこと
 - 同じ continuation が 2 回 resume されないこと
 - `CancellationError` が Sentry へ送られず、キュー項目が `canceled` になること
-- 実行開始の直前に最新台帳で選択を再検証し、分類が変わっていれば開始しないこと（6.5）
+- 実行開始の直前に最新台帳で選択を再検証し、分類が変わっていれば開始しないこと（[アーキテクチャ設計](architecture.md) の 6.5）
 
 ### 3.3 署名不正コミット
 
@@ -291,7 +296,7 @@
 - **自動再生成を行わないこと。** 利用者へは新しい書き出しとして案内すること
 - 24 時間以内の同一素材なら、やり直しが `freeMonthlyReexport` になること
 
-### 3.5 トライアル予約（6.3）
+### 3.5 トライアル予約（[アーキテクチャ設計](architecture.md) の 6.3）
 
 - 残 1 枚で異なる素材の 2 件が並行認可されても、両方が `batchTrial(true)` にならないこと
 - 予約が手順 −2 で作られ、手順 4 の台帳トランザクション内で `trialEntries` へ移ること
@@ -301,7 +306,7 @@
 - **中止時点で手順 7 が未完了の写真は消費せず、既に手順 7 まで完了した写真のクレジットは戻らないこと**
 - **`BatchPolicySnapshot` が開始時の値を保持し、再起動後もリモート設定の変更で動かないこと**
 
-### 3.6 保護ストアの読み込み失敗（7.2）
+### 3.6 保護ストアの読み込み失敗（[アーキテクチャ設計](architecture.md) の 7.2）
 
 - `UsageLedger` の署名検証失敗時、修復済み台帳が作られ、信頼できる時刻を得るまで月間枠が封じられ、トライアルは封じられたままであること
 - 修復済み台帳の `trialReservations` / `sourceRecords` / `sourceLeases` が空であること
@@ -309,7 +314,7 @@
 - `temporarilyUnavailable` で台帳が上書きされず、書き出し開始が保留されること
 - `SubscriptionState` の署名不正時、オフラインで有料権限が新規付与されず、カスタムスタンプと履歴が削除されないこと
 
-### 3.7 出力の寿命と履歴（7.5）
+### 3.7 出力の寿命と履歴（[アーキテクチャ設計](architecture.md) の 7.5）
 
 - `OutputRecord` が `ExportCommit` 削除後も単独で期限判定できること
 - 未受け渡しの出力が破棄または 24 時間経過まで保持されること
@@ -330,10 +335,14 @@
 - **未署名の DB 行を書き換えても `SourceIdentity` が変わらないこと**
 - **再選択で素材が一致しない場合、そのキュー項目で続行できないこと**
 - **再選択が顔検出をやり直し、`detectionRevision` と `projectRevision` を増やし、旧 `FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` / `PreviewConfirmation` を破棄すること**
+- **再選択の候補が一時領域へ物質化される間、既存の `WorkingSourceSnapshot` が上書きされないこと**
+- **候補が一致しないまま中断しても、元の素材と snapshot が失われないこと**
+- **一致した場合の差し替え・派生データ破棄・リビジョン更新が単一の DB トランザクションで行われること**
+- **その途中で終了した場合、次回起動でファイルと DB のどちらかだけが進んだ状態にならないこと**
 - **その削除で `Project` が消えないこと。`retentionNow == nil` の間は削除しないこと**
 - **`isTerminal` が `completed` / `failed` / `canceled` のみ真であり、履歴削除の保護と完了判定が同じ述語を使うこと**
 
-### 3.8 更新誘導との順序（6.7）
+### 3.8 更新誘導との順序（[アーキテクチャ設計](architecture.md) の 6.7）
 
 - **更新判定が復旧手順 −4〜7 の完了後に実行されること**
 - **`.required` かつ `generated` の出力があるとき、受け渡し導線が先に提示されること**
@@ -352,7 +361,7 @@
 
 `MediaKit` / `Persistence` / `Billing` / `Ads` の各プロトコルに対し、**実装と偽実装の両方へ同じスイート**を実行します。偽実装が本物と違う挙動をすると saga テストが無意味になるため、この一致を検証します。
 
-### 4.2 永続化の原子性（7.1 / 8.3）
+### 4.2 永続化の原子性（[アーキテクチャ設計](architecture.md) の 7.1、[書き出し Saga](export-saga.md) の 3）
 
 - 手順 7 の DB トランザクションが原子的であり、`OutputRecord` / `ExportRecord` / キュー状態 / `Project` の更新とコミット削除が同時に成立すること
 - 「コミットあり・`OutputRecord` なし」または「コミットなし・`OutputRecord` あり」以外の状態が観測されないこと
@@ -365,7 +374,7 @@
 - **`blobKeyRawValue` が `UsageLedger = 1` / `SubscriptionState = 2` / `RemoteConfigState = 3` で固定されていること**
 - `PRAGMA foreign_key_check` が起動時に実行され、違反があれば復旧エラーになること
 
-### 4.3 署名と鍵（9.1 / 7.2）
+### 4.3 署名と鍵（[正準スキーマ](canonical-schema.md)、[アーキテクチャ設計](architecture.md) の 7.2）
 
 - `ExportCommit` が状態遷移のたびに再署名され、正規の更新で検証失敗しないこと
 - `SignedPayload` の署名対象に `payloadType` が含まれ、種別間の付け替えが検出されること
@@ -381,7 +390,7 @@
 - **`ProtectedBlobKey` から固定の内部ファイルへ解決され、再起動後も同じ blob を読めること**
 - **`ManagedFileID` を外部へ保存しなくても 3 種の blob を発見できること**
 
-### 4.4 ファイル管理と保護（7.3 / 7.4）
+### 4.4 ファイル管理と保護（[アーキテクチャ設計](architecture.md) の 7.3 / 7.4）
 
 - `ProtectedBlobStore` のデータと HMAC 鍵がともにバックアップ対象外であること
 - 各ディレクトリのデータ保護クラスが 7.4 の表と一致すること
@@ -392,22 +401,25 @@
 - 属性の検証に失敗したファイルが完成扱いにならないこと
 - `StampAsset` の作成が atomic rename を経ること
 - **インポート Saga の手順 1〜3 の途中で終了した場合、作成済みファイルが孤児として起動時 GC で回収されること**
+- **`WorkingSourceSnapshot` が `Project` 行より先に台帳へ保存されること**
+- **DB 登録に失敗した場合、その snapshot が補償削除されること**
+- **補償削除の前に終了しても、対応する `Project` が無い snapshot が起動時 GC で回収されること**
 - **`WorkingSourceRecord` が最初から向き正規化済みの原寸ファイルを指すこと。差し替えが発生しないこと**
 - **`contentFingerprint` が取り込みファイル（正規化前）から計算されること**
 - **`detectionSource` が検出の完了後に削除され、DB へ登録されないこと**
 - **DB 登録の完了前に、選択処理の成功が呼び出し元へ返らないこと**
 
-### 4.5 メタデータ（7.5 / 6.4）
+### 4.5 メタデータ（[アーキテクチャ設計](architecture.md) の 7.5 / 6.4）
 
 - **読み取り権限あり** — 保存後に `PHAsset.creationDate` を読み戻し、元画像の登録日時と一致すること
 - **読み取り権限なし** — 偽 `PHAssetCreationRequest` または adapter spy で、**EXIF の日時が渡されたこと、または `creationDate` が設定されなかったこと**を検証する。`PHAsset` を取得しにいかないこと
 - **`contentFingerprint` の撮影日時が EXIF のみから決まり、PhotoKit 権限の有無で変わらないこと**
 - 出力ファイルから位置情報・機器情報・編集ソフト情報が除去されていること
 
-### 4.6 Vision と Core Image（5.1 / 5.4）
+### 4.6 Vision と Core Image（[画像処理](image-pipeline.md) の 1 / 4）
 
 - Vision の左下原点座標が左上原点へ変換されること。**角度が非 Optional の `Measurement<UnitAngle>` から度へ変換され、符号の向きが 5.1 と一致すること**
-- `FaceObservation.confidence` の分布が 1.0 に張り付いていないこと（5.1 の受入条件）
+- `FaceObservation.confidence` の分布が 1.0 に張り付いていないこと（[画像処理](image-pipeline.md) の 1 の受入条件）
 - `NormalizedRect` の `right` / `bottom` が排他的境界として扱われること
 - `rotationDegrees` が時計回り正・領域中心基準で描画されること
 - `opacity` がレンダラーで 1 回だけ乗算され、ドメイン側で色へ焼き込まれないこと
@@ -418,7 +430,7 @@
 - `CIAffineClamp` を経ることで、画像端の顔のぼかしが薄くならないこと
 - `extent` の原点が `(0, 0)` でない `CIImage` でも座標がずれないこと
 
-### 4.7 スタンプラスタライズ（5.3）
+### 4.7 スタンプラスタライズ（[画像処理](image-pipeline.md) の 3）
 
 - `plan` が参照する `bitmapID` が `rasterAssets` に無い場合、描画を開始せずエラーになること
 - 同一 `StampRasterKey` のラスタライズが 1 回で済み、複数領域から再利用されること。**`rasterize(_ keys:)` が与えた全 key に対応する値を返すこと**
@@ -427,7 +439,7 @@
 - ラスタファイルの行末パディングがゼロ初期化されていること
 - premultiplied から straight への変換が保存前に行われていること
 
-### 4.8 Core Image 出力のゴールデン画像テスト（5.2 / 5.4）
+### 4.8 Core Image 出力のゴールデン画像テスト（[画像処理](image-pipeline.md) の 2 / 4）
 
 **同じ `RenderSpec` から生成したプレビュー用と原寸用の出力が一致すること。** `sourceCrop` / `scaleMode` / `background` を適用した結果が設定と一致すること。
 

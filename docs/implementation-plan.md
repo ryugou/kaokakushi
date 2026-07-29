@@ -17,9 +17,9 @@
 | --- | --- | --- | --- |
 | 1 | プロジェクト基盤 | — | Xcode プロジェクトと SwiftPM ローカルパッケージの骨格、CI、SwiftLint、`swift test` の実行基盤 |
 | 2 | ドメイン層 | `Domain` | `QuotaPolicy`、`EntitlementResolver`、`BatchTriagePolicy`、`compileRenderDraft`、`ExportQueue` の状態機械、正準エンコーダ |
-| 3 | 永続化アダプタ | `Persistence` | GRDB と `app.db`、`ManagedFileStore`、`ProtectedBlobStore`、`CryptoKeyStore`、`UsageLedgerStore`、`ExportSagaStore` |
+| 3 | 永続化アダプタ | `Persistence` | GRDB と `app.db`、`ManagedFileStore`、`ProtectedBlobStore`、`CryptoKeyStore`、`UsageLedgerStore`、`ExportSagaStore`、`WorkingSourceStore`、`OutputDeliveryStore` |
 | 4 | **書き出し Saga** | **`Application`** | `ExportCoordinator` / `StartupRecoveryCoordinator` / `OutputDeliveryCoordinator`、`ExportStartGate`、障害注入テスト基盤 |
-| 5 | プラットフォーム層 | `MediaKit` / `Rendering` / `App` | 画像処理プロトコルの実装と適合テスト、選択の境界サービス、`ProtectedDataAvailability` |
+| 5 | プラットフォーム層 | `MediaKit` / `Rendering` / `App` / **`Application`** | 画像処理プロトコルの実装と適合テスト、選択の境界サービス、**`SourceImportCoordinator`（インポート／再選択 Saga）**、`ProtectedDataAvailability` |
 | 6 | 編集フロー UI | `App` | detect / effect / export / processing / done |
 | 7 | 課金と権限 | `Billing` | RevenueCat、Paywall、復元、`SubscriptionState` の読み込み失敗経路 |
 | 8 | 広告 | `Ads` | `AdPresenter`、`AdFrequencyPolicy` の適用 |
@@ -90,7 +90,7 @@
 | `Rendering` | `StampRasterizer` |
 | `Persistence` | `ProtectedBlobStore`、`ManagedFileStore`、`UsageLedgerStore`、**`ExportSagaStore`**、GRDB、ファイル管理 |
 | `Persistence/Security` | `CryptoKeyStore` |
-| `Application` | `ExportStartGate` の実装、3 つの Coordinator。**コミット Saga の主体はここ**（サブプロジェクト 4） |
+| `Application` | `ExportStartGate` の実装、`ExportCoordinator` / `StartupRecoveryCoordinator` / `OutputDeliveryCoordinator`（サブプロジェクト 4）、`SourceImportCoordinator`（サブプロジェクト 5）。**コミット Saga と素材 Saga の主体はここ** |
 | `Analytics` | `CrashReporter`、`AnalyticsEvent` の送信 |
 | `Ads` | `AdPresenter` |
 | `App` | `PrivacyShield`、`PhotosPicker` / `fileImporter` の提示、`PhotoSelectionBridge` / `FileSelectionBridge`、`ProtectedDataAvailability` |

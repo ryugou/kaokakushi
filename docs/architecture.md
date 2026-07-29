@@ -336,6 +336,7 @@ actor FileUsageLedgerStore: UsageLedgerStore {
 actor ExportCoordinator { }           // 手順 −2〜7、ロールバック
 actor StartupRecoveryCoordinator { }  // 起動時復旧（[書き出し Saga](export-saga.md)）
 actor OutputDeliveryCoordinator { }   // MediaSaver / SharePresenter の呼び出しと状態遷移
+actor SourceImportCoordinator { }     // インポートと再選択の Saga（[画像処理](image-pipeline.md)）
 ```
 
 **`Application` が直接 `import` してはいけないもの**を明示します。
@@ -689,18 +690,12 @@ Free 範囲のプロジェクトとは、モザイク・ぼかし・黒塗り・
 
 `UsageLedger` と同じ `ProtectedBlobStore` の署名対象へ持たせます。
 
-```swift
-/// UsageLedger の一部。正常書き出しで確定した設定を素材ごとに保持する
-struct ExportedSettingsEntry: Sendable, Equatable {
-    let projectID: ProjectID
-    let settingsHash: ProjectSettingsHash
-    let exportedAt: Date
-}
-```
+型は `ExportedSettingsEntry`（6.3）です。
 
 | 契機 | 操作 |
 | --- | --- |
-| 手順 7 の完了 | **同じ台帳トランザクションでは書けない**ため、手順 4 の `AccountingIntent` へ含めて暫定適用し、手順 7 の完了で確定扱いとする |
+| 手順 4 | `AccountingIntent` に従って**暫定適用**する。置換前の値も `intent` へ保存する |
+| ロールバック | `ownerExportID` がこの `exportID` なら、置換前の値へ戻す（新規なら削除する） |
 | 判定 | `currentSettingsHash == entry.settingsHash` |
 | entry が無い | **「変更せず再書き出し」の対象にしない。** Standard 以上を要求する |
 | `Project` の削除 | 同じ台帳トランザクションで entry も削除する |
@@ -741,6 +736,8 @@ struct UsageLedger: Sendable, Equatable {
     let trialEntries: [TrialEntry]               // トライアル消費
     let trialReservations: [TrialReservation]    // 認可時の予約
     let sourceLeases: [SourceLease]              // 認可中の書き出しによる参照（6.4）
+    let exportedSettingsEntries: [ExportedSettingsEntry]   // 変更せず再書き出しの比較対象（6.2）
+    let workingSourceSnapshots: [WorkingSourceSnapshot]    // 編集中素材の identity（画像処理）
     let lastObservedAt: Date                     // 後退させない基準時刻
     let monthlyIntegrityLock: MonthlyIntegrityLock  // 破損修復による月間枠の封鎖
     let lastTrustedMonth: TrustedUTCMonth?       // 信頼できる時刻から導出した最新の UTC 年月
@@ -776,7 +773,31 @@ struct SourceLease: Sendable, Equatable {
     let sourceID: SourceID
     let exportID: ExportID
 }
+
+/// 正常書き出しで確定した設定。「変更せず再書き出し」の比較対象（6.2）
+struct ExportedSettingsEntry: Sendable, Equatable {
+    let projectID: ProjectID
+    let settingsHash: ProjectSettingsHash
+    let exportedAt: Date
+    let ownerExportID: ExportID      // ロールバックの根拠
+}
+
+/// 編集中プロジェクトの素材 identity。再起動後の sourceID 解決に使う
+struct WorkingSourceSnapshot: Sendable, Equatable {
+    let projectID: ProjectID
+    let identity: SourceIdentity
+    let representation: SourceRepresentation
+    let capture: OriginalCaptureMetadata     // EXIF 由来（正準スキーマ 5.1.1）
+    let libraryCreationDate: Date?           // PHAsset 由来。権限がある場合のみ
+}
 ```
+
+`exportedSettingsEntries` と `workingSourceSnapshots` を台帳へ置くのは、**どちらも認可に使う値であり、未署名の DB 行では書き換えられるため**です。
+
+| 集合 | 一意条件 | 上限 |
+| --- | --- | --- |
+| `exportedSettingsEntries` | `projectID` ごとに 1 件 | 履歴の保存期間内の `Project` 数 |
+| `workingSourceSnapshots` | `projectID` ごとに 1 件 | 同時に進行できる編集の数 |
 
 **各要素に `ownerExportID` を持たせます。** ロールバックで「この書き出しが追加したもの」と「以前から存在したもの」を台帳そのものから判別するためです。DB 側の記録だけに頼ると、台帳を書いた直後に落ちた場合に判別できません。
 
@@ -1085,7 +1106,7 @@ v1 は全体排他ゲート（[書き出し Saga](export-saga.md)）により同
 | `lastTrustedMonth` | **信頼時刻の UTC 年月** | `nil` |
 | `monthlyIntegrityLock` | `.lockedUntilTrustedMonthAfter(信頼時刻の UTC 年月)` | **`.lockedUntilReinstall`** |
 | `trialIntegrityLocked` | `true` | `true` |
-| `grants` / `consumedExportIDs` / `trialEntries` / `trialReservations` / `sourceRecords` / `sourceLeases` | **すべて空** | **すべて空** |
+| `grants` / `consumedExportIDs` / `trialEntries` / `trialReservations` / `sourceRecords` / `sourceLeases` / `exportedSettingsEntries` / `workingSourceSnapshots` | **すべて空** | **すべて空** |
 
 **端末年月を封鎖の基準にしません。** 信頼時刻を取得できない場合は基準を決められないため、`lockedUntilReinstall` へ倒します（整合性封鎖の項）。
 
@@ -1144,8 +1165,8 @@ A と B は provider が一致、B と C は fingerprint が一致するが、A 
 
 ```swift
 enum SourceAlias: Sendable, Hashable {
-    case provider(String)   // providerAssetKeyHash
-    case content(String)    // contentFingerprint
+    case provider(String)               // providerAssetKeyHash（小文字 16 進 64 文字）
+    case content(ContentFingerprint)    // 32 バイト
 }
 
 // SourceID の定義は 6.6 が正本
@@ -1229,7 +1250,7 @@ sourceLeases      の sourceID → 勝者
 **平文で保存しません。** 端末内で**派生鍵による HMAC-SHA256** へ変換し、元の値を復元できない形で持ちます。**鍵は台帳署名とは別のラベルから派生させます**（9.1）。アルゴリズムと出力形式は [正準スキーマ](canonical-schema.md) が正本です。
 ##### `contentFingerprint`
 
-**ファイル全体の SHA-256 とファイルサイズ・撮影日時の複合とします。** バイト表現の正本は [正準スキーマ](canonical-schema.md) です。
+**ファイル全体の SHA-256 だけを入力にします。** バイト表現の正本は [正準スキーマ](canonical-schema.md) です。
 
 **部分ハッシュ（先頭・末尾 64KB）を採りません。** 中央部分だけが異なる 2 枚が同一素材と判定されます。同じカメラの連写では先頭の EXIF ブロック・末尾のパディング・ファイルサイズ・撮影日時が揃いやすく、**無料枠を回避する経路として現実的な難易度になります。**
 
@@ -1242,18 +1263,23 @@ sourceLeases      の sourceID → 勝者
 ##### 入力の取得契約
 
 ```swift
-struct SourceFingerprintInput: Sendable {
-    let fileSize: Int64
-    let contentDigest: Data           // ファイル全体の SHA-256（32 バイト）
-    let capturedAtUTCMillis: Int64?
-    let representation: SourceRepresentation
-}
-
-enum SourceRepresentation: Sendable {
+enum SourceRepresentation: Sendable, Equatable {
     case original      // プロバイダーが返した原データ
     case transcoded    // OS が変換した派生データしか取得できなかった
 }
+
+/// EXIF の撮影日時。ローカル表記とオフセットを分けて保持する（正準スキーマ 5.1.1）
+struct OriginalCaptureMetadata: Sendable, Equatable {
+    let dateTimeOriginal: String?      // "YYYY:MM:DD HH:MM:SS"
+    let subSecTimeOriginal: String?
+    let offsetTimeOriginal: String?    // "+09:00" など
+    let utcMillis: Int64?              // offset がある場合のみ算出する
+}
 ```
+
+**`utcMillis` は `offsetTimeOriginal` がある場合にだけ入ります。** 無い場合は `nil` とし、**端末のタイムゾーンで補完しません**（正準スキーマ 5.1.1）。
+
+**ローカル表記をそのまま持つのは、出力 EXIF へ書き戻すためです。** UTC へ変換してから再構築すると、往復で誤差が出ます。この型を `WorkingSourceSnapshot` と `OutputMetadata` の両方が使います。
 
 | 状況 | 扱い |
 | --- | --- |
@@ -1663,18 +1689,13 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 
 ##### DB を分けない
 
-**「バックアップの単位はファイルなので分ける」という理由は成立しません。** 両方とも対象外である以上、分割の根拠になりません。保護クラスも両方 `.complete` で同じです（7.4）。
+**実行時状態と利用者データを 1 つの `app.db` へ置きます。** 判断の経緯は [ADR 0002](adr/0002-grdb-and-single-database.md) にあります。設計上の帰結は 3 つです。
 
-分けないことで次が得られます。
-
-| 得られるもの | 内容 |
+| 帰結 | 内容 |
 | --- | --- |
 | **実の外部キー制約** | `OutputRecord.projectID` → `Project`、`ExportQueueItem.batchID` → `Batch` を SQLite が強制する。アプリ側の起動時検査が不要になる |
 | 単一トランザクション | 手順 7（[書き出し Saga](export-saga.md)）が `ATTACH` なしで成立する |
 | 単一の `DatabaseMigrator` | 2 つの DB のスキーマバージョンが食い違う状態が存在しない |
-| 検証の単純化 | `PRAGMA` の確認がスキーマ 1 つで済む |
-
-**将来バックアップを実装する場合も分割は不要です。** [ADR 0003](adr/0003-local-only-data-and-backup-policy.md) のとおり、OS による生ファイルのバックアップではなく検証可能なアーカイブとして書き出す設計を採るため、**対象テーブルを選ぶだけで足ります。**
 
 ##### `projectRevision` の増加規則
 
@@ -1709,6 +1730,7 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `ProjectStampAsset(projectID, assetHash)` | **UNIQUE** |
 | `StampAsset.contentHash` | **PRIMARY KEY** |
 | `ExportQueueItem(batchID, projectID)` | **UNIQUE** |
+| `DeliveryAttempt.exportID` | **PRIMARY KEY** |
 
 外部キーは `PRAGMA foreign_keys = ON` で有効化し、次を宣言します。
 
@@ -1730,6 +1752,7 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `ProjectStampAsset.projectID` | `Project` | CASCADE |
 | `ProjectStampAsset.assetHash` | `StampAsset` | RESTRICT |
 | `CustomStamp.assetHash` | `StampAsset` | RESTRICT |
+| `DeliveryAttempt.exportID` | `OutputRecord` | CASCADE |
 
 **`batchID` を `SET NULL` にするのは、バッチ履歴を消しても出力と書き出し記録を残すためです。** バッチは集約単位であり、個々の出力の存在条件ではありません。
 
@@ -2194,20 +2217,37 @@ protocol ProtectedDataAvailability: Sendable {
 消費は手順 7 の完了で確定します（[書き出し Saga](export-saga.md)）。**したがって、生成直後の失敗や異常終了によって利用者が成果物を失う経路を作りません。** ただし保持は無期限ではなく **24 時間で削除します。**
 
 ```swift
-enum OutputState: Sendable { case generated, delivered, discarded }
+enum OutputState: Sendable { case generated, deliveryUnknown, delivered, discarded }
+
+extension OutputRecord {
+    /// 受け取れていない可能性がある。判定はすべてこの述語を使う
+    var isUndelivered: Bool {
+        state == .generated || state == .deliveryUnknown
+    }
+}
 ```
 
 | 状態 | 意味 | 保持する期間 |
 | --- | --- | --- |
 | `generated` | 生成済み。受け渡しは未成功 | 明示的に破棄するまで、または 24 時間経過するまで |
+| `deliveryUnknown` | 写真ライブラリ保存の結果が不明（[書き出し Saga](export-saga.md) の 8.0） | 同上 |
 | `delivered` | 保存または共有が 1 回以上成功した | **完了画面を離れるまで** |
 | `discarded` | 利用者が明示的に破棄した | 直ちに削除する |
 
+**`isUndelivered` を次のすべてで使います。** 個別に `state == .generated` と書くと、`deliveryUnknown` だけが残った状態で判定を素通りします。
+
+- 完了画面の離脱確認と未保存件数の集計
+- 起動時復旧の案内
+- 強制更新前の受け渡し導線（[運用](operations.md)）
+- 任意更新の表示禁止
+- 新しい加工の開始禁止
+- 24 時間の保持
+
 **保存や共有が 1 回成功しても、その場では削除しません。** 何度実行しても追加消費しない以上、1 回目の受け渡しでファイルを消すと、共有したあとに写真ライブラリへも保存する操作が成立しなくなります。
 
-**状態は写真ごとの出力レコードに保持します。バッチ単位では持ちません。** 一括処理では部分的な成功が起こるためです。32 枚のうち 20 枚を保存し 12 枚が空き容量不足で保存できなかった状態は、バッチ全体に 1 つの状態では表現できません。バッチの状態は各 `OutputRecord` から集計して導出します。一括保存が部分的に成功した場合、**すでに `delivered` の写真を再保存せず、`generated` の写真だけを再試行**します。
+**状態は写真ごとの出力レコードに保持します。バッチ単位では持ちません。** 一括処理では部分的な成功が起こるためです。32 枚のうち 20 枚を保存し 12 枚が空き容量不足で保存できなかった状態は、バッチ全体に 1 つの状態では表現できません。バッチの状態は各 `OutputRecord` から集計して導出します。一括保存が部分的に成功した場合、**すでに `delivered` の写真を再保存せず、`isUndelivered` の写真だけを再試行**します。ただし `deliveryUnknown` は自動再試行の対象外です（[書き出し Saga](export-saga.md) の 8.0）。
 
-**`generated` の出力が 1 枚以上残った状態で完了画面を離れようとした場合、確認を表示します。** 判定は `generated` の残数で行い、文言にも枚数を含めます。一括処理では 20 枚を保存した時点で「保存はした」ことになりますが、残る 12 枚は受け取れていません。
+**`isUndelivered` の出力が 1 枚以上残った状態で完了画面を離れようとした場合、確認を表示します。** 判定はその残数で行い、文言にも枚数を含めます。一括処理では 20 枚を保存した時点で「保存はした」ことになりますが、残る 12 枚は受け取れていません。
 
 | 履歴の設定 | 提示する選択肢 |
 | --- | --- |
@@ -2218,9 +2258,11 @@ enum OutputState: Sendable { case generated, delivered, discarded }
 
 | 状態 | 起動時の動作 |
 | --- | --- |
-| `generated` | **復旧案内の対象に含める**（枚数は `generated` の数。バッチ総枚数ではない） |
+| `generated` / `deliveryUnknown` | **復旧案内の対象に含める**（枚数は `isUndelivered` の数。バッチ総枚数ではない） |
 | `delivered` | 一時ファイルを削除し、**復旧案内の対象に含めない** |
 | `discarded` | 残存ファイルを削除する |
+
+`DeliveryAttempt` が残っている出力は、この判定の前に `deliveryUnknown` へ更新します（[書き出し Saga](export-saga.md) の 8.0）。
 
 これは履歴の復元ではなく**未完了の受け渡し処理の復旧**として扱うため、「履歴を保存しない」を選んでいる利用者にも表示します。
 
@@ -2455,8 +2497,8 @@ EXIF の撮影日時を一律に削除すると、加工後の写真がすべて
 /// 出力メタデータ。許可フィールド以外を構造的に持てない
 struct OutputMetadata: Sendable, Equatable {
     let pixelSize: PixelSize
-    let iccProfile: Data?              // 色が変わる場合のみ埋める
-    let dateTimeOriginalUTCMillis: Int64?   // 設定で保持を選んだ場合のみ
+    let iccProfile: Data?                    // 色が変わる場合のみ埋める
+    let capture: OriginalCaptureMetadata?    // 設定で保持を選んだ場合のみ（6.4）
     // 向きは常に通常値（1）として書くため、フィールドを持たない
 }
 ```
@@ -2511,23 +2553,7 @@ struct OutputMetadata: Sendable, Equatable {
 
 ### 9.1 HMAC と正準化
 
-**バイト表現の正本は [正準スキーマ](canonical-schema.md) です。** 型ごとのフィールド順、`enum` の固定番号、payload の定義をここへ複製しません。
-
-```swift
-enum PayloadType: UInt32, Sendable {
-    case usageLedger = 1
-    case subscriptionState = 2
-    case exportCommit = 3
-    case remoteConfigState = 4
-}
-
-struct SignedPayload: Sendable {
-    let payloadType: PayloadType
-    let schemaVersion: UInt32
-    let canonicalBytes: Data
-    let signature: Data
-}
-```
+**バイト表現の正本は [正準スキーマ](canonical-schema.md) です。** 型ごとのフィールド順、`enum` の固定番号、`PayloadType` と `SignedPayload` を含む payload の定義をここへ複製しません。
 
 | 規則 | 内容 |
 | --- | --- |
@@ -2550,9 +2576,9 @@ struct SignedPayload: Sendable {
 | --- | --- |
 | 署名 | HMAC-SHA256（32 バイト固定） |
 | 鍵導出 | HKDF-SHA256。マスター鍵 256 bit、派生鍵 32 バイト、`salt` は空 |
-| 用途の分離 | 署名（`payload-signing-v1`）と `providerAssetKeyHash` のソルト（`source-provider-key-v1`）を別の派生鍵にする |
+| 用途の分離 | 署名（`payload-signing-v1`）と `providerAssetKeyHash` の HMAC（`source-provider-key-v1`）を別の派生鍵にする |
 
-**署名とソルトを分けるのは、性質が違うからです。** ソルトは値の秘匿が目的、署名鍵は完全性の保証が目的であり、同じ鍵を使うと片方の運用（ローテーション等）がもう片方へ波及します。
+**2 つを分けるのは、性質が違うからです。** 一方は値の秘匿、他方は完全性の保証が目的であり、同じ鍵を使うと片方の運用（ローテーション等）がもう片方へ波及します。
 
 ### 9.2 ログ・分析・診断
 
@@ -2736,7 +2762,46 @@ struct RemoteConfigEnvelope: Sendable, Decodable {
     let expiresAt: Date
     let payload: RemoteConfig
 }
+
+struct RemoteConfig: Sendable, Decodable, Equatable {
+    let freeMonthlyExportLimit: Int32
+    let proBatchSizeLimit: Int32
+    let trialBatchSizeLimit: Int32
+    let trialCreditCount: Int32
+    let batchConcurrencyLimit: Int32
+    let lowConfidenceThreshold: Double
+    let extremePoseYawDegrees: Double
+    let extremePosePitchDegrees: Double
+    let historyStorageLimitBytes: Int64
+    let customStampLimit: Int32
+    let customStampMaxEdgePixels: Int32
+    let enabledStampPacks: Set<String>
+    let interstitialAdExportInterval: Int32
+    let update: UpdateConfig
+    let killSwitches: KillSwitches
+}
+
+struct UpdateConfig: Sendable, Decodable, Equatable {
+    let minimumSupportedVersion: AppVersion
+    let recommendedVersion: AppVersion
+    let appStoreID: String
+}
+
+struct AppVersion: Sendable, Comparable, Decodable {
+    let major: Int32
+    let minor: Int32
+    let patch: Int32
+}
+
+/// 障害時に個別機能を止めるフラグ。安全性の中核に対応するキーは持たない
+struct KillSwitches: Sendable, Decodable, Equatable {
+    let disableBatchProcessing: Bool
+    let disableCustomStampImport: Bool
+    let disableDiagnosticsUpload: Bool
+}
 ```
+
+**フィールドを追加する場合は末尾へ足し、`schemaVersion` を上げます。** 符号化順は [正準スキーマ](canonical-schema.md) の 4.4 が正本です。
 
 | 状況 | 扱い |
 | --- | --- |

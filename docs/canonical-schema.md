@@ -66,9 +66,9 @@ struct SignedPayload: Sendable {
 | 用途 | `info`（UTF-8） |
 | --- | --- |
 | 台帳・購入状態・コミット・リモート設定の署名 | `payload-signing-v1` |
-| `providerAssetKeyHash` のソルト | `source-provider-key-v1` |
+| `providerAssetKeyHash` の HMAC 用派生鍵 | `source-provider-key-v1` |
 
-**署名とソルトを分けるのは、性質が違うからです。** ソルトは値の秘匿が目的、署名鍵は完全性の保証が目的であり、同じ鍵を使うと片方の運用（ローテーション等）がもう片方へ波及します。
+**2 つを分けるのは、性質が違うからです。** 一方は値の秘匿、他方は完全性の保証が目的であり、同じ鍵を使うと片方の運用（ローテーション等）がもう片方へ波及します。
 
 ##### `providerAssetKeyHash`
 
@@ -116,7 +116,7 @@ struct SignedPayload: Sendable {
 
 | 分類 | 対象 |
 | --- | --- |
-| unordered | `consumedExportIDs`、`sourceRecords`、`grants`、`trialEntries`、`trialReservations`、`sourceLeases`、`SourceRecord.aliases`、`RemoteConfig.enabledStampPacks` |
+| unordered | `consumedExportIDs`、`sourceRecords`、`grants`、`trialEntries`、`trialReservations`、`sourceLeases`、`exportedSettingsEntries`、`workingSourceSnapshots`、`SourceRecord.aliases`、`RemoteConfig.enabledStampPacks` |
 | ordered | `RenderSpec.regions`、`ReviewIssueID.affectedFaceTrackIDs` |
 
 `affectedFaceTrackIDs` は「辞書順にソート済み」として構築されますが、それは**構築時の規則**であり、正準化がソートするのではありません。順序は値の一部です。
@@ -148,8 +148,8 @@ struct SignedPayload: Sendable {
 
 | case | 番号 | 連想値 |
 | --- | --- | --- |
-| `provider` | 1 | `String` |
-| `content` | 2 | `String` |
+| `provider` | 1 | `String`（小文字 16 進 64 文字） |
+| `content` | 2 | **32 バイト固定長**（`ContentFingerprint`） |
 
 ### `MonthlyIntegrityLock`
 
@@ -193,6 +193,14 @@ struct SignedPayload: Sendable {
 | `standard` | 2 |
 | `pro` | 3 |
 
+### `ImageFormat`
+
+| case | 番号 |
+| --- | --- |
+| `jpeg` | 1 |
+| `heic` | 2 |
+| `png` | 3 |
+
 ### `PlanStatus`
 
 | case | 番号 |
@@ -234,10 +242,12 @@ struct SignedPayload: Sendable {
 | 5 | `trialEntries` | unordered collection of `TrialEntry` |
 | 6 | `trialReservations` | unordered collection of `TrialReservation` |
 | 7 | `sourceLeases` | unordered collection of `SourceLease` |
-| 8 | `lastObservedAt` | `Date` |
-| 9 | `monthlyIntegrityLock` | `MonthlyIntegrityLock` |
-| 10 | `lastTrustedMonth` | `TrustedUTCMonth?` |
-| 11 | `trialIntegrityLocked` | `Bool` |
+| 8 | `exportedSettingsEntries` | unordered collection of `ExportedSettingsEntry` |
+| 9 | `workingSourceSnapshots` | unordered collection of `WorkingSourceSnapshot` |
+| 10 | `lastObservedAt` | `Date` |
+| 11 | `monthlyIntegrityLock` | `MonthlyIntegrityLock` |
+| 12 | `lastTrustedMonth` | `TrustedUTCMonth?` |
+| 13 | `trialIntegrityLocked` | `Bool` |
 
 要素型のフィールド順です。
 
@@ -249,6 +259,14 @@ struct SignedPayload: Sendable {
 | `TrialEntry` | `sourceID` → `ownerExportID` |
 | `TrialReservation` | `sourceID` → `exportID` |
 | `SourceLease` | `sourceID` → `exportID` |
+| `ExportedSettingsEntry` | `projectID` → `settingsHash`（32 バイト固定）→ `exportedAt` → `ownerExportID` |
+| `WorkingSourceSnapshot` | `projectID` → `identity` → `representation` → `capture` → `libraryCreationDate` |
+| `SourceIdentity` | `providerAssetKeyHash`（`String?`）→ `contentFingerprint`（32 バイト固定） |
+| `OriginalCaptureMetadata` | `dateTimeOriginal` → `subSecTimeOriginal` → `offsetTimeOriginal` → `utcMillis`（すべて `Optional`） |
+
+`ExportedSettingsEntry` と `WorkingSourceSnapshot` は **`projectID` ごとに 1 件**です。台帳の検証時に重複が無いことを確認します。
+
+台帳修復時は、両方とも**空**にします（[アーキテクチャ設計](architecture.md) の 6.3）。
 
 ### 4.2 `SubscriptionState`（`schemaVersion` 1）
 
@@ -272,7 +290,7 @@ struct SignedPayload: Sendable {
 | 2 | `projectID` | `ProjectID` |
 | 3 | `batchID` | `BatchID?` |
 | 4 | `sourceID` | `SourceID` |
-| 5 | `outputFile` | `OutputFileRef` |
+| 5 | `outputFile` | `OutputFileRef?`（`prepared` では `nil`） |
 | 6 | `authorization` | `ExportAuthorization` |
 | 7 | `verifiedOutput` | `VerifiedOutput?` |
 | 8 | `finalizedAt` | `Date?` |
@@ -280,6 +298,7 @@ struct SignedPayload: Sendable {
 | 10 | `intent` | `AccountingIntent?` |
 | 11 | `applied` | `AccountingApplied?` |
 | 12 | `state` | `ExportCommitState` |
+| 13 | `delivery` | `OutputDeliveryDescriptor` |
 
 ネストした型のフィールド順です。
 
@@ -288,8 +307,9 @@ struct SignedPayload: Sendable {
 | `ExportAuthorization` | `entitlementSnapshot`（`Entitlement`）→ `accountingMode` → `authorizedAt` → `authorizedGrant` |
 | `AuthorizedGrant` | `sourceID` → `firstSuccessAt` |
 | `VerifiedOutput` | `byteSize`（`Int64`）→ `sha256`（32 バイト固定長。長さ前置きしない） |
-| `AccountingIntent` | `consumeExportID` → `grantAction` → `trialSourceIDToEnsure` |
-| `AccountingApplied` | `consumedInserted` → `grantInsertedByThisExport` → `trialInsertedByThisExport` |
+| `AccountingIntent` | `consumeExportID` → `grantAction` → `trialSourceIDToEnsure` → `settingsEntryToApply` → `previousSettingsEntry` → `workingSnapshotToRemove` |
+| `AccountingApplied` | `consumedInserted` → `grantInsertedByThisExport` → `trialInsertedByThisExport` → `settingsEntryReplaced` → `workingSnapshotRemoved` |
+| `OutputDeliveryDescriptor` | `format`（`UInt32`）→ `suggestedCreationDate`（`Date?`） |
 
 `sha256` を固定長にするのは、長さが常に 32 バイトであり前置きが冗長なためです。他の `Data` は長さ前置きを維持します。
 
@@ -303,46 +323,7 @@ struct SignedPayload: Sendable {
 
 `RemoteConfigEnvelope` の順は `schemaVersion`（`Int32`）→ `configVersion`（`Int64`）→ `issuedAt` → `expiresAt` → `payload` です。
 
-`RemoteConfig` の正式な型とフィールド順を固定します。**フィールドを追加する場合は末尾へ足し、`schemaVersion` を上げます。**
-
-```swift
-struct RemoteConfig: Sendable, Decodable, Equatable {
-    let freeMonthlyExportLimit: Int32
-    let proBatchSizeLimit: Int32
-    let trialBatchSizeLimit: Int32
-    let trialCreditCount: Int32
-    let batchConcurrencyLimit: Int32
-    let lowConfidenceThreshold: Double
-    let extremePoseYawDegrees: Double
-    let extremePosePitchDegrees: Double
-    let historyStorageLimitBytes: Int64
-    let customStampLimit: Int32
-    let customStampMaxEdgePixels: Int32
-    let enabledStampPacks: Set<String>
-    let interstitialAdExportInterval: Int32
-    let update: UpdateConfig
-    let killSwitches: KillSwitches
-}
-
-struct UpdateConfig: Sendable, Decodable, Equatable {
-    let minimumSupportedVersion: AppVersion
-    let recommendedVersion: AppVersion
-    let appStoreID: String
-}
-
-struct AppVersion: Sendable, Comparable, Decodable {
-    let major: Int32
-    let minor: Int32
-    let patch: Int32
-}
-
-/// 障害時に個別機能を止めるフラグ。安全性の中核に対応するキーは持たない
-struct KillSwitches: Sendable, Decodable, Equatable {
-    let disableBatchProcessing: Bool
-    let disableCustomStampImport: Bool
-    let disableDiagnosticsUpload: Bool
-}
-```
+`RemoteConfig` / `UpdateConfig` / `AppVersion` / `KillSwitches` の型宣言は [アーキテクチャ設計](architecture.md) の 10.2 が正本です。ここではその符号化順だけを固定します。**フィールドを追加する場合は末尾へ足し、`schemaVersion` を上げます。**
 
 | 型 | 順 |
 | --- | --- |
@@ -360,13 +341,7 @@ struct KillSwitches: Sendable, Decodable, Equatable {
 
 ### 5.1 `contentFingerprint`
 
-**ファイル全体の SHA-256 だけを入力にします。**
-
-```swift
-struct ContentFingerprint: Sendable, Hashable {
-    let bytes: Data      // 必ず 32 バイト
-}
-```
+**ファイル全体の SHA-256 だけを入力にします。** 型宣言は [アーキテクチャ設計](architecture.md) の 6.6 が正本です。
 
 ```
 contentFingerprint = SHA-256( "content-fingerprint-v2" || fullFileBytes )
@@ -390,12 +365,6 @@ contentFingerprint = SHA-256( "content-fingerprint-v2" || fullFileBytes )
 先頭・末尾の 64KB だけを入力にすると、**中央部分だけが異なる 2 枚の写真が同一素材と判定されます。** 同じカメラの連写では先頭の EXIF ブロックと末尾のパディングが一致しやすく、ファイルサイズも近くなるため、**無料枠を回避する経路として現実的な難易度になります。**
 
 ##### `StampAssetHash`
-
-```swift
-struct StampAssetHash: Sendable, Hashable {
-    let bytes: Data      // 必ず 32 バイト
-}
-```
 
 | 項目 | 規約 |
 | --- | --- |
@@ -432,15 +401,7 @@ struct StampAssetHash: Sendable, Hashable {
 
 ### 5.2 設定ハッシュ（2 種類）
 
-**用途の異なる 2 つのハッシュを分けます。** 1 つにまとめると、匿名化結果に影響しない設定を変えただけで書き出しが不能になります。
-
-```swift
-/// 認可用。出力へ影響する全設定
-struct ProjectSettingsHash: Sendable, Hashable { let bytes: Data }   // 32 バイト
-
-/// プレビュー確認用。見た目に影響する値だけ
-struct PreviewRenderHash: Sendable, Hashable { let bytes: Data }     // 32 バイト
-```
+**用途の異なる 2 つのハッシュを分けます。** 1 つにまとめると、匿名化結果に影響しない設定を変えただけで書き出しが不能になります。型宣言は [アーキテクチャ設計](architecture.md) の 6.6 が正本です。
 
 | ハッシュ | 用途 | 含める範囲 |
 | --- | --- | --- |

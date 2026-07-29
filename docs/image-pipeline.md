@@ -587,10 +587,10 @@ struct RawBitmapDescriptor: Sendable, Equatable {
     let colorSpace: RawColorSpace
 }
 
-enum RawChannelOrder: Sendable { case rgba, bgra }
-enum RawAlphaMode: Sendable { case straight, premultiplied }
-enum RawBitDepth: Sendable { case eightPerChannel }
-enum RawColorSpace: Sendable { case sRGB }
+enum RawChannelOrder: Sendable, Equatable { case rgba, bgra }
+enum RawAlphaMode: Sendable, Equatable { case straight, premultiplied }
+enum RawBitDepth: Sendable, Equatable { case eightPerChannel }
+enum RawColorSpace: Sendable, Equatable { case sRGB }
 
 /// ImageEffectRenderer の戻り値。エンコード前のビットマップ
 struct RenderedImage: Sendable {
@@ -802,21 +802,28 @@ struct WorkingSourceRecord: Sendable {
 
 **ファイルシステムと SQLite は同じトランザクションへ参加できません。** 物質化と `WorkingSourceRecord` の作成を「同一トランザクション」とは書けないため、**補償可能な 1 つのインポート Saga** として定義します。
 
+**DB と `ProtectedBlobStore` も同一トランザクションにできません。** 順序を固定します。
+
 | 順 | 操作 | 保存先 | 失敗時 |
 | --- | --- | --- | --- |
 | 1 | `ManagedFileStore` で取り込みファイルを作成する（ピッカーの生データ） | ファイルシステム | 選択を失敗として返す。副作用なし |
 | 2 | `contentFingerprint` と EXIF を読む | — | 同上 |
-| 3 | **向きを正規化した原寸ファイルを作成する** | ファイルシステム | 手順 6 へ |
-| 4 | DB トランザクションで `Project`・キュー項目・`WorkingSourceRecord`（**正規化ファイルを指す**）を作成し、**台帳トランザクションで `WorkingSourceSnapshot` を追加する**（下記） | DB / ProtectedBlobStore | 手順 6 へ |
-| 5 | **取り込みファイルを削除する**（`PendingFileDeletion` 経由） | ファイルシステム | 起動時 GC へ委ねる |
-| 6 | 失敗したら、作成済みのファイルを削除するか `PendingFileDeletion` へ追加する | ファイルシステム / DB | 起動時 GC へ委ねる |
-| 7 | **手順 4 の完了後にのみ、選択処理の成功を呼び出し元へ返す** | — | — |
+| 3 | **向きを正規化した原寸ファイルを作成する** | ファイルシステム | 手順 7 へ |
+| 4 | **台帳トランザクションで `WorkingSourceSnapshot` を保存する** | ProtectedBlobStore | 手順 7 へ |
+| 5 | **DB トランザクションで `Project`・キュー項目・`WorkingSourceRecord`（正規化ファイルを指す）を作成する** | DB | 手順 6 へ |
+| 6 | 手順 5 が失敗したら、**snapshot を補償削除する** | ProtectedBlobStore | 起動時 GC へ委ねる |
+| 7 | 失敗したら、作成済みのファイルを削除するか `PendingFileDeletion` へ追加する | ファイルシステム | 起動時 GC へ委ねる |
+| 8 | **手順 5 の完了後にのみ、選択処理の成功を呼び出し元へ返す** | — | — |
+
+**snapshot を DB より先に保存します。** 逆順にすると「DB 行はあるが identity が無い」状態が生まれ、その `Project` は `sourceID` を解決できません。この順なら、余るのは「snapshot はあるが `Project` が無い」状態だけです。
+
+**起動時に、対応する `Project` が存在しない `workingSourceSnapshots` を GC します。** 台帳トランザクションで削除します。
 
 **`WorkingSourceRecord` は最初から向き正規化済みの原寸ファイルを指します。** 取り込みファイルを一度登録してから差し替える構成にすると、差し替えトランザクションと、その途中で終了した場合にどちらを正とするかの規則が追加で要ります。**手順 3 を DB 登録の前へ置けば、差し替えが存在しません。**
 
 `contentFingerprint` は**取り込みファイル**（ピッカーが返した実データ）から計算します（[アーキテクチャ設計](architecture.md) の 6.4）。正規化後のファイルから計算すると、デコード実装が変わったときに同じ写真が別素材になります。
 
-**手順 1〜3 の途中で終了した場合、ファイルはどの `WorkingSourceRecord` からも参照されません。** 起動時の孤児 GC が回収します。**「ファイルはあるが行が無い」は容量を食うだけで、復旧不能な損失を生みません。**
+**手順 1〜4 の途中で終了した場合、ファイルはどの `WorkingSourceRecord` からも参照されません。** 起動時の孤児 GC が回収します。**「ファイルはあるが行が無い」は容量を食うだけで、復旧不能な損失を生みません。**
 
 逆順（行を先に作る）は採りません。実体が無い `WorkingSourceRecord` を参照するキュー項目ができ、復元時に必ず `paused(.sourceReselectionRequired)` へ落ちます。**失っても復旧できないほうを避ける**という規則（[アーキテクチャ設計](architecture.md) の DB とファイルの更新順序）と同じ向きです。
 
@@ -877,21 +884,42 @@ struct WorkingSourceSnapshot: Sendable, Equatable {
 
 **`paused(.sourceReselectionRequired)` から再開する経路を定めます。** 定めないと、別の写真を選び直しても**以前の顔座標・`ReviewIssue`・`ReviewDecision`・`PreviewConfirmation` を保持したまま再開できます。**
 
-`replaceWorkingSource` を正式な Saga とします。
+`replaceWorkingSource` を正式な Saga とします。**通常のインポート Saga を再利用しません。** インポートは新しい `Project` を作り、`WorkingSourceSnapshot` を上書きします。**比較対象を比較前に壊すため、そのままでは使えません。**
 
 | 順 | 操作 |
 | --- | --- |
-| 1 | 通常のインポート Saga で再物質化する（`WorkingSourceSnapshot` も作り直す） |
-| 2 | **期待している素材との同一性を確認する**（下記） |
-| 3 | 一致しなければ、そのキュー項目の続行には使わない |
-| 4 | **顔検出を必ずやり直す** |
-| 5 | `detectionRevision` と `projectRevision` を増やす |
-| 6 | **旧 `FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` / `PreviewConfirmation` を破棄する** |
-| 7 | 新しい確認が完了するまで書き出し不可とする |
+| 1 | 候補ファイルを**一時的に**物質化し、`contentFingerprint` と EXIF を読む |
+| 2 | **旧 `WorkingSourceSnapshot` は変更しない** |
+| 3 | 候補の `SourceIdentity` を、旧 snapshot および台帳の alias 連結成分と照合する |
+| 4 | 不一致なら候補ファイルを削除し、選び直しを求める |
+| 5 | 一致したら、向きを正規化した原寸ファイルを作る |
+| 6 | **同一 DB トランザクション**で `WorkingSourceRecord.sourceFile` を置換し、旧ファイルを `PendingFileDeletion` へ入れ、`FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` / `PreviewConfirmation` を破棄し、`detectionRevision` と `projectRevision` を増やす |
+| 7 | 旧 snapshot は**そのまま維持する**（identity が同じであるため更新不要） |
+| 8 | **顔検出をやり直す。** 新しい確認が完了するまで書き出し不可 |
 
-手順 4〜6 は再検出の既存規則（[アーキテクチャ設計](architecture.md) の 6.1）と同じです。**再選択は再検出を必ず伴うため、確認状態の破棄も自動的に成立します。**
+**手順 6 を 1 トランザクションにまとめます。** 分けると「新しい素材だが古い顔座標」という状態が観測されます。
 
-同一性の確認は、新しい `SourceIdentity` と、破棄前の `WorkingSourceSnapshot.identity` を比べます。
+手順 4〜8 は再検出の既存規則（[アーキテクチャ設計](architecture.md) の 6.1）と同じです。**再選択は再検出を必ず伴うため、確認状態の破棄も自動的に成立します。**
+
+##### 実装の所在
+
+**この Saga は `Application` の `SourceImportCoordinator` が所有します。** インポートと再選択はどちらもファイル・DB・台帳の 3 者を協調させるため、`App` の境界サービスにも `Domain` にも置けません（[アーキテクチャ設計](architecture.md) の 4.3）。
+
+```swift
+// Domain — 永続化ポート
+protocol WorkingSourceStore: Sendable {
+    /// インポート Saga の手順 5
+    func createProjectWithWorkingSource(_ input: CreateWorkingSourceInput) async throws
+
+    /// 再選択 Saga の手順 6。単一 DB トランザクション
+    func replaceWorkingSource(_ input: ReplaceWorkingSourceInput) async throws
+
+    /// 保持期限と台帳修復での破棄
+    func deleteWorkingSource(_ projectID: ProjectID) async throws
+}
+```
+
+同一性の確認は、候補の `SourceIdentity` と旧 `WorkingSourceSnapshot.identity` を比べます。
 
 | 結果 | 扱い |
 | --- | --- |
@@ -900,7 +928,7 @@ struct WorkingSourceSnapshot: Sendable, Equatable {
 
 **別の写真での続行を許しません。** バッチの一項目が別素材へ差し替わると、`sourceID` が変わってクォータの前提が崩れ、利用者にとっても「どの写真を処理したか」が分からなくなります。新しい写真を処理したい場合は、新しいバッチを作ります。
 
-**`WorkingSourceSnapshot` は素材の欠損では削除しません。** 削除すると比較対象が失われます。保持期限の到達またはプロジェクト破棄でのみ消します。
+**`WorkingSourceSnapshot` は素材の欠損では削除しません。** 削除すると比較対象が失われます。保持期限の到達・プロジェクト破棄・書き出しの完了（手順 4）・台帳修復でのみ消します。
 
 ##### 未完了作業の保持期限
 

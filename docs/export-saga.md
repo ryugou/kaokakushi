@@ -57,6 +57,22 @@ protocol ExportSagaStore: Sendable {
     /// 署名不正行を DB 内部の行 ID で削除する（6 章）
     func deleteCommitByRowID(_ rowID: Int64) async throws
 }
+
+/// 受け渡し（8 章）。ExportSagaStore とは寿命が異なるため分ける
+protocol OutputDeliveryStore: Sendable {
+    func beginDeliveryAttempt(_ exportID: ExportID) async throws
+
+    /// 成功。delivered への更新と attempt の削除を単一トランザクションで行う
+    func completeDelivery(_ exportID: ExportID) async throws
+
+    /// 失敗。generated のまま attempt だけ消す
+    func abandonDeliveryAttempt(_ exportID: ExportID) async throws
+
+    /// 起動時。残存 attempt の出力を deliveryUnknown へ更新し attempt を消す（単一トランザクション）
+    func resolveOrphanedAttempts() async throws -> [ExportID]
+
+    func updateOutputState(_ exportID: ExportID, to state: OutputState) async throws
+}
 ```
 
 **手順 7 を複数の Repository 呼び出しとして `Application` 側で組み立てません。** そうすると単一 DB トランザクションを保証できず、「出力は公開済みだがキューは `exporting`」が残ります。
@@ -175,25 +191,28 @@ struct ExportInputSnapshot: Sendable, Equatable {
     let projectID: ProjectID
     let projectRevision: Int64        // Project の変更ごとに増える
     let detectionRevision: Int64      // 再検出ごとに増える
-    let settingsHash: ProjectSettingsHash
+    let projectSettingsHash: ProjectSettingsHash   // 認可用
+    let previewRenderHash: PreviewRenderHash       // 確認用
 }
 
 /// 利用者が確認したプレビューの同一性
 struct PreviewConfirmation: Sendable, Equatable {
     let projectRevision: Int64
     let detectionRevision: Int64
-    let settingsHash: ProjectSettingsHash
+    let previewRenderHash: PreviewRenderHash
 }
 ```
 
-`ProjectSettingsHash` は出力へ影響する全設定の正準ハッシュです（[正準スキーマ](canonical-schema.md)）。
+**確認の一致には `previewRenderHash` だけを使います。** `ProjectSettingsHash` には圧縮品質とメタデータ設定が含まれ、それらの変更では確認状態を維持する規則（[アーキテクチャ設計](architecture.md) の 6.5）と矛盾します。`projectSettingsHash` は「変更せず再書き出し」の認可判定に使います（同 6.2）。
+
+2 種類の定義は [正準スキーマ](canonical-schema.md) の 5.2 です。
 
 | 処理 | 開始条件 |
 | --- | --- |
-| 単体 | 現在の `ExportInputSnapshot` の 3 値が `PreviewConfirmation` と**すべて一致する** |
+| 単体 | 現在の `projectRevision` / `detectionRevision` / `previewRenderHash` が `PreviewConfirmation` と**すべて一致する** |
 | バッチ | 各写真について上記が一致し、かつモードごとの確認条件（`reviewed` / `overviewConfirmed`）を満たす |
 
-**`settingsHash` だけでは足りません。** 再検出すると顔の集合が変わりますが、設定が同じなら `settingsHash` は変化しません。`detectionRevision` を含めることで、**確認したプレビューと違う顔集合で書き出す経路**を塞ぎます。`projectRevision` は、手動領域の追加・削除など `settingsHash` の対象外の変更を捕まえます。
+**`previewRenderHash` だけでは足りません。** 再検出すると顔の集合が変わりますが、設定が同じならハッシュは変化しません。`detectionRevision` を含めることで、**確認したプレビューと違う顔集合で書き出す経路**を塞ぎます。`projectRevision` は、手動領域の追加・削除などハッシュの対象外の変更を捕まえます。
 
 ##### 開始後に設定を変えられないようにする
 
@@ -395,6 +414,7 @@ struct ExportCommit: Sendable {
     let intent: AccountingIntent?           // finalizing で確定する
     let applied: AccountingApplied?         // 台帳へ適用したあとに埋まる
     let state: ExportCommitState
+    let delivery: OutputDeliveryDescriptor  // 認可時に確定。手順 7 で OutputRecord へ
     let signature: Data                     // Keychain の鍵による HMAC
 }
 
@@ -409,6 +429,13 @@ struct AccountingIntent: Sendable {
     let consumeExportID: ExportID?
     let grantAction: GrantAction
     let trialSourceIDToEnsure: SourceID?
+
+    /// 「変更せず再書き出し」の比較対象（アーキテクチャ設計 6.2）
+    let settingsEntryToApply: ExportedSettingsEntry
+    let previousSettingsEntry: ExportedSettingsEntry?   // 置換前。新規なら nil
+
+    /// 正常完了で削除する編集中素材の snapshot（画像処理）
+    let workingSnapshotToRemove: WorkingSourceSnapshot?
 }
 
 /// 台帳へ実際に適用された結果
@@ -416,6 +443,14 @@ struct AccountingApplied: Sendable {
     let consumedInserted: Bool
     let grantInsertedByThisExport: Bool
     let trialInsertedByThisExport: Bool
+    let settingsEntryReplaced: Bool
+    let workingSnapshotRemoved: Bool
+}
+
+/// 受け渡しに必要な不変値。手順 7 で OutputRecord へコピーする
+struct OutputDeliveryDescriptor: Sendable {
+    let format: ImageFormat
+    let suggestedCreationDate: Date?
 }
 
 enum ExportCommitState: Sendable {
@@ -578,11 +613,28 @@ prepared → fileVerified → finalizing → accountingCommitted → readyToPubl
 
 | 操作 | 対象 |
 | --- | --- |
-| `OutputRecord(generated)` を insert | `OutputRecord` |
+| `OutputRecord(generated)` を insert（`delivery` からコピー） | `OutputRecord` |
 | 成功記録を insert | `ExportRecord` |
 | 対象キュー項目を `completed` へ更新 | キュー状態 |
 | プロジェクトの最終更新時刻を更新 | `Project` |
+| **`WorkingSourceRecord` を delete** | `WorkingSourceRecord` |
+| **その処理用ファイルを `PendingFileDeletion` へ追加** | `PendingFileDeletion` |
 | `ExportCommit` を delete | `ExportCommit` |
+
+**処理用の元画像は書き出しの完了で不要になります。** 削除を別トランザクションにすると、「出力は公開済みだが未加工の元画像が残る」区間ができます。
+
+```swift
+/// いつ何を書き出したかの記録。24 時間では消えない
+struct ExportRecord: Sendable {
+    let exportID: ExportID
+    let projectID: ProjectID
+    let batchID: BatchID?
+    let exportedAt: Date            // ExportCommit.finalizedAt
+    let accountingMode: ExportAccountingMode
+    let format: ImageFormat
+    let outputByteSize: Int64
+}
+```
 
 バッチの成功件数・失敗件数は、**キュー項目からの導出値**とします。
 
@@ -624,7 +676,7 @@ struct OutputRecord: Sendable {
 
 | 順 | 操作 | 保存先 |
 | --- | --- | --- |
-| 1 | `transact` で、この `exportID` が所有する会計要素（消費・grant・トライアル台帳・トライアル予約・**`SourceLease`**）を**冪等に**取り消す | ProtectedBlobStore |
+| 1 | `transact` で、この `exportID` が所有する会計要素（消費・grant・トライアル台帳・トライアル予約・**`SourceLease`**・**`ExportedSettingsEntry`**・**`WorkingSourceSnapshot`**）を**冪等に**取り消す | ProtectedBlobStore |
 | 2 | 台帳の保存が成功したことを確認する | ProtectedBlobStore |
 | 3 | `OutputRecord` を削除する（存在する場合のみ） | DB |
 | 4 | `outputFile` のファイルを削除する | ファイルシステム |
@@ -644,10 +696,23 @@ grants            のうち ownerExportID == 対象 exportID の要素を削除
 trialEntries      のうち ownerExportID == 対象 exportID の要素を削除
 trialReservations のうち exportID == 対象 exportID の要素を削除
 sourceLeases      のうち exportID == 対象 exportID の要素を削除
+
+exportedSettingsEntries の当該 projectID の要素が
+  ownerExportID == 対象 exportID なら
+      intent.previousSettingsEntry があればその値へ戻す
+      無ければ削除する
+
+workingSourceSnapshots に当該 projectID が無く、
+  intent.workingSnapshotToRemove があれば、その値を復元する
+
 別の exportID が作った要素は削除しない
 ```
 
 既存の grant を再利用しただけの書き出しは `ownerExportID` が一致しないため、以前から存在した権利を巻き添えで消しません。
+
+**`ExportedSettingsEntry` を戻さないと権限を迂回できます。** 新しい設定 S1 で開始 → 手順 4 で S1 を「最後に成功した設定」として保存 → 手順 7 の前に失敗 → S1 が残る → 降格後、成功していない S1 が「変更なし」と判定される、という経路です。`ownerExportID` と `previousSettingsEntry` の両方が要ります。
+
+**`WorkingSourceSnapshot` も同様です。** 手順 4 で暫定削除するため、ロールバックで復元できなければ編集中プロジェクトの `sourceID` を解決できなくなります。手順 7 は DB 専用トランザクションであり、そこで台帳を更新できないため、**削除も手順 4 で行います。**
 
 | 状態 | 台帳への適用 | ロールバック経路 |
 | --- | --- | --- |
@@ -741,17 +806,35 @@ sourceLeases      のうち exportID == 対象 exportID の要素を削除
 
 > `grants` / `trialEntries` / `trialReservations` / `sourceLeases` の `sourceID` は `sourceRecords` に存在する。
 
-**修復が走った起動では、全非終端コミットを破棄します。**
+**修復が走った起動では、進行中の作業をすべて破棄します。**
 
 | 対象 | 操作 |
 | --- | --- |
-| 非終端の `ExportCommit` | **すべて削除する**（署名の有効・無効を問わない） |
+| 非終端の `ExportCommit` | **すべて削除する**（署名の有効・無効を問わない。下記） |
 | 出力ファイル | 参照が消えるため、起動時の孤児 GC が回収する |
+| **すべての `WorkingSourceRecord`** | **行を削除し、処理用ファイルを `PendingFileDeletion` へ** |
 | `UsageLedger` | **触らない。** 既に修復済みで、整合性封鎖が掛かっている |
-| キュー項目 | `failed`（`isRetryable == true`）へ遷移させる |
+| キュー項目 | `paused(.sourceReselectionRequired)` へ遷移させる |
 | 月間枠・トライアル | **整合性封鎖のまま。** 復元も払い戻しもしない |
 
-**`ExportCommit` へ alias のスナップショットを持たせて `SourceRecord` を再構築する案は採りません。** コミット行に素材識別値を持たせると、署名不正行の扱い（6 章）が「フィールドを一切使わない」と両立しなくなります。修復はそもそも改ざんの疑いがある状態であり、**進行中の書き出しを完了させる利得より、台帳の一貫性を優先します。**
+**`WorkingSourceRecord` も残せません。** 修復で `workingSourceSnapshots` が空になるため、**コミットを持たない編集中プロジェクトも `sourceID` を解決できません。** 処理用ファイル（未加工の顔画像）だけが残る状態を避けるためにも、まとめて破棄します。
+
+キューを `failed` ではなく `paused(.sourceReselectionRequired)` にするのは、利用者が同じ写真を選び直せば再開できるためです。**素材そのものは失われていません。**
+
+##### 署名不正行の扱いはここだけ例外にする
+
+6 章は「署名検証に失敗した行を自動破棄しない」と定めますが、**台帳修復時はこの例外とします。** 破棄しない根拠は「会計済みか判断できないため台帳と食い違う可能性がある」ことですが、**台帳が既に空へ修復されている以上、食い違う相手が存在しません。**
+
+ただし、破棄の手順は 6 章と同じ制約に従います。
+
+| 規則 | 内容 |
+| --- | --- |
+| 削除の指定 | **DB 内部の行 ID だけを使う** |
+| `projectID` / `exportID` / `outputFile` | **一切使わない**（改ざんされている可能性がある） |
+| 対応キュー項目の特定 | 不正行との結合ではなく、**`exporting` の項目が唯一ならそれ**とする |
+| `exporting` が 2 件以上 | 自動判断しない。全件を `paused(.sourceReselectionRequired)` にする |
+
+**`ExportCommit` へ alias のスナップショットを持たせて `SourceRecord` を再構築する案は採りません。** コミット行に素材識別値を持たせると、署名不正行の扱いが「フィールドを一切使わない」と両立しなくなります。修復はそもそも改ざんの疑いがある状態であり、**進行中の書き出しを完了させる利得より、台帳の一貫性を優先します。**
 
 この分岐は手順 2 の直後（手順 4 の復旧より前）に置きます。障害注入テストの対象です。
 
