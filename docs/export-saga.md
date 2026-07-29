@@ -60,18 +60,25 @@ protocol ExportSagaStore: Sendable {
 
 /// 受け渡し（8 章）。ExportSagaStore とは寿命が異なるため分ける
 protocol OutputDeliveryStore: Sendable {
+    /// 現在の状態を previousState として記録する
     func beginDeliveryAttempt(_ exportID: ExportID) async throws
 
     /// 成功。delivered への更新と attempt の削除を単一トランザクションで行う
     func completeDelivery(_ exportID: ExportID) async throws
 
-    /// 失敗。generated のまま attempt だけ消す
+    /// 失敗。previousState へ戻し attempt を消す（単一トランザクション）
     func abandonDeliveryAttempt(_ exportID: ExportID) async throws
 
-    /// 起動時。残存 attempt の出力を deliveryUnknown へ更新し attempt を消す（単一トランザクション）
-    func resolveOrphanedAttempts() async throws -> [ExportID]
+    /// 起動時。残存 attempt を previousState に応じて解決する（単一トランザクション）
+    func resolveOrphanedAttempts() async throws -> [ResolvedAttempt]
 
-    func updateOutputState(_ exportID: ExportID, to state: OutputState) async throws
+    /// 利用者の明示操作のみ
+    func markDiscarded(_ exportID: ExportID) async throws
+}
+
+struct ResolvedAttempt: Sendable {
+    let exportID: ExportID
+    let resolvedState: OutputState   // deliveryUnknown または delivered
 }
 ```
 
@@ -80,10 +87,9 @@ protocol OutputDeliveryStore: Sendable {
 ```swift
 struct ExportQueueItemID: Sendable, Hashable { let rawValue: UUID }
 
+/// 手順 7 の入力。レコードの中身は保存済みコミットから導出する
 struct FinalizeExportInput: Sendable {
     let exportID: ExportID
-    let outputRecord: OutputRecord
-    let exportRecord: ExportRecord
     let queueItemID: ExportQueueItemID?
     let projectUpdatedAt: Date
 }
@@ -101,11 +107,15 @@ struct RecoverySnapshot: Sendable {
     let deliveryAttempts: [DeliveryAttempt]            // 8.0
     let nonTerminalQueueItems: [ExportQueueItemSnapshot]
     let workingSources: [WorkingSourceRecord]
+
+    /// 台帳側の孤児照合に使う（アーキテクチャ設計 7.5）
+    let projectIDs: Set<ProjectID>
 }
 
 /// 署名検証はまだ通っていない。rowID は破棄のためだけに使う（6 章）
 struct SignedCommitRow: Sendable {
     let rowID: Int64
+    let schemaVersion: UInt32   // 正準バイト列の再構築とデコーダ選択に使う
     let rawColumns: ExportCommitColumns
     let signature: Data
 }
@@ -125,6 +135,7 @@ struct ExportCommitColumns: Sendable {
     let intent: Data?
     let applied: Data?
     let state: UInt32
+    let delivery: Data          // 署名対象の 13 番目
 }
 
 struct ExportQueueItemSnapshot: Sendable {
@@ -149,20 +160,41 @@ struct ForeignKeyViolation: Sendable {
 
 **`ExportCommitColumns` は「まだ信用できない値」を表す型です。** すべて生のバイト列か固定幅の整数であり、`ProjectID` や `ExportID` へデコードしません。デコードできる型にすると、署名検証を通す前にフィールドを使う経路ができます（6 章）。
 
+**署名対象の全フィールドを列として持ちます。** 1 つでも欠けると正準バイト列を再構築できず、そのフィールドの改変を検出できません。`delivery` を含めるのはこのためです。
+
+**`schemaVersion` を行として持ちます。** 署名対象に含まれる値であり（[正準スキーマ](canonical-schema.md) の 1）、検証前に読めなければ正準バイト列を組み立てられません。旧 `schemaVersion` のデコーダを選ぶのも、署名付きで移行するのもこの値が起点です。
+
 **外部キーの検査は `RecoverySnapshot` に含めません。** 検査は未完了コミットの復旧後に行うため（5 章の手順 5）、復旧前に読んだ snapshot へ結果を入れられません。`checkForeignKeys()` を別に呼びます。**単一 `app.db` では外部キーが実制約として効くため、違反は通常発生しません。** 検出した場合は復旧エラーとし、自動修復しません。
 
 ##### `finalizeExport` は入力を信用しない
 
-`FinalizeExportInput` は完成済みのレコードを呼び出し側から受け取りますが、**実装はそれをそのまま書きません。** トランザクション内で、同じ `exportID` の保存済みコミットについて次を再確認します。
+`FinalizeExportInput` は `OutputRecord` も `ExportRecord` も受け取りません。**受け取ったうえで使わない契約は、呼び出し側に「渡した値が書かれる」と誤解させます。** 渡すのは、コミットから導出できない 3 つだけです。
+
+| フィールド | コミットから導出できない理由 |
+| --- | --- |
+| `exportID` | 対象の指定そのもの |
+| `queueItemID` | キュー項目はコミットが持たない（バッチ以外では `nil`） |
+| `projectUpdatedAt` | 呼び出し時点の時刻。台帳の時刻とは別 |
+
+実装はトランザクション内で、同じ `exportID` の保存済みコミットについて次を確認します。
 
 | 確認 | 不成立なら |
 | --- | --- |
 | `state == readyToPublish` | throw。手順 7 を実行しない |
 | HMAC 検証を通る | throw |
-| `projectID` / `batchID` / `outputFile` が入力と一致する | throw |
-| `verifiedOutput` が入力の `outputByteSize` / `outputSHA256` と一致する | throw |
+| `verifiedOutput` と `outputFile` が存在する | throw |
+| `finalizedAt` / `finalizedPeriod` が存在する | throw |
 
-**確認を通ったら、保存済みコミットの値から `OutputRecord` を導出します。** 入力の値をそのまま採用しません。入力を信用すると、`Application` 側のバグや改変が DB の最終状態へ直接反映されます。
+**確認を通ったら、保存済みコミットの値だけから `OutputRecord` と `ExportRecord` を導出します。**
+
+| 導出先 | 導出元 |
+| --- | --- |
+| `OutputRecord.outputFile` / `outputByteSize` / `outputSHA256` | `outputFile` と `verifiedOutput` |
+| `OutputRecord.generatedAt` / `expiresAt` | `finalizedAt` と `finalizedAt + 24h` |
+| `OutputRecord.format` / `suggestedCreationDate` | `delivery`（`OutputDeliveryDescriptor`） |
+| `ExportRecord.exportedAt` | `finalizedAt` |
+| `ExportRecord.accountingMode` | `authorization` |
+| `ExportRecord.format` / `outputByteSize` | `delivery` と `verifiedOutput` |
 
 そのほかのポート（`ManagedFileStore` / `CryptoKeyStore` / `ProtectedBlobStore` / `CrashReporter` / 履歴削除の原子的操作）は [アーキテクチャ設計](architecture.md) が正本です。
 
@@ -189,7 +221,7 @@ struct ForeignKeyViolation: Sendable {
 /// 書き出そうとしている入力の同一性
 struct ExportInputSnapshot: Sendable, Equatable {
     let projectID: ProjectID
-    let projectRevision: Int64        // Project の変更ごとに増える
+    let projectRevision: Int64        // 手順 0 の競合検査だけに使う
     let detectionRevision: Int64      // 再検出ごとに増える
     let projectSettingsHash: ProjectSettingsHash   // 認可用
     let previewRenderHash: PreviewRenderHash       // 確認用
@@ -197,7 +229,6 @@ struct ExportInputSnapshot: Sendable, Equatable {
 
 /// 利用者が確認したプレビューの同一性
 struct PreviewConfirmation: Sendable, Equatable {
-    let projectRevision: Int64
     let detectionRevision: Int64
     let previewRenderHash: PreviewRenderHash
 }
@@ -209,10 +240,14 @@ struct PreviewConfirmation: Sendable, Equatable {
 
 | 処理 | 開始条件 |
 | --- | --- |
-| 単体 | 現在の `projectRevision` / `detectionRevision` / `previewRenderHash` が `PreviewConfirmation` と**すべて一致する** |
+| 単体 | 現在の `detectionRevision` / `previewRenderHash` が `PreviewConfirmation` と**すべて一致する** |
 | バッチ | 各写真について上記が一致し、かつモードごとの確認条件（`reviewed` / `overviewConfirmed`）を満たす |
 
-**`previewRenderHash` だけでは足りません。** 再検出すると顔の集合が変わりますが、設定が同じならハッシュは変化しません。`detectionRevision` を含めることで、**確認したプレビューと違う顔集合で書き出す経路**を塞ぎます。`projectRevision` は、手動領域の追加・削除などハッシュの対象外の変更を捕まえます。
+**`previewRenderHash` だけでは足りません。** 再検出すると顔の集合が変わりますが、設定が同じならハッシュは変化しません。`detectionRevision` を含めることで、**確認したプレビューと違う顔集合で書き出す経路**を塞ぎます。
+
+**`PreviewConfirmation` に `projectRevision` を含めません。** `projectRevision` は `ExportSetting` の変更でも増えるため、含めると圧縮品質を変えただけで確認が無効になり、**ハッシュを 2 種類へ分けた意味が消えます。** 手動領域の追加・削除は `previewRenderHash` の `regions` に含まれるため、`projectRevision` なしでも捕まります（[正準スキーマ](canonical-schema.md) の 5.2）。
+
+**`ExportInputSnapshot.projectRevision` は残します。** 用途は確認の一致ではなく、手順 0 で `ExportCommit` の insert と同一トランザクションで競合を検出することだけです（下記）。
 
 ##### 開始後に設定を変えられないようにする
 
@@ -434,8 +469,6 @@ struct AccountingIntent: Sendable {
     let settingsEntryToApply: ExportedSettingsEntry
     let previousSettingsEntry: ExportedSettingsEntry?   // 置換前。新規なら nil
 
-    /// 正常完了で削除する編集中素材の snapshot（画像処理）
-    let workingSnapshotToRemove: WorkingSourceSnapshot?
 }
 
 /// 台帳へ実際に適用された結果
@@ -444,7 +477,6 @@ struct AccountingApplied: Sendable {
     let grantInsertedByThisExport: Bool
     let trialInsertedByThisExport: Bool
     let settingsEntryReplaced: Bool
-    let workingSnapshotRemoved: Bool
 }
 
 /// 受け渡しに必要な不変値。手順 7 で OutputRecord へコピーする
@@ -676,7 +708,7 @@ struct OutputRecord: Sendable {
 
 | 順 | 操作 | 保存先 |
 | --- | --- | --- |
-| 1 | `transact` で、この `exportID` が所有する会計要素（消費・grant・トライアル台帳・トライアル予約・**`SourceLease`**・**`ExportedSettingsEntry`**・**`WorkingSourceSnapshot`**）を**冪等に**取り消す | ProtectedBlobStore |
+| 1 | `transact` で、この `exportID` が所有する会計要素（消費・grant・トライアル台帳・トライアル予約・**`SourceLease`**・**`ExportedSettingsEntry`**）を**冪等に**取り消す | ProtectedBlobStore |
 | 2 | 台帳の保存が成功したことを確認する | ProtectedBlobStore |
 | 3 | `OutputRecord` を削除する（存在する場合のみ） | DB |
 | 4 | `outputFile` のファイルを削除する | ファイルシステム |
@@ -702,9 +734,6 @@ exportedSettingsEntries の当該 projectID の要素が
       intent.previousSettingsEntry があればその値へ戻す
       無ければ削除する
 
-workingSourceSnapshots に当該 projectID が無く、
-  intent.workingSnapshotToRemove があれば、その値を復元する
-
 別の exportID が作った要素は削除しない
 ```
 
@@ -712,7 +741,7 @@ workingSourceSnapshots に当該 projectID が無く、
 
 **`ExportedSettingsEntry` を戻さないと権限を迂回できます。** 新しい設定 S1 で開始 → 手順 4 で S1 を「最後に成功した設定」として保存 → 手順 7 の前に失敗 → S1 が残る → 降格後、成功していない S1 が「変更なし」と判定される、という経路です。`ownerExportID` と `previousSettingsEntry` の両方が要ります。
 
-**`WorkingSourceSnapshot` も同様です。** 手順 4 で暫定削除するため、ロールバックで復元できなければ編集中プロジェクトの `sourceID` を解決できなくなります。手順 7 は DB 専用トランザクションであり、そこで台帳を更新できないため、**削除も手順 4 で行います。**
+**`ProjectSourceSnapshot` はロールバックの対象外です。** 書き出しでは追加も削除もしません。`Project` の寿命まで保持し、削除は `Project` 削除 Saga だけが行います（[アーキテクチャ設計](architecture.md) の 7.5）。
 
 | 状態 | 台帳への適用 | ロールバック経路 |
 | --- | --- | --- |
@@ -763,15 +792,19 @@ workingSourceSnapshots に当該 projectID が無く、
 | 3 | **有効なコミットに対応しない `trialReservations` と `sourceLeases` を削除する** | 1・2 の完了 |
 | 4 | 有効な未完了コミットを復旧する（5.3） | 1・2・3・2.5 の完了 |
 | 5 | `PRAGMA foreign_key_check` で外部キー違反が無いことを確認する | 4 の完了 |
-| 6 | `PendingFileDeletion` と孤児ファイルを回収する | 5 の完了 |
-| 7 | 未受け渡し出力を復元する | 5 の完了 |
-| 8 | **`evaluateUpdate` を実行する** | 7 の完了。`generated` の件数が必要 |
+| 5.5 | **`Project` が存在しない `exportedSettingsEntries` と `projectSourceSnapshots` を削除する**（[アーキテクチャ設計](architecture.md) の 7.5） | 5 の完了。`projectIDs` が必要 |
+| 6 | `PendingFileDeletion` と孤児ファイルを回収する | 5.5 の完了 |
+| 7 | **`resolveOrphanedAttempts()` を実行し、残存 `DeliveryAttempt` を `previousState` に従って解決する**（8.0） | 5 の完了 |
+| 7.5 | 未受け渡し出力（`isUndelivered`）を復元する | **7 の完了** |
+| 8 | **`evaluateUpdate` を実行する** | 7.5 の完了。**`isUndelivered` の件数**が必要 |
 | 9 | `.required` なら更新画面、それ以外は通常画面を表示し、**新しい書き出しを許可する** | 全手順の完了 |
 
 - **手順 −4 を最初に置くのは、`.complete` のファイルがロック中に読めないためです。** DB を開く前に待ちます
 - **手順 3 を手順 4 より前に置きます。** 孤児予約はクレジットを占有したままなので、回収前に新しい認可を許可すると、実際には空いているクレジットを「使用中」と判定します
 - **手順 5 を手順 4 の後に置きます。** ロールバックが `OutputRecord` を削除するため、先に検査すると存在しない違反を検出します
-- **手順 6 を手順 5 の後に置きます。** ロールバックと孤児削除が `PendingFileDeletion` へ行を追加しうるため、先に GC を走らせるとその回で回収できません
+- **手順 6 を手順 5.5 の後に置きます。** ロールバック・孤児削除・台帳側の孤児回収が `PendingFileDeletion` へ行を追加しうるため、先に GC を走らせるとその回で回収できません
+- **手順 7 を 7.5 と 8 より前に置きます。** `DeliveryAttempt` を解決するまで出力の状態が確定せず、復元対象の件数も更新判定の件数も正しく数えられません
+- **件数は `generated` ではなく `isUndelivered` で数えます。** `deliveryUnknown` も未受け渡しであり、除外すると復旧案内からも強制更新の猶予からも漏れます
 - **署名検証に失敗したコミットに対応する予約と lease は、手順 3 で自動削除しません**（6 章）
 
 ### 5.1 スキーマ移行
@@ -817,9 +850,20 @@ workingSourceSnapshots に当該 projectID が無く、
 | キュー項目 | `paused(.sourceReselectionRequired)` へ遷移させる |
 | 月間枠・トライアル | **整合性封鎖のまま。** 復元も払い戻しもしない |
 
-**`WorkingSourceRecord` も残せません。** 修復で `workingSourceSnapshots` が空になるため、**コミットを持たない編集中プロジェクトも `sourceID` を解決できません。** 処理用ファイル（未加工の顔画像）だけが残る状態を避けるためにも、まとめて破棄します。
+**`WorkingSourceRecord` も残せません。** 修復で `projectSourceSnapshots` が空になるため、**コミットを持たない編集中プロジェクトも `sourceID` を解決できません。** 処理用ファイル（未加工の顔画像）だけが残る状態を避けるためにも、まとめて破棄します。
 
 キューを `failed` ではなく `paused(.sourceReselectionRequired)` にするのは、利用者が同じ写真を選び直せば再開できるためです。**素材そのものは失われていません。**
+
+##### 履歴側への影響
+
+`projectSourceSnapshots` と `exportedSettingsEntries` は署名済み台帳の一部であり、HMAC 不一致では**内容を信用できません。** したがって修復では両方とも空にします。
+
+| 失われるもの | 修復後の扱い |
+| --- | --- |
+| 既存 `Project` の素材 identity | **再編集時に再接続の照合ができない。** 新しい素材として扱う |
+| 「変更せず再書き出し」の比較対象 | **無料の再書き出しが成立しない。** 通常の消費として扱う |
+
+**どちらも利用者に不利な側へ倒れますが、成果物は失いません。** 逆に、改ざんされた可能性のある identity を信用すると、別の写真を「同じ素材」として無料で処理できます。`Project` 行そのものは削除しません。
 
 ##### 署名不正行の扱いはここだけ例外にする
 
@@ -978,21 +1022,27 @@ PhotoKit への保存が成功
 struct DeliveryAttempt: Sendable {
     let exportID: ExportID
     let startedAt: Date
+    let previousState: OutputState   // 試行開始前の状態
 }
 ```
 
 | 順 | 操作 | 保存先 |
 | --- | --- | --- |
-| 1 | `DeliveryAttempt` を記録する | DB |
+| 1 | 現在の状態を `previousState` として `DeliveryAttempt` を記録する | DB |
 | 2 | `MediaSaver.saveToPhotoLibrary` を実行する | PhotoKit |
 | 3 | 成功したら、`OutputRecord` を `delivered` へ更新し `DeliveryAttempt` を削除する（**同一トランザクション**） | DB |
-| 4 | 失敗したら `DeliveryAttempt` を削除する。`generated` のまま再試行できる | DB |
+| 4 | 失敗したら `previousState` へ戻し、`DeliveryAttempt` を削除する | DB |
 
 **起動時に `DeliveryAttempt` が残っていれば、手順 2 と 3 の間で終了しています。**
 
-| 状態 | 扱い |
+| `previousState` | 起動時の扱い |
 | --- | --- |
-| `DeliveryAttempt` が残っている | **`deliveryUnknown`**。`generated` でも `delivered` でもない |
+| `generated` | **`deliveryUnknown`** へ更新する |
+| `deliveryUnknown` | `deliveryUnknown` のまま |
+| **`delivered`** | **`delivered` を維持する。** 状態は後退させず、「写真ライブラリへの保存結果が不明」を別途提示する |
+
+| 項目 | 扱い |
+| --- | --- |
 | 自動再保存 | **行わない**（重複を作りうる） |
 | 自動削除 | 行わない。出力は保持する |
 | 利用者への提示 | 写真ライブラリを確認したうえで、保存済みなら破棄、未保存なら再試行を選ばせる |
@@ -1003,6 +1053,35 @@ enum OutputState: Sendable { case generated, deliveryUnknown, delivered, discard
 
 `deliveryUnknown` は**未受け渡しとして扱います。** 24 時間の保持対象であり、完了画面の離脱確認にも数えます。**受け取れていない可能性がある側へ倒します**（`.unknown` の共有結果と同じ方針）。
 
+##### `delivered` を後退させない
+
+**受け渡しは複数回・任意の順序で行えます**（[アーキテクチャ設計](architecture.md) の 7.5）。OS 共有に成功したあと写真ライブラリへも保存する経路があるため、`previousState` が無いと次が壊れます。
+
+```
+OS 共有に成功 → delivered
+続けて写真ライブラリ保存を開始
+PhotoKit 完了後、DB 更新の前に異常終了
+再起動で deliveryUnknown へ後退
+→ 以前に共有が成功した事実まで失われる
+```
+
+**一度成立した `delivered` は取り消しません。** 利用者はすでに成果物を受け取っており、「受け取れていない可能性がある側へ倒す」判断はその事実を打ち消す理由になりません。写真ライブラリ側の不明は、状態ではなく個別の案内として提示します。
+
+##### 状態遷移は用途別メソッドで行う
+
+**汎用の `updateOutputState(_:to:)` を置きません。** 任意の逆遷移を作れるため、`delivered` → `generated` のような呼び出しが型では止まりません。`OutputDeliveryStore`（0 章）の各メソッドが、それぞれ 1 つの遷移だけを担います。
+
+| メソッド | 遷移 | 呼ばれる場面 |
+| --- | --- | --- |
+| `completeDelivery` | `generated` / `deliveryUnknown` → `delivered` | 写真ライブラリ保存の成功、共有の `.completed` |
+| `abandonDeliveryAttempt` | `DeliveryAttempt.previousState` へ戻す | 写真ライブラリ保存の失敗 |
+| `resolveOrphanedAttempts` | `previousState` が `generated` なら `deliveryUnknown`、`delivered` なら維持 | 起動時（手順 7） |
+| `markDiscarded` | 任意の状態 → `discarded` | 利用者の明示的な破棄のみ |
+
+**共有には `DeliveryAttempt` を作りません。** 結果が同期的に返るため中断点が無く、`.completed` のときだけ `completeDelivery` を呼びます。`.canceled` / `.failed` / `.unknown` では**現在の状態を変えません**（`delivered` なら `delivered` のまま）。
+
+**`delivered` → `deliveryUnknown` を行うメソッドは存在しません。** 後退させる手段を実装しないことで、規則を型で担保します。
+
 OS 共有（`SharePresenter`）にはこの経路がありません。結果が同期的に返るためです。
 
 ```swift
@@ -1011,10 +1090,10 @@ enum ShareResult: Sendable { case completed, canceled, unknown, failed }
 
 | 結果 | 出力状態 | 扱い |
 | --- | --- | --- |
-| `.completed` | `generated` → **`delivered`** | 受け渡し成功 |
-| `.canceled` | `generated` を維持 | 利用者が取りやめた |
-| `.failed` | `generated` を維持 | 再試行できる |
-| `.unknown` | **`generated` を維持** | 安全側へ倒す |
+| `.completed` | `generated` / `deliveryUnknown` → **`delivered`** | 受け渡し成功 |
+| `.canceled` | **現在の状態を維持** | 利用者が取りやめた |
+| `.failed` | **現在の状態を維持** | 再試行できる |
+| `.unknown` | **現在の状態を維持** | 安全側へ倒す |
 
 `.unknown` は、共有先アプリが完了を返さない場合に生じます。ここで `delivered` にすると、実際には渡っていない写真を「保存済み」として一時ファイルを消しかねません。**受け取れていない可能性がある側へ倒します。**
 

@@ -86,7 +86,7 @@
 - **`contentFingerprint` がファイル全体の SHA-256 のみから決まり、ファイルサイズと撮影日時を混ぜないこと**
 - **EXIF に `OffsetTimeOriginal` が無いとき、端末タイムゾーンで補完しないこと**
 - **`ContentFingerprint` / `StampAssetHash` が 32 バイト固定であること**
-- OS がトランスコードした写真を新規素材として数えないこと
+- **provider alias が得られる場合、OS がトランスコードした写真を新規素材として数えないこと。得られない場合は余分に消費しうることを設計上許容する**
 
 ### 2.3 レビュー状態とトリアージ（[アーキテクチャ設計](architecture.md) の 6.1 / 6.5）
 
@@ -173,6 +173,11 @@
 - **正常書き出しの記録が無いプロジェクトが「変更せず再書き出し」の対象外になること**
 - **`PreviewRenderHash` に圧縮品質とメタデータ設定が含まれないこと。それらを変えても確認の一致が崩れないこと**
 - **`renderRevision` を上げると `PreviewRenderHash` が変わること**
+- **2 つのハッシュがそれぞれ `project-settings-v1` / `preview-render-v1` のドメイン分離子を先頭に持ち、`payloadType` / `schemaVersion` を前置きしないこと**
+- **同じ入力バイト列でも分離子が違えば別のハッシュになること**
+- **`PreviewConfirmation` が `detectionRevision` と `previewRenderHash` だけを持ち、`projectRevision` を含まないこと**
+- **圧縮品質・メタデータ設定だけを変えて `projectRevision` が増えても、書き出しの開始条件が崩れないこと**
+- **手動領域の追加・削除では `previewRenderHash` が変わり、開始条件が崩れること**
 - **`PreviewConfirmation` と `overviewConfirmed` が再起動後に保持されず、再確認を求めること**
 - **出力へ影響する子行（`FaceTrack` / `EffectSetting` / `ExportSetting` / `ProjectStampAsset`）の変更で、同一トランザクション内に `projectRevision` が増えること**
 
@@ -208,7 +213,7 @@
 - 一括処理の開始が推定必要容量の 1.2 倍の空き容量を要求すること
 - 未保存出力がある状態では、単体・一括を問わず新規加工を開始できないこと
 - 完了画面の離脱確認が `isUndelivered`（`generated` と `deliveryUnknown`）の残数で判定されること。一部保存済みでも出ること
-- 復旧案内の枚数が `generated` の枚数であり、バッチ総枚数ではないこと
+- 復旧案内の枚数が `isUndelivered` の枚数であり、バッチ総枚数ではないこと
 - 共有結果が `.completed` のときだけ `delivered` へ遷移すること。`.unknown` では維持されること
 - リモート設定のフォールバック
 
@@ -249,17 +254,26 @@
 
 - **`prepared` の `outputFile` が `nil` であり、`fileVerified` 以降は `OutputFileRef` が入っていること。手順 2 で `verifiedOutput` と同時に確定すること**
 - **手順 1 の途中で落ちた一時ファイルが、どのコミットからも参照されず孤児 GC で回収されること**
-- **`finalizeExport` が入力を信用せず、保存済みコミットの `state` / HMAC / `projectID` / `verifiedOutput` を再確認してから導出すること**
+- **`FinalizeExportInput` が `exportID` / `queueItemID` / `projectUpdatedAt` の 3 つだけであり、`OutputRecord` と `ExportRecord` を保存済みコミットから導出すること**
 - **`loadRecoverySnapshot` が復旧前に一度だけ読まれ、`checkForeignKeys` が復旧後に別途呼ばれること**
 - **`ExportCommitColumns` が生のバイト列であり、署名検証前に `ProjectID` などへデコードされないこと**
 - **手順 7 が `WorkingSourceRecord` を同一トランザクションで削除し、実体を `PendingFileDeletion` へ積むこと**
 - **`AccountingIntent.settingsEntryToApply` が手順 4 で適用され、`applied.settingsEntryReplaced` が真のときだけロールバックで `previousSettingsEntry` へ戻ること。元が無ければエントリごと削除されること**
-- **`workingSnapshotToRemove` の削除がロールバックで復元され、素材が「編集中」のまま維持されること**
-- **台帳を修復した起動では、署名が正常な非終端コミットも含めてすべて破棄され、キュー項目が `failed` になること**
+- **`ProjectSourceSnapshot` が書き出しで追加も削除もされず、ロールバックの対象にもならないこと**
+- **台帳を修復した起動では、署名が正常な非終端コミットも含めてすべて破棄され、キュー項目が `paused(.sourceReselectionRequired)` になること**
 - **同じ起動で `WorkingSourceRecord` もすべて破棄され、実体が `PendingFileDeletion` へ積まれること**
 - **その破棄が署名不正行の規則（行 ID だけで削除し、フィールドを使わない）と同じ手順で行われること**
 - **その破棄で `UsageLedger` へ触れないこと（整合性封鎖のまま）**
-- **`DeliveryAttempt` が残った起動で `deliveryUnknown` になり、自動再保存しないこと**
+- **修復後の台帳で `exportedSettingsEntries` と `projectSourceSnapshots` が空になり、既存 `Project` が削除されないこと**
+- **修復後は「変更せず再書き出し」が成立せず、通常の消費として扱われること**
+- **`SignedCommitRow.schemaVersion` から正準バイト列を再構築でき、`delivery` を含む全署名対象が列として読めること**
+- **`delivery` を書き換えた行が署名検証で不正になること**
+- **`DeliveryAttempt` が残った起動で、`previousState == .generated` なら `deliveryUnknown` になり、自動再保存しないこと**
+- **`previousState == .delivered` なら `delivered` を維持し、写真ライブラリ保存の結果不明を別途提示すること**
+- **共有成功 → 写真ライブラリ保存中に強制終了 → 再起動、で `delivered` が後退しないこと**
+- **通常の保存失敗で `previousState` へ戻ること**
+- **汎用の状態更新メソッドが存在せず、`delivered` → `generated` の遷移を呼び出せないこと**
+- **`resolveOrphanedAttempts()` が起動時復旧の手順 7 で必ず呼ばれ、7.5 と 8 がその後に実行されること**
 - **`deliveryUnknown` が未受け渡しとして 24 時間の保持と離脱確認に数えられること**
 - **`OutputRecord` の `format` / `suggestedCreationDate` から `OutputFile` を復元でき、`Project` の現在値を参照しないこと**
 
@@ -319,7 +333,7 @@
 - `OutputRecord` が `ExportCommit` 削除後も単独で期限判定できること
 - 未受け渡しの出力が破棄または 24 時間経過まで保持されること
 - 受け渡し成功後も完了画面を離れるまで出力が保持され、保存と共有を任意の順序で実行できること
-- 異常終了後の起動時、`generated` では復旧案内が出て、`delivered` では出ないこと
+- 異常終了後の起動時、`isUndelivered` では復旧案内が出て、`delivered` では出ないこと
 - 「履歴を保存しない」設定で、未受け渡し出力・`UsageLedger`・未完了 `ExportCommit`・トライアル用 `SourceRecord` の 4 つ以外が残らないこと
 - `canDeleteHistoryUnit` が**列挙された全参照元**を保護すること
 - `CustomStamp` を削除しても、それを使用したプロジェクトが再書き出しできること
@@ -331,11 +345,17 @@
 - 削除で DB が先に更新され、`PendingFileDeletion` が同じトランザクションへ記録されること
 - `WorkingSourceRecord` の実体が欠けたとき、そのキュー項目が `paused(.sourceReselectionRequired)` へ遷移すること。バッチ全体が止まらないこと
 - **`createdAt` から 24 時間で処理用ファイルと `WorkingSourceRecord` が削除され、キュー項目が `paused(.sourceReselectionRequired)` になること**
-- **`WorkingSourceSnapshot` が署名済み台帳にあり、再起動後も `sourceID` を解決できること**
+- **`ProjectSourceSnapshot` が署名済み台帳にあり、再起動後も `sourceID` を解決できること**
 - **未署名の DB 行を書き換えても `SourceIdentity` が変わらないこと**
+- **`ProjectSourceSnapshot` が、書き出しの完了でも処理用ファイルの 24 時間期限でも削除されないこと**
+- **24 時間経過して `paused(.sourceReselectionRequired)` になったあとも、再選択の照合が成立すること**
+- **`Project` 削除でのみ snapshot が削除されること**
+- **履歴の既存 `Project` へ `attachWorkingSourceToExistingProject` で再接続でき、別写真では拒否されること**
+- **再接続が `detectionRevision` / `projectRevision` を増やし、検出結果を再利用しないこと**
+- **照合に `ProjectSourceLocator` を使わないこと（ファイル取り込みで `nil` でも成立すること）**
 - **再選択で素材が一致しない場合、そのキュー項目で続行できないこと**
 - **再選択が顔検出をやり直し、`detectionRevision` と `projectRevision` を増やし、旧 `FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` / `PreviewConfirmation` を破棄すること**
-- **再選択の候補が一時領域へ物質化される間、既存の `WorkingSourceSnapshot` が上書きされないこと**
+- **再選択の候補が一時領域へ物質化される間、既存の `ProjectSourceSnapshot` が上書きされないこと**
 - **候補が一致しないまま中断しても、元の素材と snapshot が失われないこと**
 - **一致した場合の差し替え・派生データ破棄・リビジョン更新が単一の DB トランザクションで行われること**
 - **その途中で終了した場合、次回起動でファイルと DB のどちらかだけが進んだ状態にならないこと**
@@ -345,9 +365,9 @@
 ### 3.8 更新誘導との順序（[アーキテクチャ設計](architecture.md) の 6.7）
 
 - **更新判定が復旧手順 −4〜7 の完了後に実行されること**
-- **`.required` かつ `generated` の出力があるとき、受け渡し導線が先に提示されること**
+- **`.required` かつ `isUndelivered` の出力があるとき、受け渡し導線が先に提示されること**
 - **その画面から新規加工・履歴・設定へ進めないこと**
-- **保存または破棄で `generated` が 0 件になった時点で、通常の強制更新画面へ切り替わること**
+- **保存または破棄で `isUndelivered` が 0 件になった時点で、通常の強制更新画面へ切り替わること**
 - **`.recommended` が編集中・書き出し中・未受け渡し出力があるときに表示されないこと**
 - Free が既存プロジェクトの編集画面を開けること。変更操作の時点で案内が出ること
 
@@ -401,9 +421,14 @@
 - 属性の検証に失敗したファイルが完成扱いにならないこと
 - `StampAsset` の作成が atomic rename を経ること
 - **インポート Saga の手順 1〜3 の途中で終了した場合、作成済みファイルが孤児として起動時 GC で回収されること**
-- **`WorkingSourceSnapshot` が `Project` 行より先に台帳へ保存されること**
+- **`ProjectSourceSnapshot` が `Project` 行より先に台帳へ保存されること**
 - **DB 登録に失敗した場合、その snapshot が補償削除されること**
-- **補償削除の前に終了しても、対応する `Project` が無い snapshot が起動時 GC で回収されること**
+- **補償削除の前に終了しても、対応する `Project` が無い snapshot が起動時復旧の手順 5.5 で回収されること**
+- **同じ走査で孤児 `exportedSettingsEntries` も削除されること**
+- **`RecoverySnapshot.projectIDs` が全 `Project` を含み、これを照合に使うこと**
+- **インポート Saga が `PickedPhotoInput.importedFile` を作り直さず、所有権を受け取ること**
+- **`Project` 削除で DB が先に確定し、その後に台帳から 2 種類が削除されること**
+- **DB 確定と台帳削除の間で終了しても、`Project` から認可情報だけが失われる状態にならないこと**
 - **`WorkingSourceRecord` が最初から向き正規化済みの原寸ファイルを指すこと。差し替えが発生しないこと**
 - **`contentFingerprint` が取り込みファイル（正規化前）から計算されること**
 - **`detectionSource` が検出の完了後に削除され、DB へ登録されないこと**
@@ -413,7 +438,7 @@
 
 - **読み取り権限あり** — 保存後に `PHAsset.creationDate` を読み戻し、元画像の登録日時と一致すること
 - **読み取り権限なし** — 偽 `PHAssetCreationRequest` または adapter spy で、**EXIF の日時が渡されたこと、または `creationDate` が設定されなかったこと**を検証する。`PHAsset` を取得しにいかないこと
-- **`contentFingerprint` の撮影日時が EXIF のみから決まり、PhotoKit 権限の有無で変わらないこと**
+- **`OriginalCaptureMetadata` が EXIF のみから決まり、PhotoKit 権限の有無で変わらないこと**
 - 出力ファイルから位置情報・機器情報・編集ソフト情報が除去されていること
 
 ### 4.6 Vision と Core Image（[画像処理](image-pipeline.md) の 1 / 4）
@@ -488,6 +513,12 @@
 - `PendingFileDeletion` の削除に失敗した場合、次回起動時の GC で再試行されること
 - 書き出し一時ファイルとラスタ一時ファイルの孤児が、起動時に回収されること
 - `WorkingSourceRecord` の行を作る前に落ちた場合、処理用ファイルが孤児として回収されること
+- **インポート Saga で `ProjectSourceSnapshot` を保存した直後に落ちた場合、`Project` が無い snapshot が手順 5.5 で回収されること**
+- **DB 確定（手順 5）の直後に落ちた場合、`Project` と snapshot の両方が残り、そのまま編集を再開できること**
+- **`PHAssetCreationRequest` の成功直後・DB 更新の前に落ちた場合、`previousState` に応じて `deliveryUnknown` または `delivered` へ解決されること**
+- **同じ経路で `delivered` が `deliveryUnknown` へ後退しないこと**
+- **`Project` 削除の DB 確定直後・台帳削除の前に落ちた場合、次回起動で台帳側の 2 種類が回収されること**
+- **再選択 Saga の手順 6（単一トランザクション）の直前・直後で落ちた場合、ファイルと DB の片側だけが進んだ状態にならないこと**
 
 ---
 

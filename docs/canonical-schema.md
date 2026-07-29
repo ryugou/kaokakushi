@@ -116,7 +116,7 @@ struct SignedPayload: Sendable {
 
 | 分類 | 対象 |
 | --- | --- |
-| unordered | `consumedExportIDs`、`sourceRecords`、`grants`、`trialEntries`、`trialReservations`、`sourceLeases`、`exportedSettingsEntries`、`workingSourceSnapshots`、`SourceRecord.aliases`、`RemoteConfig.enabledStampPacks` |
+| unordered | `consumedExportIDs`、`sourceRecords`、`grants`、`trialEntries`、`trialReservations`、`sourceLeases`、`exportedSettingsEntries`、`projectSourceSnapshots`、`SourceRecord.aliases`、`RemoteConfig.enabledStampPacks` |
 | ordered | `RenderSpec.regions`、`ReviewIssueID.affectedFaceTrackIDs` |
 
 `affectedFaceTrackIDs` は「辞書順にソート済み」として構築されますが、それは**構築時の規則**であり、正準化がソートするのではありません。順序は値の一部です。
@@ -150,6 +150,13 @@ struct SignedPayload: Sendable {
 | --- | --- | --- |
 | `provider` | 1 | `String`（小文字 16 進 64 文字） |
 | `content` | 2 | **32 バイト固定長**（`ContentFingerprint`） |
+
+### `SourceRepresentation`
+
+| case | 番号 |
+| --- | --- |
+| `original` | 1 |
+| `transcoded` | 2 |
 
 ### `MonthlyIntegrityLock`
 
@@ -243,7 +250,7 @@ struct SignedPayload: Sendable {
 | 6 | `trialReservations` | unordered collection of `TrialReservation` |
 | 7 | `sourceLeases` | unordered collection of `SourceLease` |
 | 8 | `exportedSettingsEntries` | unordered collection of `ExportedSettingsEntry` |
-| 9 | `workingSourceSnapshots` | unordered collection of `WorkingSourceSnapshot` |
+| 9 | `projectSourceSnapshots` | unordered collection of `ProjectSourceSnapshot` |
 | 10 | `lastObservedAt` | `Date` |
 | 11 | `monthlyIntegrityLock` | `MonthlyIntegrityLock` |
 | 12 | `lastTrustedMonth` | `TrustedUTCMonth?` |
@@ -260,11 +267,11 @@ struct SignedPayload: Sendable {
 | `TrialReservation` | `sourceID` → `exportID` |
 | `SourceLease` | `sourceID` → `exportID` |
 | `ExportedSettingsEntry` | `projectID` → `settingsHash`（32 バイト固定）→ `exportedAt` → `ownerExportID` |
-| `WorkingSourceSnapshot` | `projectID` → `identity` → `representation` → `capture` → `libraryCreationDate` |
+| `ProjectSourceSnapshot` | `projectID` → `identity` → `representation` → `capture` → `libraryCreationDate` → `registeredAt` |
 | `SourceIdentity` | `providerAssetKeyHash`（`String?`）→ `contentFingerprint`（32 バイト固定） |
 | `OriginalCaptureMetadata` | `dateTimeOriginal` → `subSecTimeOriginal` → `offsetTimeOriginal` → `utcMillis`（すべて `Optional`） |
 
-`ExportedSettingsEntry` と `WorkingSourceSnapshot` は **`projectID` ごとに 1 件**です。台帳の検証時に重複が無いことを確認します。
+`ExportedSettingsEntry` と `ProjectSourceSnapshot` は **`projectID` ごとに 1 件**です。台帳の検証時に重複が無いことを確認します。
 
 台帳修復時は、両方とも**空**にします（[アーキテクチャ設計](architecture.md) の 6.3）。
 
@@ -307,8 +314,8 @@ struct SignedPayload: Sendable {
 | `ExportAuthorization` | `entitlementSnapshot`（`Entitlement`）→ `accountingMode` → `authorizedAt` → `authorizedGrant` |
 | `AuthorizedGrant` | `sourceID` → `firstSuccessAt` |
 | `VerifiedOutput` | `byteSize`（`Int64`）→ `sha256`（32 バイト固定長。長さ前置きしない） |
-| `AccountingIntent` | `consumeExportID` → `grantAction` → `trialSourceIDToEnsure` → `settingsEntryToApply` → `previousSettingsEntry` → `workingSnapshotToRemove` |
-| `AccountingApplied` | `consumedInserted` → `grantInsertedByThisExport` → `trialInsertedByThisExport` → `settingsEntryReplaced` → `workingSnapshotRemoved` |
+| `AccountingIntent` | `consumeExportID` → `grantAction` → `trialSourceIDToEnsure` → `settingsEntryToApply` → `previousSettingsEntry` |
+| `AccountingApplied` | `consumedInserted` → `grantInsertedByThisExport` → `trialInsertedByThisExport` → `settingsEntryReplaced` |
 | `OutputDeliveryDescriptor` | `format`（`UInt32`）→ `suggestedCreationDate`（`Date?`） |
 
 `sha256` を固定長にするのは、長さが常に 32 バイトであり前置きが冗長なためです。他の `Data` は長さ前置きを維持します。
@@ -387,12 +394,21 @@ contentFingerprint = SHA-256( "content-fingerprint-v2" || fullFileBytes )
 | `SubSecTimeOriginal` | 小数秒 |
 | `OffsetTimeOriginal` | UTC オフセット（`+09:00` など） |
 
-| 状況 | 扱い |
+**UTC への変換に必要なのは `DateTimeOriginal` と `OffsetTimeOriginal` の 2 つです。** `SubSecTimeOriginal` は精度を上げるだけで、無くても変換できます。
+
+| 状況 | `utcMillis` |
 | --- | --- |
-| 3 つとも取得できる | **UTC epoch milliseconds へ変換する**（小数秒を含める） |
-| `OffsetTimeOriginal` が無い | **UTC へ変換しない。** 端末の現在タイムゾーンを使わない |
-| 同上・`contentFingerprint` | **時刻を含めない**（そもそも 5.1 で入力から外れている） |
-| 同上・写真ライブラリ保存 | `PHAsset.creationDate` を優先し、無ければ `creationDate` を設定しない |
+| `DateTimeOriginal` ＋ `OffsetTimeOriginal` ＋ `SubSecTimeOriginal` | **ミリ秒精度で変換する** |
+| `DateTimeOriginal` ＋ `OffsetTimeOriginal`（小数秒なし） | **秒精度で変換する**（小数秒は 0 とみなす） |
+| `OffsetTimeOriginal` が無い | **`nil`。** 端末の現在タイムゾーンを使わない |
+| `DateTimeOriginal` が無い | **`nil`** |
+
+3 つのローカル表記フィールドは、`utcMillis` の可否にかかわらず取得できたものをそのまま `OriginalCaptureMetadata` へ保持します。
+
+| 用途 | 扱い |
+| --- | --- |
+| `contentFingerprint` | **時刻を含めない**（5.1 で入力から外れている） |
+| 写真ライブラリ保存 | `PHAsset.creationDate` を優先し、無ければ `utcMillis`、それも無ければ `creationDate` を設定しない |
 | 出力 EXIF | **元のローカル日時とオフセットをそのまま保持する**（保持設定が ON の場合） |
 
 **端末のタイムゾーンを補完に使いません。** 同じ写真を別の場所で開いたときに違う値になり、`suggestedCreationDate` が旅行のたびにずれます。
@@ -509,6 +525,28 @@ contentFingerprint = SHA-256( "content-fingerprint-v2" || fullFileBytes )
 | フィールド追加 | **末尾のみ。** 出力へ影響する設定を追加したら必ずここへ加え、`schemaVersion` を上げる |
 
 **`Float`（32 ビット）へ丸めません。** `0.1500000000000000` と `0.1500000059604645` が同じハッシュになり、**設定を変えたのに無料の再書き出しとして通します。**
+
+##### 最終式
+
+**ドメイン分離子を先頭へ置きます。** 2 つのハッシュは入力の一部が共通であり、分離子が無ければ「`PreviewRenderHash` の入力とバイト単位で一致する `ProjectSettingsHash` の入力」を構成できます。
+
+```
+ProjectSettingsHash =
+  SHA-256( "project-settings-v1" || canonicalProjectSettingsBytes )
+
+PreviewRenderHash =
+  SHA-256( "preview-render-v1" || canonicalPreviewRenderBytes )
+```
+
+| 項目 | 規則 |
+| --- | --- |
+| ドメイン分離子 | 上記文字列の UTF-8 バイト列。長さ前置きしない |
+| `canonical…Bytes` | 上表のフィールドを 2 章の符号化規則で順に連結したもの |
+| 先頭の `payloadType` / `schemaVersion` | **付けない。** これらは署名対象 payload の規約であり、ハッシュ入力ではない |
+| 出力 | **32 バイト固定** |
+| スキーマ変更 | 分離子を `-v2` へ上げる |
+
+**`contentFingerprint` と同じ式ではありません。** あちらの入力はファイルの全バイトであり、長さ前置きも構造化された符号化もありません。**「同じ」と書くと、実装がどちらかの規則をもう一方へ持ち込みます。**
 
 各 `schemaVersion` について、既知の `RenderSpec` と `ExportSetting` から生成したゴールデンバイト列を、**2 種類のハッシュそれぞれについて**テストへ埋め込みます。
 

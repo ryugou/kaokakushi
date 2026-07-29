@@ -37,7 +37,8 @@
   ↓
 2 Domain の契約を確定
    値型（UsageLedger / ExportCommit / ManagedFileRef 系 / ID 型）
-   永続化ポート（UsageLedgerStore / ExportSagaStore / ProtectedPayload / ProtectedBlobKey）
+   永続化ポート（UsageLedgerStore / ExportSagaStore / WorkingSourceStore /
+                 OutputDeliveryStore / ProtectedPayload / ProtectedBlobKey）
    正準スキーマ
   ↓
 3 以降を並行
@@ -62,6 +63,8 @@
 | `ManagedFileRef` と種別つき参照 | 列の型とパス解決が決まらない |
 | `ProtectedPayload` / `ProtectedBlobKey<Value>` | blob の読み書き契約が決まらない |
 | `UsageLedgerStore` / `ExportSagaStore` | トランザクション境界が決まらない |
+| `WorkingSourceStore`（[画像処理](image-pipeline.md)） | インポート・再選択・再接続の DB トランザクション境界が決まらない |
+| `OutputDeliveryStore`（[書き出し Saga](export-saga.md) の 0） | 受け渡し状態の遷移経路が決まらない |
 | 正準スキーマ | 署名バイト列が決まらない |
 
 **これらを「サブプロジェクト 2 の前半」として先に固める**のが要点です。`QuotaPolicy` や `BatchTriagePolicy` の実装は後半であり、`Persistence` はそれを待ちません。

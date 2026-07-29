@@ -29,14 +29,14 @@
 
 ### 1.3 未受け渡し出力を失わせない
 
-**強制更新は「消費したのに成果物を受け取れない」を作りかねません。** 利用者が書き出しを完了し（消費が確定し）、保存する前にアプリを再起動した場面で全画面ブロックを最優先で表示すると、`generated` 状態の出力を受け取る手段が消え、24 時間後には出力も消えます。
+**強制更新は「消費したのに成果物を受け取れない」を作りかねません。** 利用者が書き出しを完了し（消費が確定し）、保存する前にアプリを再起動した場面で全画面ブロックを最優先で表示すると、`isUndelivered` の出力を受け取る手段が消え、24 時間後には出力も消えます。
 
 | 状態 | 強制更新の扱い |
 | --- | --- |
-| `generated` の出力が 1 件もない | **即座に強制更新画面を表示する** |
-| `generated` の出力がある | **受け渡しの導線を先に提示する** |
+| `isUndelivered` の出力が 1 件もない | **即座に強制更新画面を表示する** |
+| `isUndelivered`（`generated` / `deliveryUnknown`）の出力がある | **受け渡しの導線を先に提示する** |
 
-後者の画面では、未保存の枚数を示し、保存してから更新するよう促します。**この画面から到達できるのは保存・共有・破棄だけ**とし、新規の加工・履歴の閲覧・設定へは進めません。保存または破棄によって `generated` が 0 件になった時点で、通常の強制更新画面へ切り替えます。
+後者の画面では、未保存の枚数を示し、保存してから更新するよう促します。**この画面から到達できるのは保存・共有・破棄だけ**とし、新規の加工・履歴の閲覧・設定へは進めません。保存または破棄によって `isUndelivered` が 0 件になった時点で、通常の強制更新画面へ切り替えます。
 
 **この規則はリモート設定から無効化できません**（[アーキテクチャ設計](architecture.md) の「リモート設定で変更できないこと」）。
 
@@ -45,7 +45,7 @@
 `.recommended` のダイアログは、**割り込んでよい場面でのみ表示します。**
 
 - 検出中、顔選択中、編集中、書き出し中、書き出しエラー対応中、課金処理中は**表示しない**
-- `generated` の未受け渡し出力があるときは**表示しない**
+- `isUndelivered` の未受け渡し出力があるときは**表示しない**
 - ホーム画面または履歴画面を表示している時点でのみ提示する
 
 「後で」を選んだバージョンを `skippedVersion` として記録します。`recommendedVersion` が上がれば再び提示されます。チェックの契機は**起動時とフォアグラウンド復帰時**です。
@@ -86,7 +86,7 @@ SwiftUI の `openURL` 環境値で開きます。`itms-apps://` スキームは�
 | `freeMonthlyExportLimit` | 5 | 0 | 100 |
 | `proBatchSizeLimit` | 50 | 1 | **50** |
 | `trialBatchSizeLimit` | 5 | 1 | **5** |
-| `trialCreditCount` | 5 | 0 | 50 |
+| `trialCreditCount` | 5 | 0 | **5** |
 | `batchConcurrencyLimit` | 1 | 1 | **1**（v1） |
 | `lowConfidenceThreshold` | 未定（[アーキテクチャ設計](architecture.md) の 12.2） | 0.0 | 1.0 |
 | `extremePoseYawDegrees` | 未定（[アーキテクチャ設計](architecture.md) の 12.2） | 0.0 | 90.0 |
@@ -96,7 +96,9 @@ SwiftUI の `openURL` 環境値で開きます。`itms-apps://` スキームは�
 | `customStampMaxEdgePixels` | 1,024 | 256 | 4,096 |
 | `interstitialAdExportInterval` | 3 | 2 | 20 |
 
-**hard max は実装が想定するメモリ使用量・ストレージ・体験の上限です。** `proBatchSizeLimit` と `batchConcurrencyLimit` と `customStampLimit` は、サーバーから引き上げられる形にしません。
+**hard max は実装が想定するメモリ使用量・ストレージ・体験の上限です。** `proBatchSizeLimit` / `batchConcurrencyLimit` / `customStampLimit` / `trialCreditCount` は、サーバーから引き上げられる形にしません。
+
+**`trialCreditCount` の hard max は 5 です。** 商品仕様は一括処理トライアルを「5 枚クレジット」と固定しており（[商品判断](product-decisions.md)）、`UpgradeReason` の `batch-size` も総数 5 枚を根拠にしています。hard max を 50 にすると、5 枚ずつ複数バッチへ分けて最大 50 種類の写真を無料で処理でき、**商品文言と実際の提供内容が食い違います。** 可変クレジットにする場合は、商品文言・`UpgradeReason`・画面表示・テストをすべて設定値ベースへ変えたうえで引き上げます。
 
 **`batchConcurrencyLimit` の hard max は v1 では 1 です。** 並列数 2 に必要な二段階ゲートを v1 で実装しないため（[書き出し Saga](export-saga.md) の 1.7）、リモートで 2 を指定しても有効になりません。**設定できるが効かない値を許容しません。** 二段階ゲートを実装した時点で hard max を 2 へ引き上げます。
 
