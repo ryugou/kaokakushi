@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-本設計の中核は書き出しコミットジャーナル（アーキテクチャ設計書 8 章）であり、次を要求する。
+本設計の中核は書き出しコミットジャーナル（[書き出し Saga](../export-saga.md)）であり、次を要求する。
 
 - **明示的なトランザクション境界。** 最終確定の手順 7 は `OutputRecord` の insert、`ExportRecord` の insert、キュー状態の更新、`Project` の更新、`ExportCommit` の delete を単一トランザクションで実行する
 - **原子性の検証可能性。** プロセス強制終了テストで、トランザクションが途中適用されないことを確認する
@@ -45,7 +45,7 @@ GRDB は `try dbQueue.write { db in ... }` が SQLite のトランザクショ�
 
 ## Consequences
 
-- 具体的な必須構成（`DatabaseQueue` 1 本、main database、`journal_mode`、`synchronous`、起動時検証）はアーキテクチャ設計書 7.1 が正本
-- SQLite の外部キー制約は `ATTACH` した別 DB を参照できないため、DB 間の参照整合はアプリ側が保証する（設計書 7.1）
-- 両 DB を変更するスキーマ移行は `ATTACH` 済みの単一トランザクションで実行する必要がある（設計書 8.5）
-- 電源断に対する耐久性は best effort である。保証するのはプロセス強制終了に対する整合回復であり、「書き込みが必ず届く」ことではない（設計書 7.1）
+- 具体的な必須構成（`DatabaseQueue` 1 本、main database、`journal_mode`、`synchronous`、起動時検証）は[アーキテクチャ設計](../architecture.md) の 7.1 が正本
+- SQLite の外部キー制約は `ATTACH` した別 DB を参照できないため、DB 間の参照整合はアプリ側が保証する（[アーキテクチャ設計](../architecture.md) の 7.1）
+- 両 DB を変更するスキーマ移行は `ATTACH` 済みの単一トランザクションで実行する必要がある（[書き出し Saga](../export-saga.md) の起動時復旧）
+- 電源断に対する耐久性は best effort である。保証するのはプロセス強制終了に対する整合回復であり、「書き込みが必ず届く」ことではない（[アーキテクチャ設計](../architecture.md) の 7.1）

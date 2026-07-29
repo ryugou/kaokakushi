@@ -36,7 +36,7 @@ Accepted
 ## Consequences
 
 - **利用者への明示が必須になる。** 設定画面と初回起動時に「履歴とマイスタンプはこの端末内にのみ保存されます。アプリの削除や端末の変更では引き継がれません」を記載する
-- SQLite の journal と super-journal を確実に除外するため、DB をディレクトリで分ける配置が必要になる（アーキテクチャ設計書 7.4）
-- `isExcludedFromBackup` は一般的なファイル操作で `false` へ戻りうるため、ディレクトリへ一度設定するだけでは足りない。**すべてのファイル生成を `ManagedFileStore` へ通し、保存のたびに設定して読み返す**（設計書 7.3）
+- SQLite の journal と super-journal を確実に除外するため、DB をディレクトリで分ける配置が必要になる（[アーキテクチャ設計](../architecture.md) の 7.4）
+- `isExcludedFromBackup` は一般的なファイル操作で `false` へ戻りうるため、ディレクトリへ一度設定するだけでは足りない。**すべてのファイル生成を `ManagedFileStore` へ通し、保存のたびに設定して読み返す**（[アーキテクチャ設計](../architecture.md) の 7.3）
 - 再インストール後は `UsageLedger` が `Missing` となり、新規台帳が作られる。無料枠が戻ることは仕様 14.5 が許容している
-- 処理中ファイルは `tmp/` ではなく `runtime/processing/` へ置く。`tmp/` は OS がいつでも削除でき、キューの再起動復元が成立しなくなる（設計書 7.4）
+- 処理中ファイルは `tmp/` ではなく `runtime/processing/` へ置く。`tmp/` は OS がいつでも削除でき、キューの再起動復元が成立しなくなる（[アーキテクチャ設計](../architecture.md) の 7.4）

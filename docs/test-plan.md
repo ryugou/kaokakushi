@@ -3,11 +3,11 @@
 | 項目 | 内容 |
 | --- | --- |
 | 対象 | 顔かくし（iOS 単独） |
-| 上位文書 | 顔かくし 技術スタックおよびアーキテクチャ設計 |
+| 親文書 | [アーキテクチャ設計](architecture.md) |
 | 本書の範囲 | 層ごとの個別テスト項目の網羅一覧 |
-| 本書の対象外 | テスト戦略そのもの（4 層への分割と各層が保証する内容は設計書 11 章が正） |
+| 本書の対象外 | テスト戦略そのもの（4 層への分割と各層が保証する内容は [アーキテクチャ設計](architecture.md) 11 章が正） |
 
-節番号の参照はすべてアーキテクチャ設計書のものです。
+節番号の参照は [アーキテクチャ設計](architecture.md) のものです。画像処理は [画像処理アーキテクチャ](image-pipeline.md)、書き出し手順は [書き出し Saga](export-saga.md)、バイト表現は [正準スキーマ](canonical-schema.md) を参照します。
 
 ---
 
@@ -40,9 +40,13 @@
 - 月末の初回成功から 24 時間以内なら、月をまたいでも `freeReexport` になること
 - `rollPeriod` が `consumed` だけをリセットし、`grants` を月境界で捨てないこと
 - 端末時刻を過去へ戻しても 24 時間の窓が延びないこと。`usageNow` が後退しないこと
+- **`usageNow` の下限に信頼時刻が含まれること。** 端末時刻を前月へ戻しても、信頼時刻を得た時点で消費判定がその月へ進むこと
 - `Domain` の時間判定が `now` ではなく `usageNow` / `retentionNow` だけを受け取ること
-- 未受け渡し出力の削除期限が端末時刻の変更で延びないこと
-- `retentionNow` が `nil` のとき、履歴・未受け渡し出力・やり直し保証のいずれも削除されないこと
+- **未来への大幅ジャンプ（30 日超）だけを根拠に、履歴・未受け渡し出力・やり直し保証のいずれも削除されないこと**
+- **`retentionNow` が `nil` のとき、いずれも削除されないこと**
+- **端末時刻を過去へ戻すと保持期間が延長されること**（利用者に不利ではないため許容する。`retentionNow` に `max` を掛けない）
+- **信頼時刻を得た後は、その時刻に従って保持期間が判定されること**
+- **リモート設定の `expiresAt` 判定には `trusted ?? usageNow` を使い、時計を過去へ戻しても古い設定が延命されないこと**
 - `trialIntegrityLocked` のとき `remainingCredits` が 0 になり、トライアル画面へ進入できないこと
 - `trialReservations` が残数計算に含まれること
 - `batchTrial` が月間枠を消費しないこと
@@ -62,7 +66,8 @@
 - **統合時に `grants` / `trialEntries` / `trialReservations` / `sourceLeases` のすべてが勝者 `sourceID` へ書き換わること**
 - **`SourceRecord` が grant / trial / reservation / lease のどれからも参照されなくなった場合だけ削除されること**
 - **`paidUnlimited` の書き出し中に `SourceRecord` が GC されないこと**（`SourceLease` が効いていること）
-- 台帳の不変条件 1〜7 が、保存前と署名検証直後の両方で検査されること
+- 台帳の不変条件 1〜8 が、保存前と署名検証直後の両方で検査されること
+- **同じ `sourceID` の `SourceLease` が 2 件以上あるとき、通常状態として通さず復旧エラーになること**
 - `contentFingerprint` が長さ前置き・ビッグエンディアン・UTC epoch ms で計算されること
 - 64KB 未満のファイルで先頭・末尾チャンクが重複しても正しく計算されること
 - 撮影日時が無い場合に長さ 0 のフィールドとして扱われること
@@ -70,6 +75,10 @@
 - ファイル更新日時を使わないこと
 - `representation` が `contentFingerprint` の入力に含まれないこと
 - `BatchSelectionClassifier` が alias の共有関係を推移的に閉じ、選択中の重複を畳むこと
+- **`SourceRecord` があっても `TrialEntry` が無ければ「新規」と分類されること。** 単体書き出しの grant・認可中の lease・有料書き出し中の参照だけでは消費済みにならない
+- **`TrialEntry` があれば「消費済み」と分類されること**
+- **`TrialReservation` のみの素材が「新規枠を占有中」として扱われ、残数計算と分類で二重に数えられないこと**
+- **実行直前の再検証が、選択画面と同じ `trialEntries` の条件を使うこと**
 - OS がトランスコードした写真を新規素材として数えないこと
 
 ### 2.3 レビュー状態とトリアージ（6.1 / 6.5）
@@ -138,6 +147,8 @@
 - **完全に透明なカスタムスタンプ画像が取り込み時に拒否されること**
 - **`isMasked == true` の顔に no-op 相当の値が渡されたとき `compileRenderDraft` が `throw` すること**
 - 永続データのデコード時にも検証済み値型の `throws` 版が呼ばれること
+- **境界型（`ImageSource` / `LoadedPhoto` / `DetectionResult` / `RenderedImage` / `OutputFile`）が `URL` もパス文字列も持たないこと**
+- **`ImageSource.orientation` が常に `.normalized` であること。未正規化の画像が境界を越えないこと**
 - キーフレーム補間（v2 機能だが仕様確定のため v1 で実装・テスト）
 
 ### 2.6 設定ハッシュと正準化（6.4 / 9.1）
@@ -244,7 +255,10 @@
 ### 3.4 出力再生成（8.7）
 
 - **`restoreOutput` が `UsageLedger` を 1 バイトも変更せず、`generatedAt` / `expiresAt` を延長せず、`ExportRecord` を追加しないこと**
-- **`originalExpiresAt` が過去なら `restoreOutput` を実行せず、`OutputRecord` を削除すること**
+- **`restoreOutput` が atomic replace → DB update の順で実行されること**
+- **その 2 手順の間で中断した場合、「ファイルはあるが記録値と不一致」を再生成の途中として扱い、手順 1 からやり直すこと**（破損として扱わない）
+- **`retentionNow == nil` のとき、`restoreOutput` も期限切れ削除も行わないこと**
+- **`retentionNow >= originalExpiresAt` なら `restoreOutput` を実行せず、`OutputRecord` を削除すること**
 - `restoreOutput` がキューの成功件数を増やさないこと
 
 ### 3.5 トライアル予約（6.3）
@@ -274,7 +288,9 @@
 - `canDeleteHistoryUnit` が非終端キュー・`OutputRecord`・非終端 `ExportCommit`・`WorkingSourceRecord`・再生成対象を保護すること
 - `CustomStamp` を削除しても、それを使用したプロジェクトが再書き出しできること
 - `StampAsset` が**最終保存バイト列**の内容ハッシュで重複排除され、参照カウントが 0 になったときのみ削除されること
-- **`CustomStamp` の登録で参照カウントが 1 増え、一覧削除で 1 減ること。一覧でしか使われていない実体が一覧削除で消えること**
+- **`CustomStamp` の登録で参照が 1 増え、一覧削除で 1 減ること。一覧でしか使われていない実体が一覧削除で消えること**
+- **1 プロジェクト内で同じスタンプを複数領域へ使っても `ProjectStampAsset` が 1 行であること。最後の 1 領域を外した時点で行が消えること**
+- **保存値の `referenceCount` が導出値と一致すること。不一致なら導出値を正として書き直すこと**
 - 一括削除が `CustomStamp` のみを対象とし、参照中の `StampAsset` を消さないこと
 - 削除で DB が先に更新され、`PendingFileDeletion` が同じトランザクションへ記録されること
 - `WorkingSourceRecord` の実体が欠けたとき、そのキュー項目が `reselectionRequired` へ遷移すること
@@ -315,6 +331,8 @@
 - HKDF による鍵の用途分離（`payload-signing-v1` / `source-provider-key-v1`）が実際に別の鍵を導くこと
 - **blob `missing` / 鍵 `missing` で新規台帳が作られること**
 - **blob `missing` / 鍵 `existing` でも新規台帳が作られ、復旧エラーにならないこと**
+- **`ProtectedBlobKey` から固定の内部ファイルへ解決され、再起動後も同じ blob を読めること**
+- **`ManagedFileID` を外部へ保存しなくても 3 種の blob を発見できること**
 
 ### 4.4 ファイル管理と保護（7.3 / 7.4）
 
@@ -326,10 +344,13 @@
 - `ManagedFileStore` が保存のたびに `isExcludedFromBackup` と `FileProtectionType` を設定し、読み返して検証すること
 - 属性の検証に失敗したファイルが完成扱いにならないこと
 - `StampAsset` の作成が atomic rename を経ること
+- **インポート Saga の手順 1 と 2 の間で終了した場合、処理用ファイルが孤児として起動時 GC で回収されること**
+- **DB 登録の完了前に、選択処理の成功が呼び出し元へ返らないこと**
 
 ### 4.5 メタデータ（7.5 / 6.4）
 
-- 写真ライブラリ登録日時の引き継ぎを、保存後に読み戻して検証すること。**権限がある場合とない場合の両方で検証する**
+- **読み取り権限あり** — 保存後に `PHAsset.creationDate` を読み戻し、元画像の登録日時と一致すること
+- **読み取り権限なし** — 偽 `PHAssetCreationRequest` または adapter spy で、**EXIF の日時が渡されたこと、または `creationDate` が設定されなかったこと**を検証する。`PHAsset` を取得しにいかないこと
 - **`contentFingerprint` の撮影日時が EXIF のみから決まり、PhotoKit 権限の有無で変わらないこと**
 - 出力ファイルから位置情報・機器情報・編集ソフト情報が除去されていること
 
@@ -436,9 +457,9 @@
 
 - 履歴一覧とサムネイルに未加工の顔が現れないこと
 - タスクスイッチャのスナップショットに編集中の未加工画面が残らないこと
-- アプリ専用領域に元画像の永続コピーが残らないこと
+- **書き出し完了・キャンセル・プロジェクト破棄・保持期限の終了のいずれかの後に、参照のない処理用元画像コピーが残らないこと**（処理中の `WorkingSourceRecord` は正当な保持であり、これに含めない）
 - 出力ファイルから位置情報・機器情報・編集ソフト情報が除去されていること
-- 写真ライブラリの登録日時が元画像から引き継がれていること
+- **写真ライブラリの登録日時が、取得できる場合に引き継がれ、取得不能時は未設定になること**（現在時刻を明示指定しないこと）
 - `ProjectSourceLocator` の平文 `localIdentifier` がログ・分析・診断のいずれにも出ないこと
 
 ---
