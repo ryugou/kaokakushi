@@ -36,7 +36,7 @@ Accepted
 ## Consequences
 
 - **利用者への明示が必須になる。** 設定画面と初回起動時に「履歴とマイスタンプはこの端末内にのみ保存されます。アプリの削除や端末の変更では引き継がれません」を記載する
-- SQLite の journal と super-journal を確実に除外するため、DB を専用ディレクトリへ置く配置が必要になる（[アーキテクチャ設計](../architecture.md) の 7.4）
+- SQLite の rollback journal を確実に除外するため、DB を専用ディレクトリへ置く配置が必要になる（[アーキテクチャ設計](../architecture.md) の 7.4）
 - **バックアップ方針と保護クラスが統一された結果、DB をファイル単位で分ける理由が消えた**（[ADR 0002](0002-grdb-and-single-database.md)）
 - `isExcludedFromBackup` は一般的なファイル操作で `false` へ戻りうるため、ディレクトリへ一度設定するだけでは足りない。**すべてのファイル生成を `ManagedFileStore` へ通し、保存のたびに設定して読み返す**（[アーキテクチャ設計](../architecture.md) の 7.3）
 - 再インストール後は `UsageLedger` が `Missing` となり、新規台帳が作られる。無料枠が戻ることは仕様 14.5 が許容している

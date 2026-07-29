@@ -45,8 +45,11 @@ protocol ExportSagaStore: Sendable {
     /// 手順 7。単一 DB トランザクションで実行する
     func finalizeExport(_ input: FinalizeExportInput) async throws
 
-    /// 起動時復旧の入力（5 章）
+    /// 起動時復旧の入力（5 章）。復旧の開始前に一度だけ読む
     func loadRecoverySnapshot() async throws -> RecoverySnapshot
+
+    /// 復旧の完了後に実行する（5 章の手順 5）
+    func checkForeignKeys() async throws -> [ForeignKeyViolation]
 
     /// ロールバックの手順 3〜5 を 1 トランザクションで実行する
     func rollbackCommit(_ exportID: ExportID) async throws
@@ -79,9 +82,9 @@ struct LedgerTransaction<R: Sendable>: Sendable {
 struct RecoverySnapshot: Sendable {
     let commits: [SignedCommitRow]
     let outputRecords: [OutputRecord]
+    let deliveryAttempts: [DeliveryAttempt]            // 8.0
     let nonTerminalQueueItems: [ExportQueueItemSnapshot]
     let workingSources: [WorkingSourceRecord]
-    let foreignKeyViolations: [ForeignKeyViolation]   // PRAGMA foreign_key_check の結果
 }
 
 /// 署名検証はまだ通っていない。rowID は破棄のためだけに使う（6 章）
@@ -89,6 +92,23 @@ struct SignedCommitRow: Sendable {
     let rowID: Int64
     let rawColumns: ExportCommitColumns
     let signature: Data
+}
+
+/// 検証前の生の列。ExportCommit へデコードしない
+struct ExportCommitColumns: Sendable {
+    let exportID: Data          // 16 バイトとして読めなければ不正
+    let projectID: Data
+    let batchID: Data?
+    let sourceID: Data
+    let outputFileKind: UInt32?
+    let outputFileID: Data?
+    let authorization: Data     // 正準バイト列のまま
+    let verifiedOutput: Data?
+    let finalizedAtMillis: Int64?
+    let finalizedPeriod: Data?
+    let intent: Data?
+    let applied: Data?
+    let state: UInt32
 }
 
 struct ExportQueueItemSnapshot: Sendable {
@@ -111,7 +131,22 @@ struct ForeignKeyViolation: Sendable {
 
 **`SignedCommitRow` は検証前の生の列を持ちます。** `ExportCommit` としてデコードしてしまうと、署名不正行のフィールドを使う経路ができます（6 章）。検証を通った行だけが `ExportCommit` になります。
 
-`foreignKeyViolations` は `PRAGMA foreign_key_check` の結果です。**単一 `app.db` では外部キーが実制約として効くため、違反は通常発生しません。** 検出した場合は復旧エラーとし、自動修復しません。
+**`ExportCommitColumns` は「まだ信用できない値」を表す型です。** すべて生のバイト列か固定幅の整数であり、`ProjectID` や `ExportID` へデコードしません。デコードできる型にすると、署名検証を通す前にフィールドを使う経路ができます（6 章）。
+
+**外部キーの検査は `RecoverySnapshot` に含めません。** 検査は未完了コミットの復旧後に行うため（5 章の手順 5）、復旧前に読んだ snapshot へ結果を入れられません。`checkForeignKeys()` を別に呼びます。**単一 `app.db` では外部キーが実制約として効くため、違反は通常発生しません。** 検出した場合は復旧エラーとし、自動修復しません。
+
+##### `finalizeExport` は入力を信用しない
+
+`FinalizeExportInput` は完成済みのレコードを呼び出し側から受け取りますが、**実装はそれをそのまま書きません。** トランザクション内で、同じ `exportID` の保存済みコミットについて次を再確認します。
+
+| 確認 | 不成立なら |
+| --- | --- |
+| `state == readyToPublish` | throw。手順 7 を実行しない |
+| HMAC 検証を通る | throw |
+| `projectID` / `batchID` / `outputFile` が入力と一致する | throw |
+| `verifiedOutput` が入力の `outputByteSize` / `outputSHA256` と一致する | throw |
+
+**確認を通ったら、保存済みコミットの値から `OutputRecord` を導出します。** 入力の値をそのまま採用しません。入力を信用すると、`Application` 側のバグや改変が DB の最終状態へ直接反映されます。
 
 そのほかのポート（`ManagedFileStore` / `CryptoKeyStore` / `ProtectedBlobStore` / `CrashReporter` / 履歴削除の原子的操作）は [アーキテクチャ設計](architecture.md) が正本です。
 
@@ -352,7 +387,7 @@ struct ExportCommit: Sendable {
     let projectID: ProjectID
     let batchID: BatchID?
     let sourceID: SourceID
-    let outputFile: OutputFileRef
+    let outputFile: OutputFileRef?          // prepared では nil。手順 1 で生成する
     let authorization: ExportAuthorization  // 開始前に固定する
     let verifiedOutput: VerifiedOutput?     // prepared では nil。fileVerified 以降は必須
     let finalizedAt: Date?                  // finalizing で確定する usageNow
@@ -395,12 +430,16 @@ enum ExportCommitState: Sendable {
 | 状態 | 必須フィールド |
 | --- | --- |
 | `prepared` | `authorization` のみ |
-| `fileVerified` | 上記 ＋ `verifiedOutput` |
+| `fileVerified` | 上記 ＋ **`outputFile`** ＋ `verifiedOutput` |
 | `finalizing` | 上記 ＋ `finalizedAt` / `finalizedPeriod` / `intent` |
 | `accountingCommitted` | 上記 ＋ `applied` |
 | `readyToPublish` | 上記 ＋ ファイル再検証済み |
 
 **`readyToPublish` は成果物がまだ非公開で、コミット行も残っている状態です。**
+
+**`outputFile` は `prepared` では `nil` です。** `ManagedFileStore.createFile` はファイルの作成が完了してからでないと `ref` を返さないため（[アーキテクチャ設計](architecture.md) の 7.3）、手順 0 の時点で参照を作れません。手順 1 で生成し、手順 2 で `verifiedOutput` と同時に保存します。
+
+**`prepared` で落ちた場合、削除すべき出力ファイルは存在しません。** 手順 1 の途中で作られた一時ファイルは、どのコミット行からも参照されないため起動時の孤児 GC が回収します。
 
 **「適用しようとする内容」と「実際に適用された結果」を分けます。** 台帳を更新する前に「実際に新規追加した値」を確定することはできません。ただし `AccountingApplied` を DB へ書く前に落ちる可能性があるため、**これだけを根拠にロールバックできません。** 台帳側の `ownerExportID` が最終的な判断材料です。
 
@@ -443,7 +482,7 @@ enum ExportCommitState: Sendable {
 | −1 | `transact` の結果として `ExportStartDecision` を得る。`.blocked` なら以降へ進まない | — | — |
 | 0 | `ExportCommit` を保存（`verifiedOutput` / `intent` / `finalizedAt` はすべて `nil`）。**保存に失敗したら補償トランザクションで予約・lease・未参照 `SourceRecord` を削除し、ゲートを解放する** | DB | **`prepared`** |
 | 1 | 一時ファイルを生成し、サイズ・SHA-256・デコードを検証して `VerifiedOutput` を得る | ファイルシステム | — |
-| 2 | `verifiedOutput` を確定して保存（`finalizedAt` はまだ `nil`） | DB | **`fileVerified`** |
+| 2 | **`outputFile` と** `verifiedOutput` を確定して保存（`finalizedAt` はまだ `nil`） | DB | **`fileVerified`** |
 | 3 | **`finalizedAt` を決め、`intent` を確定して**保存 | DB | **`finalizing`** |
 | 4 | `UsageLedger` を冪等に**暫定適用**する。**予約の `trialEntries` への移動と `SourceLease` の削除も同じ台帳トランザクション内** | ProtectedBlobStore | — |
 | 5 | `applied` を埋めて保存 | DB | **`accountingCommitted`** |
@@ -558,10 +597,24 @@ struct OutputRecord: Sendable {
     let state: OutputState
     let generatedAt: Date                   // ExportCommit.finalizedAt からコピー
     let expiresAt: Date                     // finalizedAt + 24h
+
+    // 再起動後の受け渡しに必要。手順 7 で確定値をコピーする
+    let format: ImageFormat
+    let suggestedCreationDate: Date?
 }
 ```
 
 **パスを DB へ直接持ちません。** パス文字列を保存すると、DB を書き換えるだけで `../` を含む値を注入でき、期限切れ削除の処理に別のアプリ内部ファイルを消させる経路ができます。
+
+**受け渡しに必要な値も `OutputRecord` が持ちます。** 起動時復旧は未受け渡し出力を復元し、その後 `MediaSaver` または `SharePresenter` へ `OutputFile` を渡します（[画像処理](image-pipeline.md)）。`format` と `suggestedCreationDate` が無ければ `OutputFile` を組み立てられません。
+
+**`Project` の現在値や出力ファイルの再解析から復元しません。**
+
+| 復元しようとする値 | 復元できない理由 |
+| --- | --- |
+| `format` | `Project` の `ExportSetting` は書き出し後に変更されうる |
+| `suggestedCreationDate` | メタデータ設定が「日時を保持しない」なら出力ファイルに残っていない |
+| 同上 | 写真ライブラリの登録日時はそもそも出力ファイルへ書かれない |
 
 **期限を `OutputRecord` 自身が持ちます。** `ExportCommit` は完了後に削除するため、**コミットが消えたあとも単独で期限を判定できる**必要があります。判定規則は 6.2 にあります。
 
@@ -641,8 +694,9 @@ sourceLeases      のうち exportID == 対象 exportID の要素を削除
 | 0 | **`ProtectedBlobStore` のスキーマ移行を実行する** | −1 の完了 |
 | 1 | `UsageLedger` を読み込み、検証し、必要なら修復する | 0 の完了 |
 | 2 | `ExportCommit` を読み込み、行ごとの署名を検証する | 0 の完了 |
+| 2.5 | **手順 1 で台帳を修復した場合、全非終端コミットを破棄する**（5.2） | 1・2 の完了 |
 | 3 | **有効なコミットに対応しない `trialReservations` と `sourceLeases` を削除する** | 1・2 の完了 |
-| 4 | 有効な未完了コミットを復旧する（5.2） | 1・2・3 の完了 |
+| 4 | 有効な未完了コミットを復旧する（5.3） | 1・2・3・2.5 の完了 |
 | 5 | `PRAGMA foreign_key_check` で外部キー違反が無いことを確認する | 4 の完了 |
 | 6 | `PendingFileDeletion` と孤児ファイルを回収する | 5 の完了 |
 | 7 | 未受け渡し出力を復元する | 5 の完了 |
@@ -679,14 +733,36 @@ sourceLeases      のうち exportID == 対象 exportID の要素を削除
 
 この規則は `ProtectedBlobStore` の payload（手順 0）にも同じく適用します。
 
-### 5.2 状態別の復旧
+### 5.2 台帳を修復した起動では再開しない
+
+**`UsageLedger` の HMAC 不一致で修復が走った起動では、署名が正常な未完了コミットも再開できません。**
+
+修復済み台帳は `sourceRecords` / `sourceLeases` / `grants` / `trialEntries` / `trialReservations` をすべて空にします（[アーキテクチャ設計](architecture.md) の 6.3）。一方 `ExportCommit` が持つのは `sourceID` だけで、**元の alias を持ちません。** 手順 4 で grant や `TrialEntry` を再追加すると、次の不変条件を満たせません。
+
+> `grants` / `trialEntries` / `trialReservations` / `sourceLeases` の `sourceID` は `sourceRecords` に存在する。
+
+**修復が走った起動では、全非終端コミットを破棄します。**
+
+| 対象 | 操作 |
+| --- | --- |
+| 非終端の `ExportCommit` | **すべて削除する**（署名の有効・無効を問わない） |
+| 出力ファイル | 参照が消えるため、起動時の孤児 GC が回収する |
+| `UsageLedger` | **触らない。** 既に修復済みで、整合性封鎖が掛かっている |
+| キュー項目 | `failed`（`isRetryable == true`）へ遷移させる |
+| 月間枠・トライアル | **整合性封鎖のまま。** 復元も払い戻しもしない |
+
+**`ExportCommit` へ alias のスナップショットを持たせて `SourceRecord` を再構築する案は採りません。** コミット行に素材識別値を持たせると、署名不正行の扱い（6 章）が「フィールドを一切使わない」と両立しなくなります。修復はそもそも改ざんの疑いがある状態であり、**進行中の書き出しを完了させる利得より、台帳の一貫性を優先します。**
+
+この分岐は手順 2 の直後（手順 4 の復旧より前）に置きます。障害注入テストの対象です。
+
+### 5.3 状態別の復旧
 
 | 中断位置 | 復旧 |
 | --- | --- |
 | `prepared` | 一時ファイルを削除し、**トライアル予約・`SourceLease`・未参照になった `SourceRecord`** を取り消してコミットを破棄する。生成未完了なので消費しない |
 | `fileVerified` | ファイルが健在なら**手順 3 からやり直す**（新しい `finalizedAt` を決める）。失われていればロールバック |
 | `finalizing` | 暫定適用があれば冪等に取り消し、**手順 3 からやり直す** |
-| `accountingCommitted` | **出力ファイルを再検証**する（5.3）。正常なら暫定適用を取り消し、**手順 3 からやり直す** |
+| `accountingCommitted` | **出力ファイルを再検証**する（5.4）。正常なら暫定適用を取り消し、**手順 3 からやり直す** |
 | `readyToPublish` | 出力ファイルを `verifiedOutput` と照合する。正常なら暫定適用を取り消し、**手順 3 からやり直す**。不一致ならロールバック |
 | 署名検証に失敗 | 復旧エラー。自動破棄しない（6 章） |
 
@@ -694,7 +770,7 @@ sourceLeases      のうち exportID == 対象 exportID の要素を削除
 
 **`readyToPublish` を無条件に削除しません。** 手順 6 と 7 の間で落ちた可能性があり、**コミット行だけが復旧の手がかり**だからです。この時点では `OutputRecord` がまだ無いため、コミットを消すと出力が孤児ファイルになります。
 
-### 5.3 `accountingCommitted` からの復旧
+### 5.4 `accountingCommitted` からの復旧
 
 台帳は暫定適用済みなので、**ファイルが失われていれば「消費したのに受け取れない出力」になります。**
 
@@ -785,7 +861,7 @@ sourceLeases      のうち exportID == 対象 exportID の要素を削除
 | 元画像 | `WorkingSourceRecord` は書き出し完了時に削除される（[画像処理](image-pipeline.md)） |
 | `RenderSpec` | `OutputRecord` は保持しない。`Project` 側は編集で変化しうる |
 | `ExportSetting`（形式・品質・メタデータ） | `OutputRecord` は保持しない |
-| `OutputFile.format` / `suggestedCreationDate` | `OutputRecord` に無く、受け渡しに必要 |
+| `OutputFile.format` / `suggestedCreationDate` | `OutputRecord` が持つようになった（3.5）。ただし他が揃わない |
 
 再生成を成立させるには、**出力の期限まで不変のスナップショット**（正確な `RenderSpec` と `ExportSetting`、元画像の再取得手段または処理用コピー、出力形式と登録日時、再取得権限が無い場合の利用者操作）を保持する必要があります。
 
@@ -800,6 +876,51 @@ v2 で保持コストを許容できる場合は、不変のスナップショ�
 - OS 共有へ渡す（`SharePresenter`）
 
 いずれも任意であり、何度実行しても追加消費しません。失敗した場合は生成済み出力を保持したまま再試行でき、**再書き出しは不要です。**
+
+### 8.0 写真ライブラリ保存の結果不明
+
+**PhotoKit と `app.db` は同一トランザクションにできません。** 次の中断点が残ります。
+
+```
+PhotoKit への保存が成功
+  → OutputRecord を delivered へ更新する前にプロセスが終了
+  → 再起動後は generated に見える
+  → 再保存すると写真ライブラリに重複する
+```
+
+**exactly-once は保証できません。** 保証できないことを明示し、**自動再試行で重複を作らない**設計にします。
+
+```swift
+/// 保存の試行中を表す。runtime 側のテーブル
+struct DeliveryAttempt: Sendable {
+    let exportID: ExportID
+    let startedAt: Date
+}
+```
+
+| 順 | 操作 | 保存先 |
+| --- | --- | --- |
+| 1 | `DeliveryAttempt` を記録する | DB |
+| 2 | `MediaSaver.saveToPhotoLibrary` を実行する | PhotoKit |
+| 3 | 成功したら、`OutputRecord` を `delivered` へ更新し `DeliveryAttempt` を削除する（**同一トランザクション**） | DB |
+| 4 | 失敗したら `DeliveryAttempt` を削除する。`generated` のまま再試行できる | DB |
+
+**起動時に `DeliveryAttempt` が残っていれば、手順 2 と 3 の間で終了しています。**
+
+| 状態 | 扱い |
+| --- | --- |
+| `DeliveryAttempt` が残っている | **`deliveryUnknown`**。`generated` でも `delivered` でもない |
+| 自動再保存 | **行わない**（重複を作りうる） |
+| 自動削除 | 行わない。出力は保持する |
+| 利用者への提示 | 写真ライブラリを確認したうえで、保存済みなら破棄、未保存なら再試行を選ばせる |
+
+```swift
+enum OutputState: Sendable { case generated, deliveryUnknown, delivered, discarded }
+```
+
+`deliveryUnknown` は**未受け渡しとして扱います。** 24 時間の保持対象であり、完了画面の離脱確認にも数えます。**受け取れていない可能性がある側へ倒します**（`.unknown` の共有結果と同じ方針）。
+
+OS 共有（`SharePresenter`）にはこの経路がありません。結果が同期的に返るためです。
 
 ```swift
 enum ShareResult: Sendable { case completed, canceled, unknown, failed }

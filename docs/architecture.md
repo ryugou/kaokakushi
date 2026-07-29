@@ -542,9 +542,18 @@ struct Entitlement: Sendable, Equatable {
     let plan: Plan               // free / standard / pro
     let status: PlanStatus       // active / grace / pending / expired / revoked
     let expiresAt: Date?
-    let lastVerifiedAt: Date
+    let lastVerifiedAt: Date     // 権限を検証できた時刻
+}
+
+/// ProtectedBlobStore へ保存する購入状態キャッシュ
+struct SubscriptionState: Sendable, Equatable {
+    let entitlement: Entitlement
+    let willRenew: Bool
+    let fetchedAt: Date          // RevenueCat から取得に成功した時刻
 }
 ```
+
+**`fetchedAt` と `Entitlement.lastVerifiedAt` は別の値です。** 前者はキャッシュを書いた時刻、後者は権限を検証できた時刻で、オフライン時にキャッシュを読み直しても後者は動きません。
 
 要件は 3 点です。
 
@@ -672,7 +681,33 @@ Free 範囲のプロジェクトとは、モザイク・ぼかし・黒塗り・
 - **有料機能の新規利用にのみ契約が必要**とする
 - **データそのものは削除しない**（仕様 12.6）。再契約時にカスタムスタンプと一括設定プリセットをそのまま再利用できる
 
-**「変更せず再書き出し」は、アプリ提供の追加スタンプとカスタムスタンプを同一に扱います。** 規則を分けると「どちらのスタンプを使ったか」で挙動が変わり、説明できなくなります。判定はプロジェクトの設定内容のハッシュ（6.4）の一致で行います。有料スタンプを含むプロジェクトにおいて、エフェクト・強度・領域・出力設定のいずれかを変更した時点で Standard 以上が必要になります。Free 範囲のプロジェクトではこの判定を行いません。
+**「変更せず再書き出し」は、アプリ提供の追加スタンプとカスタムスタンプを同一に扱います。** 規則を分けると「どちらのスタンプを使ったか」で挙動が変わり、説明できなくなります。有料スタンプを含むプロジェクトにおいて、エフェクト・強度・領域・出力設定のいずれかを変更した時点で Standard 以上が必要になります。Free 範囲のプロジェクトではこの判定を行いません。
+
+##### 比較対象を署名済み台帳へ持つ
+
+**現在の設定ハッシュを何と比べるかが要ります。** 比較対象は「最後に正常書き出しした設定」ですが、**未署名の DB 行へ置くと、書き換えるだけで変更後のプロジェクトを「変更なし」にできます。**
+
+`UsageLedger` と同じ `ProtectedBlobStore` の署名対象へ持たせます。
+
+```swift
+/// UsageLedger の一部。正常書き出しで確定した設定を素材ごとに保持する
+struct ExportedSettingsEntry: Sendable, Equatable {
+    let projectID: ProjectID
+    let settingsHash: ProjectSettingsHash
+    let exportedAt: Date
+}
+```
+
+| 契機 | 操作 |
+| --- | --- |
+| 手順 7 の完了 | **同じ台帳トランザクションでは書けない**ため、手順 4 の `AccountingIntent` へ含めて暫定適用し、手順 7 の完了で確定扱いとする |
+| 判定 | `currentSettingsHash == entry.settingsHash` |
+| entry が無い | **「変更せず再書き出し」の対象にしない。** Standard 以上を要求する |
+| `Project` の削除 | 同じ台帳トランザクションで entry も削除する |
+
+**最初の正常書き出し記録が無いプロジェクトは対象外です。** 有料スタンプを含むプロジェクトが Free 環境で初めて現れる経路（バックアップ復元など）は存在しないため（7.4）、実際には降格前に必ず 1 回は書き出しています。
+
+要素数は `grants` などと同じく有界です。履歴の保存期間を超えた `Project` の entry は `rollPeriod` で整理します。
 
 **降格したという事実は、クォータ判定に影響しません。** 判定に使うのは素材の同一性と経過時間だけです。
 
@@ -1086,8 +1121,8 @@ struct SourceIdentity: Sendable, Hashable {
     /// 取得できない場合（ファイル取り込み等）は nil
     let providerAssetKeyHash: String?
 
-    /// ファイルサイズ・全体 SHA-256・撮影日時から算出（正準スキーマ）
-    let contentFingerprint: String
+    /// ファイル全体の SHA-256（正準スキーマ 5.1）
+    let contentFingerprint: ContentFingerprint
 }
 ```
 
@@ -1481,6 +1516,23 @@ case .oneByOne:
 
 1 枚ずつ確認では `normal` の写真も確認を待っているため `review_required` になります。「警告あり」と定義すると、未確認の `normal` 写真が利用者の操作を待っているのにキュー上はそう見えません。
 
+##### 開始時の設定を固定する
+
+**実行中のバッチは、開始時のリモート設定で動きます**（[運用](operations.md) の 2.2）。設定が途中で変わっても、枚数上限や並列数が動きません。
+
+```swift
+struct BatchPolicySnapshot: Sendable, Equatable {
+    let configVersion: Int64
+    let batchSizeLimit: Int32
+    let trialCreditCount: Int32
+    let concurrencyLimit: Int32
+}
+```
+
+`Batch` の行が保持し、**再起動後も同じ値を使います。** リモート設定を読み直して適用すると、復元したバッチの上限が実行中に変わります。
+
+新しいバッチの作成時に、その時点の `RemoteConfig` から作ります。
+
 その他の規則は仕様 16.5 / 16.7 / 16.8 に従います。
 
 - 1 バッチ最大 50 枚
@@ -1518,8 +1570,15 @@ struct RegionID:    Sendable, Hashable { let rawValue: UUID }
 struct SourceID:    Sendable, Hashable { let rawValue: UUID }   // 素材の正規 ID（6.4）
 struct FaceTrackID: Sendable, Hashable { let rawValue: UUID }
 
-/// 出力へ影響する設定の正準ハッシュ（正準スキーマ 5.2）
-struct ProjectSettingsHash: Sendable, Hashable { let rawValue: Data }   // SHA-256 の 32 バイト
+/// 認可用。出力へ影響する全設定の正準ハッシュ（正準スキーマ 5.2）
+struct ProjectSettingsHash: Sendable, Hashable { let bytes: Data }   // 32 バイト
+
+/// プレビュー確認用。見た目に影響する値だけ（正準スキーマ 5.2）
+struct PreviewRenderHash: Sendable, Hashable { let bytes: Data }     // 32 バイト
+
+/// 素材の内容ハッシュ（正準スキーマ 5.1）
+struct ContentFingerprint: Sendable, Hashable { let bytes: Data }    // 32 バイト
+struct StampAssetHash: Sendable, Hashable { let bytes: Data }        // 32 バイト
 ```
 
 **`FaceTrackID` も `UUID` です。** 自動検出は `observation.uuid` をそのまま使い、手動領域はアプリが採番します。文字列にすると 2 つの出所で表現が揺れます。
@@ -1580,7 +1639,7 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 
 | テーブル | 備考 |
 | --- | --- |
-| `Project` | 仕様 19.1。`projectRevision` と再編集用の `ProjectSourceLocator` を持つ（[画像処理](image-pipeline.md)）。**ここにのみ平文の `localIdentifier` が存在する** |
+| `Project` | 仕様 19.1。`projectRevision`（下記）と再編集用の `ProjectSourceLocator` を持つ（[画像処理](image-pipeline.md)）。**ここにのみ平文の `localIdentifier` が存在する** |
 | `FaceTrack` | 仕様 19.2。手動領域は `createdManually = true` |
 | `EffectSetting` | 仕様 19.4 |
 | `ExportSetting` | 仕様 19.5 |
@@ -1588,8 +1647,9 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `StampAsset` | プロジェクトが参照する不変の画像実体のメタデータ。内容ハッシュを主キーとする（7.5） |
 | `ProjectStampAsset` | プロジェクトと `StampAsset` の対応（7.5） |
 | `ExportRecord` | 仕様 19.7。`batchID` を追加 |
-| `Batch` | バッチ単位の履歴 |
+| `Batch` | バッチ単位の履歴。`BatchPolicySnapshot` を持つ（6.5） |
 | `BatchPreset` | 一括設定プリセット |
+| `DeliveryAttempt` | 写真ライブラリ保存の試行中を表す（[書き出し Saga](export-saga.md) の 8.0） |
 | `ExportCommit` | 書き出しのコミットジャーナル。行に HMAC を付ける（[書き出し Saga](export-saga.md)） |
 | `OutputRecord` | 写真ごとの出力状態。`exportID` でコミットと対応づける |
 | `ExportQueueItem` | 一括処理のキュー状態（6.5） |
@@ -1616,6 +1676,25 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 
 **将来バックアップを実装する場合も分割は不要です。** [ADR 0003](adr/0003-local-only-data-and-backup-policy.md) のとおり、OS による生ファイルのバックアップではなく検証可能なアーカイブとして書き出す設計を採るため、**対象テーブルを選ぶだけで足ります。**
 
+##### `projectRevision` の増加規則
+
+出力へ影響する値は `Project` 以外のテーブルにもあります。**「`Project` の変更ごとに増える」だけでは、`EffectSetting` だけを書き換えても revision が動かない実装が成立します。**
+
+> **出力・検出結果・レビュー結果・プレビュー結果のいずれかへ影響する子行の作成・更新・削除は、必ず同一 DB トランザクションで `Project.projectRevision` を増加させる。**
+
+対象の子テーブルです。
+
+| テーブル | 影響する先 |
+| --- | --- |
+| `FaceTrack` | 検出結果・プレビュー |
+| `EffectSetting` | プレビュー・出力 |
+| `ExportSetting` | 出力 |
+| `ProjectStampAsset` | プレビュー・出力 |
+
+**編集操作を個別 Repository へ分散させません。** プロジェクト変更コマンドへ集約し、そのコマンドだけが子行と `projectRevision` を同時に更新します。個別の `update` を公開すると、revision の更新を忘れた経路ができます。
+
+`detectionRevision` は再検出でのみ増え、`projectRevision` とは独立です（6.1）。
+
 ##### 一意制約と外部キー
 
 **不変条件をアプリのコードだけで守りません。** DB 制約として固定できるものは固定します。
@@ -1636,12 +1715,25 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | 子 | 親 | 削除時 |
 | --- | --- | --- |
 | `OutputRecord.projectID` | `Project` | **RESTRICT**（未受け渡し出力があるプロジェクトを消さない。7.5） |
+| `OutputRecord.batchID` | `Batch` | SET NULL |
 | `ExportCommit.projectID` | `Project` | **RESTRICT** |
+| `ExportCommit.batchID` | `Batch` | SET NULL |
 | `WorkingSourceRecord.projectID` | `Project` | CASCADE |
+| `FaceTrack.projectID` | `Project` | CASCADE |
+| `EffectSetting.projectID` | `Project` | CASCADE |
+| `EffectSetting.faceTrackID` | `FaceTrack` | CASCADE |
+| `ExportSetting.projectID` | `Project` | CASCADE |
+| `ExportQueueItem.projectID` | `Project` | CASCADE |
 | `ExportQueueItem.batchID` | `Batch` | CASCADE |
 | `ExportRecord.projectID` | `Project` | CASCADE |
+| `ExportRecord.batchID` | `Batch` | SET NULL |
 | `ProjectStampAsset.projectID` | `Project` | CASCADE |
 | `ProjectStampAsset.assetHash` | `StampAsset` | RESTRICT |
+| `CustomStamp.assetHash` | `StampAsset` | RESTRICT |
+
+**`batchID` を `SET NULL` にするのは、バッチ履歴を消しても出力と書き出し記録を残すためです。** バッチは集約単位であり、個々の出力の存在条件ではありません。
+
+**宣言していない参照は `PRAGMA foreign_key_check` で検出できません。** 上の表が外部キーの全体です。新しい参照を追加するときは、必ずこの表へ加えます。
 
 **`RESTRICT` を使うのは、削除可否の判定（7.5）を DB 側でも二重に担保するためです。** アプリ側の判定を通り抜けた削除は制約違反として失敗します。
 
@@ -1654,12 +1746,20 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | 項目 | 規約 |
 | --- | --- |
 | 接続 | **`DatabaseQueue` を 1 つだけ**使う |
-| `journal_mode` | **`DELETE` / `TRUNCATE` / `PERSIST` のいずれか。WAL を使わない**（下記） |
+| `journal_mode` | **`DELETE`**（下記）。`TRUNCATE` / `PERSIST` / `WAL` を使わない |
 | `synchronous` | **`EXTRA`** |
 | `foreign_keys` | **`ON`** |
 | 起動時検査 | `journal_mode` / `synchronous` / `foreign_keys` を読み返して検証する |
 
-**WAL を使わない理由は、サイドカーファイルを増やさないことです。** WAL は `-wal` と `-shm` を DB と同じディレクトリへ作ります。これらにも**バックアップ除外とデータ保護クラスを個別に設定・検証する必要**が生じ、7.3 の「すべてのファイル生成を `ManagedFileStore` へ通す」から外れた経路が 2 つ増えます。rollback journal も同様のサイドカーを作りますが、`DELETE` ならトランザクション終了時に消えるため、常時存在するファイルが増えません。
+**`DELETE` へ固定するのは、常時存在するサイドカーファイルを作らないためです。**
+
+| モード | サイドカー |
+| --- | --- |
+| **`DELETE`** | **トランザクション終了時に消える** |
+| `TRUNCATE` / `PERSIST` | journal ファイルが**残り続ける** |
+| `WAL` | `-wal` と `-shm` が**常時存在する** |
+
+残るファイルには**バックアップ除外とデータ保護クラスを個別に設定・検証する必要**が生じ、7.3 の「すべてのファイル生成を `ManagedFileStore` へ通す」から外れた経路が増えます。`DELETE` ならその経路自体が存在しません。
 
 本アプリの DB アクセスは書き出しの前後に集中し、同時読み書きの負荷が高くないため、WAL の並行性は必要ありません。
 
@@ -1919,7 +2019,7 @@ struct StampAssetFileRef: Sendable, Hashable { let ref: ManagedFileRef }    // .
 
 ##### 配置
 
-**SQLite の journal と super-journal を確実に除外するため、DB をディレクトリで分けます。** これらは DB と同じディレクトリに作られるため、DB ファイルだけを指定しても覆えません。
+**SQLite の rollback journal を確実に除外するため、DB を専用ディレクトリへ置きます。** これらは DB と同じディレクトリに作られるため、DB ファイルだけを指定しても覆えません。
 
 ```
 Library/Application Support/db/app.db
@@ -1932,7 +2032,7 @@ Library/Caches/stamp-thumbnails/
 tmp/raster/
 ```
 
-**DB を専用ディレクトリへ置くのは、rollback journal と super-journal を確実に覆うためです。** これらは DB と同じディレクトリに作られるため、ファイル単位の指定では届きません。
+**DB を専用ディレクトリへ置くのは、rollback journal と一時 DB ファイルを確実に覆うためです。** これらは DB と同じディレクトリに作られるため、ファイル単位の指定では届きません。
 
 **処理中ファイルを `tmp/` に置きません。** `tmp/` は OS がいつでも削除でき、再起動のたびにキューの復元が失敗します（[画像処理](image-pipeline.md)）。`raster/` は `tmp/` のままです。1 回の `render` 呼び出し内でのみ有効であり、消えて困る状況が存在しません。
 
@@ -1971,7 +2071,7 @@ tmp/raster/
 | **`ProtectedBlobStore`** | **`.complete`** |
 | **HMAC マスター鍵**（Keychain） | **`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`** |
 
-**アプリ全体の既定を `.complete` にします。** 設定漏れが「保護が弱い」方向へ倒れないためです。SQLite の rollback journal、super-journal、一時 DB ファイルにも同じ保護が必要で、これらは自動生成されるため**ディレクトリの既定保護クラス**で覆います。
+**アプリ全体の既定を `.complete` にします。** 設定漏れが「保護が弱い」方向へ倒れないためです。SQLite の rollback journal と一時 DB ファイルにも同じ保護が必要で、これらは自動生成されるため**ディレクトリの既定保護クラス**で覆います。
 
 **DB を下げる理由がありません。** 起動時復旧の最初の手順は「保護データが利用可能になるまで待つ」であり、その後に DB を開きます（[書き出し Saga](export-saga.md) の起動時復旧）。v1 は `BGProcessingTask` を使わずフォアグラウンド継続を前提とするため、**ロック中に DB を開く必要が現在の設計にはありません。**
 

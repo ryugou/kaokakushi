@@ -128,7 +128,7 @@ struct RenderRegionSpec: Sendable, Equatable {
 /// 組み込みスタンプとカスタムスタンプを文字列で混ぜない
 enum StampSource: Sendable, Hashable {
     case builtIn(code: String)
-    case custom(contentHash: String)
+    case custom(assetHash: StampAssetHash)   // 32 バイト固定（正準スキーマ 5.1）
 }
 
 enum RenderOpSpec: Sendable, Equatable {
@@ -807,7 +807,7 @@ struct WorkingSourceRecord: Sendable {
 | 1 | `ManagedFileStore` で取り込みファイルを作成する（ピッカーの生データ） | ファイルシステム | 選択を失敗として返す。副作用なし |
 | 2 | `contentFingerprint` と EXIF を読む | — | 同上 |
 | 3 | **向きを正規化した原寸ファイルを作成する** | ファイルシステム | 手順 6 へ |
-| 4 | DB トランザクションで `Project`・キュー項目・`WorkingSourceRecord`（**正規化ファイルを指す**）を作成する | DB | 手順 6 へ |
+| 4 | DB トランザクションで `Project`・キュー項目・`WorkingSourceRecord`（**正規化ファイルを指す**）を作成し、**台帳トランザクションで `WorkingSourceSnapshot` を追加する**（下記） | DB / ProtectedBlobStore | 手順 6 へ |
 | 5 | **取り込みファイルを削除する**（`PendingFileDeletion` 経由） | ファイルシステム | 起動時 GC へ委ねる |
 | 6 | 失敗したら、作成済みのファイルを削除するか `PendingFileDeletion` へ追加する | ファイルシステム / DB | 起動時 GC へ委ねる |
 | 7 | **手順 4 の完了後にのみ、選択処理の成功を呼び出し元へ返す** | — | — |
@@ -819,6 +819,45 @@ struct WorkingSourceRecord: Sendable {
 **手順 1〜3 の途中で終了した場合、ファイルはどの `WorkingSourceRecord` からも参照されません。** 起動時の孤児 GC が回収します。**「ファイルはあるが行が無い」は容量を食うだけで、復旧不能な損失を生みません。**
 
 逆順（行を先に作る）は採りません。実体が無い `WorkingSourceRecord` を参照するキュー項目ができ、復元時に必ず `paused(.sourceReselectionRequired)` へ落ちます。**失っても復旧できないほうを避ける**という規則（[アーキテクチャ設計](architecture.md) の DB とファイルの更新順序）と同じ向きです。
+
+##### 素材スナップショットを署名して保存する
+
+**`WorkingSourceRecord` だけでは、再起動後に `sourceID` を解決できません。** 選択・検出のあと書き出し開始前に終了すると、次がすべて失われます。
+
+| 失われる値 | 影響 |
+| --- | --- |
+| `SourceIdentity`（`providerAssetKeyHash` / `contentFingerprint`） | 正規 `sourceID` を解決できない |
+| `SourceRepresentation` | 診断の区分値が欠ける |
+| EXIF 由来の撮影日時 | `suggestedCreationDate` を組み立てられない |
+| 写真ライブラリの登録日時 | 同上 |
+
+**正規化済みファイルから再計算できません。** `contentFingerprint` は取り込みファイルから計算する規約であり、正規化後から計算すれば別物になります。取り込みファイルは手順 5 で削除済みです。
+
+**これらを未署名の DB 行へ置けません。** `SourceIdentity` はクォータとトライアルの認可に使うため、**書き換えれば「別素材」を装って無料枠を回避できます。**
+
+`ProtectedBlobStore` の署名対象へ持たせます。
+
+```swift
+/// UsageLedger の一部。インポート時に確定し、書き出しの完了で削除する
+struct WorkingSourceSnapshot: Sendable, Equatable {
+    let projectID: ProjectID
+    let identity: SourceIdentity
+    let representation: SourceRepresentation
+    let capturedAtUTCMillis: Int64?        // EXIF 由来（正準スキーマ 5.1.1）
+    let libraryCreationDate: Date?         // PHAsset 由来。権限がある場合のみ
+}
+```
+
+| 契機 | 操作 |
+| --- | --- |
+| インポート Saga の手順 4 | **同じ台帳トランザクション**で追加する |
+| 書き出しの手順 −2 | この snapshot から `sourceID` を解決する |
+| 書き出しの完了（手順 7）またはプロジェクト破棄 | 台帳トランザクションで削除する |
+| 保持期限の到達 | 同上 |
+
+**インポート時点で `sourceID` まで解決しない理由は、alias の統合が認可と同じトランザクションで起こるからです**（[アーキテクチャ設計](architecture.md) の 6.4）。インポート時に確定させると、その後に別の書き出しが統合を行った場合に古い `sourceID` を握ることになります。**identity のまま持ち、解決は開始ゲートの内側で行います。**
+
+要素数は同時に進行できる編集の数だけで、上限があります。
 
 ##### `detectionSource` の寿命
 
@@ -833,6 +872,35 @@ struct WorkingSourceRecord: Sendable {
 | 再検出 | そのつど作り直す |
 
 **縮小画像を残す理由がありません。** 再検出は利用者が明示的に行う操作であり頻度が低く、原寸から作り直す費用は 1 回分の縮小だけです。残せば、未加工の顔画像がもう 1 つ端末に増えます。
+
+##### 再選択後の Saga
+
+**`paused(.sourceReselectionRequired)` から再開する経路を定めます。** 定めないと、別の写真を選び直しても**以前の顔座標・`ReviewIssue`・`ReviewDecision`・`PreviewConfirmation` を保持したまま再開できます。**
+
+`replaceWorkingSource` を正式な Saga とします。
+
+| 順 | 操作 |
+| --- | --- |
+| 1 | 通常のインポート Saga で再物質化する（`WorkingSourceSnapshot` も作り直す） |
+| 2 | **期待している素材との同一性を確認する**（下記） |
+| 3 | 一致しなければ、そのキュー項目の続行には使わない |
+| 4 | **顔検出を必ずやり直す** |
+| 5 | `detectionRevision` と `projectRevision` を増やす |
+| 6 | **旧 `FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` / `PreviewConfirmation` を破棄する** |
+| 7 | 新しい確認が完了するまで書き出し不可とする |
+
+手順 4〜6 は再検出の既存規則（[アーキテクチャ設計](architecture.md) の 6.1）と同じです。**再選択は再検出を必ず伴うため、確認状態の破棄も自動的に成立します。**
+
+同一性の確認は、新しい `SourceIdentity` と、破棄前の `WorkingSourceSnapshot.identity` を比べます。
+
+| 結果 | 扱い |
+| --- | --- |
+| 一致（alias のいずれかが共有される） | そのキュー項目で続行してよい |
+| 不一致 | **別の写真。** 続行させず、選び直しを求める |
+
+**別の写真での続行を許しません。** バッチの一項目が別素材へ差し替わると、`sourceID` が変わってクォータの前提が崩れ、利用者にとっても「どの写真を処理したか」が分からなくなります。新しい写真を処理したい場合は、新しいバッチを作ります。
+
+**`WorkingSourceSnapshot` は素材の欠損では削除しません。** 削除すると比較対象が失われます。保持期限の到達またはプロジェクト破棄でのみ消します。
 
 ##### 未完了作業の保持期限
 

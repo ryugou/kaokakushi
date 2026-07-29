@@ -85,9 +85,9 @@ SwiftUI の `openURL` 環境値で開きます。`itms-apps://` スキームは�
 | --- | --- | --- | --- |
 | `freeMonthlyExportLimit` | 5 | 0 | 100 |
 | `proBatchSizeLimit` | 50 | 1 | **50** |
-| `trialBatchSizeLimit` | 5 | 1 | **50** |
+| `trialBatchSizeLimit` | 5 | 1 | **5** |
 | `trialCreditCount` | 5 | 0 | 50 |
-| `batchConcurrencyLimit` | 1 | 1 | **2** |
+| `batchConcurrencyLimit` | 1 | 1 | **1**（v1） |
 | `lowConfidenceThreshold` | 未定（[アーキテクチャ設計](architecture.md) の 12.2） | 0.0 | 1.0 |
 | `extremePoseYawDegrees` | 未定（[アーキテクチャ設計](architecture.md) の 12.2） | 0.0 | 90.0 |
 | `extremePosePitchDegrees` | 未定（[アーキテクチャ設計](architecture.md) の 12.2） | 0.0 | 90.0 |
@@ -97,6 +97,10 @@ SwiftUI の `openURL` 環境値で開きます。`itms-apps://` スキームは�
 | `interstitialAdExportInterval` | 3 | 2 | 20 |
 
 **hard max は実装が想定するメモリ使用量・ストレージ・体験の上限です。** `proBatchSizeLimit` と `batchConcurrencyLimit` と `customStampLimit` は、サーバーから引き上げられる形にしません。
+
+**`batchConcurrencyLimit` の hard max は v1 では 1 です。** 並列数 2 に必要な二段階ゲートを v1 で実装しないため（[書き出し Saga](export-saga.md) の 1.7）、リモートで 2 を指定しても有効になりません。**設定できるが効かない値を許容しません。** 二段階ゲートを実装した時点で hard max を 2 へ引き上げます。
+
+**`trialBatchSizeLimit` の hard max は 5 です。** トライアルの総枚数 5 枚は商品仕様・`UpgradeReason`・画面文言・テストが前提としています（[商品面の決定](product-decisions.md)）。可変にするなら、それらをすべて可変上限へ変更する必要があります。
 
 あわせて envelope の整合も検査します。
 
@@ -109,7 +113,7 @@ SwiftUI の `openURL` 環境値で開きます。`itms-apps://` スキームは�
 
 | 変更 | 既存への影響 |
 | --- | --- |
-| バッチ上限の変更 | **新規バッチだけに適用。** 実行中のバッチは開始時の snapshot を維持する |
+| バッチ上限の変更 | **新規バッチだけに適用。** 実行中のバッチは開始時の `BatchPolicySnapshot` を維持する（[アーキテクチャ設計](architecture.md) の 6.5） |
 | 同時並列数の変更 | 新規に開始する書き出しから適用。実行中は維持 |
 | カスタムスタンプ上限の低下 | **既存スタンプを削除しない。** 新規登録だけを停止する |
 | 保存解像度の変更 | **既存実体を再エンコードしない。** 新規取り込みから適用 |
@@ -119,7 +123,7 @@ SwiftUI の `openURL` 環境値で開きます。`itms-apps://` スキームは�
 
 **トリアージ閾値を遡って適用しません。** 利用者が確認を終えた写真が、サーバー設定の変更だけで `reviewRequired` へ戻ると、書き出し直前に確認をやり直させることになります。閾値は「これから検出する写真」に効きます。
 
-### 2.1 機能停止フラグ
+### 2.3 機能停止フラグ
 
 `KillSwitches` は障害時に個別機能を止める手段です。**安全性の中核に対応するキーは持ちません**（[アーキテクチャ設計](architecture.md)）。
 

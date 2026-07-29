@@ -121,6 +121,12 @@ struct SignedPayload: Sendable {
 
 `affectedFaceTrackIDs` は「辞書順にソート済み」として構築されますが、それは**構築時の規則**であり、正準化がソートするのではありません。順序は値の一部です。
 
+**`FaceTrackID` は `UUID` なので、文字列化の表現に依存しない順序を定めます。**
+
+> `UUID` の 16 バイトを**符号なしバイト列として辞書順**に比較する。
+
+大文字小文字やハイフンの有無は順序へ影響しません。unordered collection のソートにも同じ規則を使います。
+
 **分類は型に付けます。** unordered な集合は Swift の `Set` として宣言し、`Array` はすべて ordered として扱うのが原則です。`grants` などが `Array` なのは要素が `Hashable` でないためであり、この場合は**エンコーダ側に unordered として明示的に登録します。**
 
 ### 2.2 識別子
@@ -128,6 +134,7 @@ struct SignedPayload: Sendable {
 | 型 | 符号化 |
 | --- | --- |
 | `ProjectID` / `BatchID` / `ExportID` / `RegionID` / `SourceID` / `ManagedFileID` | `UUID` の 16 バイト |
+| `ContentFingerprint` / `StampAssetHash` | **32 バイト固定長**（長さ前置きしない） |
 | `FaceTrackID` | `UUID` の 16 バイト |
 | `ManagedFileRef` および種別つき参照（`OutputFileRef` ほか） | `kind`（`UInt32`）→ `fileID`（16 バイト） |
 
@@ -200,6 +207,18 @@ struct SignedPayload: Sendable {
 
 `UInt32` の生値を型定義そのものが持ちます（`output = 1` 〜 `protectedBlob = 7`）。
 
+### `ProtectedPayload.blobKeyRawValue`
+
+**内部ファイル名の決定に使うため、値を固定します。**
+
+| 型 | 値 |
+| --- | --- |
+| `UsageLedger` | **1** |
+| `SubscriptionState` | **2** |
+| `RemoteConfigState` | **3** |
+
+この対応もゴールデンテストの対象です（6 章）。
+
 ---
 
 ## 4. 署名対象 payload
@@ -233,23 +252,7 @@ struct SignedPayload: Sendable {
 
 ### 4.2 `SubscriptionState`（`schemaVersion` 1）
 
-**保存する型と署名する型を一致させます。**
-
-```swift
-/// ProtectedBlobStore へ保存する購入状態キャッシュ
-struct SubscriptionState: Sendable, Equatable {
-    let entitlement: Entitlement
-    let willRenew: Bool
-    let fetchedAt: Date        // RevenueCat から取得に成功した時刻
-}
-
-struct Entitlement: Sendable, Equatable {
-    let plan: Plan
-    let status: PlanStatus
-    let expiresAt: Date?
-    let lastVerifiedAt: Date
-}
-```
+型定義は [アーキテクチャ設計](architecture.md) の 6.2 が正本です。ここには順序だけを置きます。
 
 | 順 | フィールド | 型 |
 | --- | --- | --- |
@@ -357,48 +360,120 @@ struct KillSwitches: Sendable, Decodable, Equatable {
 
 ### 5.1 `contentFingerprint`
 
-**ファイル全体を SHA-256 へ入れます。部分ハッシュにしません。**
+**ファイル全体の SHA-256 だけを入力にします。**
+
+```swift
+struct ContentFingerprint: Sendable, Hashable {
+    let bytes: Data      // 必ず 32 バイト
+}
+```
+
+```
+contentFingerprint = SHA-256( "content-fingerprint-v2" || fullFileBytes )
+```
 
 | 項目 | 規則 |
 | --- | --- |
-| アルゴリズム | **SHA-256** |
+| ドメイン分離子 | `"content-fingerprint-v2"` の UTF-8 バイト列を先頭へ置く |
 | 入力 | **ファイルの全バイト**（ストリームで逐次投入する） |
-| 整数のバイト順 | ビッグエンディアン |
-| 撮影日時 | UTC epoch milliseconds の `Int64`。取得元は **EXIF の `DateTimeOriginal` のみ** |
+| 出力 | **32 バイト固定**。文字列化しない |
+| 計算時点 | 物質化の直後、インポート Saga の中（[画像処理](image-pipeline.md)） |
+| 対象 | **取り込みファイル**（ピッカーが返した実データ）。正規化後の派生画像ではない |
+| 読み取り | `FileHandle` からのチャンク読み（1MB 程度）。ファイル全体をメモリへ載せない |
 
-```
-schemaVersion : UInt32                // 現行 2
-fileSize      : UInt32(8)  + Int64
-contentDigest : UInt32(32) + bytes    // ファイル全体の SHA-256（32 バイト）
-capturedAt    : UInt32(8)  + Int64    // 無ければ UInt32(0) のみ
-```
+**ファイルサイズと撮影日時を別途混ぜません。** どちらも全バイトに含まれているため識別能力が増えず、**EXIF パーサの差だけで同一ファイルの fingerprint が変わる**経路を作ります。
 
-長さを前置きするのは、単純連結だとフィールド境界を区別できず、異なる入力が同じバイト列になりうるためです。
+**ドメイン分離子を先頭へ置くのは、他のハッシュ用途とバイト列が衝突しないようにするためです。** スキーマを変える場合はこの文字列を `-v3` へ上げます。
 
 ##### 部分ハッシュを採らない
 
-先頭 64KB と末尾 64KB だけを入力にすると、**中央部分だけが異なる 2 枚の写真が同一素材と判定されます。** 判定が「同一素材なのに二重消費」ではなく「別素材なのに無料で再書き出しできる」方向へ倒れるため、当初は許容していました。
+先頭・末尾の 64KB だけを入力にすると、**中央部分だけが異なる 2 枚の写真が同一素材と判定されます。** 同じカメラの連写では先頭の EXIF ブロックと末尾のパディングが一致しやすく、ファイルサイズも近くなるため、**無料枠を回避する経路として現実的な難易度になります。**
 
-しかしこれは**意図的に作れる衝突**です。同じカメラで撮った 2 枚は、先頭の EXIF ブロックと末尾のパディングが一致しやすく、ファイルサイズも近くなります。撮影日時が同じ連写であれば `capturedAt` も一致します。**無料枠を回避する経路として現実的な難易度になります。**
+##### `StampAssetHash`
 
-全体ハッシュの費用は、48 メガピクセルの HEIC でおおむね数 MB から 20MB 程度の読み取りです。**ストリームで投入すればメモリは一定に保てます。** 選択直後に 1 回だけ計算し、`contentFingerprint` として保持します。
+```swift
+struct StampAssetHash: Sendable, Hashable {
+    let bytes: Data      // 必ず 32 バイト
+}
+```
 
 | 項目 | 規約 |
 | --- | --- |
-| 読み取り | `FileHandle` からのチャンク読み（1MB 程度）で `SHA256` へ逐次投入する |
-| 計算時点 | 物質化の直後、インポート Saga の中（[画像処理](image-pipeline.md)） |
-| 対象 | **物質化したファイルの全バイト**。表示用の派生画像ではない |
-| メモリ | チャンクサイズ分のみ。ファイル全体を載せない |
+| 対象 | **最終保存バイト列**（縮小・変換したあとの実体） |
+| アルゴリズム | SHA-256 |
+| 計算時点 | `ManagedFileStore` へ書く直前 |
+| 使う箇所 | `StampSource.custom` / `StampAsset` の主キー / `CustomStamp.assetHash` / `ProjectStampAsset.assetHash` |
 
-`schemaVersion` を 2 とし、旧形式（`1`）のデコーダは残しません。**v1 リリース前の変更であり、移行対象となる既存データが存在しません。**
+**この 4 か所で同じ型を共用します。** 片方だけ `String` にすると、正準化での表現が揺れます。
 
-### 5.2 プロジェクト設定ハッシュ（`ProjectSettingsHash`）
+入力ファイルそのもののバイト列だと、同じ画像を PNG と HEIC で取り込むと別実体になります。正規化済みピクセルだと、デコードの実装差で値が揺れます。**保存バイト列が、実際にディスク上にある唯一の表現です。**
 
-**このハッシュは権限制御に使います。** 有料スタンプを含むプロジェクトを Free で「変更せず再書き出し」できるかの判定、および書き出し前のプレビュー確認の一致判定（[書き出し Saga](export-saga.md) の 1.1）がこれに依存します。**含めるフィールドの取りこぼしは、そのまま権限の迂回になります。**
+### 5.1.1 EXIF 撮影日時の解釈
 
-アルゴリズムと形式は `contentFingerprint` と同じ（SHA-256、長さ前置き、`schemaVersion` 付き）です。
+**`DateTimeOriginal` だけでは UTC を決められません。** EXIF は日時・小数秒・UTC オフセットを別フィールドに持ちます。
 
-##### 含めるフィールドと順序（`schemaVersion` 1）
+| フィールド | 用途 |
+| --- | --- |
+| `DateTimeOriginal` | ローカル日時（`YYYY:MM:DD HH:MM:SS`） |
+| `SubSecTimeOriginal` | 小数秒 |
+| `OffsetTimeOriginal` | UTC オフセット（`+09:00` など） |
+
+| 状況 | 扱い |
+| --- | --- |
+| 3 つとも取得できる | **UTC epoch milliseconds へ変換する**（小数秒を含める） |
+| `OffsetTimeOriginal` が無い | **UTC へ変換しない。** 端末の現在タイムゾーンを使わない |
+| 同上・`contentFingerprint` | **時刻を含めない**（そもそも 5.1 で入力から外れている） |
+| 同上・写真ライブラリ保存 | `PHAsset.creationDate` を優先し、無ければ `creationDate` を設定しない |
+| 出力 EXIF | **元のローカル日時とオフセットをそのまま保持する**（保持設定が ON の場合） |
+
+**端末のタイムゾーンを補完に使いません。** 同じ写真を別の場所で開いたときに違う値になり、`suggestedCreationDate` が旅行のたびにずれます。
+
+**出力 EXIF ではローカル日時を再構築しません。** 元の `DateTimeOriginal` と `OffsetTimeOriginal` をそのまま書き戻せば、変換の往復による誤差が生じません。
+
+### 5.2 設定ハッシュ（2 種類）
+
+**用途の異なる 2 つのハッシュを分けます。** 1 つにまとめると、匿名化結果に影響しない設定を変えただけで書き出しが不能になります。
+
+```swift
+/// 認可用。出力へ影響する全設定
+struct ProjectSettingsHash: Sendable, Hashable { let bytes: Data }   // 32 バイト
+
+/// プレビュー確認用。見た目に影響する値だけ
+struct PreviewRenderHash: Sendable, Hashable { let bytes: Data }     // 32 バイト
+```
+
+| ハッシュ | 用途 | 含める範囲 |
+| --- | --- | --- |
+| `ProjectSettingsHash` | 「変更せず再書き出し」の権限判定（[アーキテクチャ設計](architecture.md) の 6.2） | **出力へ影響する全設定**（圧縮品質・メタデータ設定を含む） |
+| `PreviewRenderHash` | 書き出し前のプレビュー確認の一致（[書き出し Saga](export-saga.md) の 1.1） | **見た目に影響する値だけ**（圧縮品質・メタデータ設定を含まない） |
+
+**`PreviewConfirmation` は `PreviewRenderHash` を使います。** レビュー状態の規則（[アーキテクチャ設計](architecture.md) の 6.5）は、位置情報削除・撮影日時保持・圧縮品質の変更で確認状態を維持します。両方に `ProjectSettingsHash` を使うと、`reviewed` が維持されているのに確認の一致だけが崩れ、**書き出せなくなります。**
+
+##### `renderRevision`
+
+**`PreviewRenderHash` には `renderRevision` を含めます。**
+
+| 対象 | 増やす契機 |
+| --- | --- |
+| レンダラーの実装変更（丸め、合成順、フィルタのパラメータ） | アプリの更新で見た目が変わったとき |
+| 組み込みスタンプの図案変更 | 同じ `code` の描画結果を変えたとき |
+
+**`StampSource.builtIn` は `code` しか持たないため、同じ `code` の画像を更新すると見た目が変わってもハッシュが変わりません。** `renderRevision` を混ぜることで、更新後の初回起動時に確認をやり直させます。
+
+`renderRevision` はアプリにハードコードした `UInt32` で、**リモート設定から変更できません。**
+
+##### `PreviewConfirmation` は永続化しない
+
+**確認状態は再起動をまたいで保持しません。** `PreviewConfirmation` はセッション内の値とし、アプリを再起動したら必ず再確認を求めます。
+
+保持しない理由は 2 つです。
+
+- 再起動後に画面へ表示されているのは新しく描き直したプレビューであり、**利用者が「確認した」ものと同一である保証を型で作れません**
+- 保持すれば `renderRevision` の管理だけでは足りず、OS のバージョン差による描画変化まで追う必要が出ます
+
+バッチの `overviewConfirmed` も同様です。**再起動後は一覧の確認からやり直します。**
+
+##### `ProjectSettingsHash` に含めるフィールドと順序（`schemaVersion` 1）
 
 | 順 | フィールド | 型 |
 | --- | --- | --- |
@@ -437,13 +512,28 @@ capturedAt    : UInt32(8)  + Int64    // 無ければ UInt32(0) のみ
 
 `MetadataPolicy` は `removeLocation` → `removeDeviceInfo` → `removeSoftwareInfo` → `keepCaptureDate` の 4 つの `Bool` です。
 
+##### `PreviewRenderHash` に含めるフィールドと順序（`schemaVersion` 1）
+
+| 順 | フィールド |
+| --- | --- |
+| 1 | `renderRevision`（`UInt32`。上記） |
+| 2 | `sourceCrop` |
+| 3 | `scaleMode` |
+| 4 | `background` |
+| 5 | `regions`（ordered。`ProjectSettingsHash` と同じ要素順） |
+| 6 | `outputAspect` |
+
+**`ProjectSettingsHash` の 1〜5 から `outputFormat` / `compressionQuality` / `metadataPolicy` を除き、先頭に `renderRevision` を足したものです。**
+
+除いた 3 つはいずれも見た目の確認をやり直す必要がありません。圧縮品質は厳密には画素が変わりますが、**確認の目的は匿名化の妥当性であり画質ではありません**（[アーキテクチャ設計](architecture.md) の 6.5）。
+
 ##### 含めないフィールド
 
-出力へ影響しない値は含めません。**含めると、名前を変えただけで「変更した」と判定されます。**
+出力へ影響しない値は含めません。**含めると、名前を変えただけで「変更した」と判定されます。** 両方のハッシュに共通です。
 
 - プロジェクト名、作成日時、更新日時、お気に入りフラグ
 - `DetectionStatus` / `ReviewStatus` / `ReviewDecision` / `overviewConfirmed`
-- `detectionRevision` / `projectRevision`（これらは `ExportInputSnapshot` が別に持つ）
+- `detectionRevision` / `projectRevision`（`ExportInputSnapshot` が別に持つ）
 - サムネイルの `ManagedFileRef`、`ProjectSourceLocator`
 - DB の自動採番 ID
 
@@ -459,17 +549,7 @@ capturedAt    : UInt32(8)  + Int64    // 無ければ UInt32(0) のみ
 
 **`Float`（32 ビット）へ丸めません。** `0.1500000000000000` と `0.1500000059604645` が同じハッシュになり、**設定を変えたのに無料の再書き出しとして通します。**
 
-各 `schemaVersion` について、既知の `RenderSpec` と `ExportSetting` から生成したゴールデンバイト列をテストへ埋め込みます。
-
-### 5.3 `StampAsset` の内容ハッシュ
-
-| 項目 | 規約 |
-| --- | --- |
-| 対象 | **最終保存バイト列**（縮小・変換したあとの実体） |
-| アルゴリズム | SHA-256 |
-| 計算時点 | `ManagedFileStore` へ書く直前 |
-
-入力ファイルそのもののバイト列だと、同じ画像を PNG と HEIC で取り込むと別実体になります。正規化済みピクセルだと、デコードの実装差で値が揺れます。**保存バイト列が、実際にディスク上にある唯一の表現です。**
+各 `schemaVersion` について、既知の `RenderSpec` と `ExportSetting` から生成したゴールデンバイト列を、**2 種類のハッシュそれぞれについて**テストへ埋め込みます。
 
 ---
 

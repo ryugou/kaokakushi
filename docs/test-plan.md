@@ -69,7 +69,7 @@
 - **統合時に `grants` / `trialEntries` / `trialReservations` / `sourceLeases` のすべてが勝者 `sourceID` へ書き換わること**
 - **`SourceRecord` が grant / trial / reservation / lease のどれからも参照されなくなった場合だけ削除されること**
 - **`paidUnlimited` の書き出し中に `SourceRecord` が GC されないこと**（`SourceLease` が効いていること）
-- 台帳の不変条件 1〜8 が、保存前と署名検証直後の両方で検査されること
+- 台帳の**全不変条件**が、保存前と署名検証直後の両方で検査されること
 - **同じ `sourceID` の `SourceLease` が 2 件以上あるとき、通常状態として通さず復旧エラーになること**
 - `contentFingerprint` が**ファイル全体の SHA-256** を含み、長さ前置き・ビッグエンディアン・UTC epoch ms で計算されること
 - **中央部分だけが異なる 2 ファイルが、別の `contentFingerprint` になること**（部分ハッシュでは衝突する素材で検証する）
@@ -83,6 +83,9 @@
 - **`TrialEntry` があれば「消費済み」と分類されること**
 - **`TrialReservation` のみの素材が「新規枠を占有中」として扱われ、残数計算と分類で二重に数えられないこと**
 - **実行直前の再検証が、選択画面と同じ `trialEntries` の条件を使うこと**
+- **`contentFingerprint` がファイル全体の SHA-256 のみから決まり、ファイルサイズと撮影日時を混ぜないこと**
+- **EXIF に `OffsetTimeOriginal` が無いとき、端末タイムゾーンで補完しないこと**
+- **`ContentFingerprint` / `StampAssetHash` が 32 バイト固定であること**
 - OS がトランスコードした写真を新規素材として数えないこと
 
 ### 2.3 レビュー状態とトリアージ（6.1 / 6.5）
@@ -166,6 +169,12 @@
 - **`Float` へ丸めた場合に区別できなくなる 2 つの `Double` が、異なる設定ハッシュになること**
 - `-0.0` が `+0.0` へ正規化されること
 - プロジェクト設定ハッシュの一致判定により、Free の「変更せず再書き出し」が許可されること
+- **`ExportedSettingsEntry` が署名済み台帳にあり、未署名の DB 行を書き換えても判定が変わらないこと**
+- **正常書き出しの記録が無いプロジェクトが「変更せず再書き出し」の対象外になること**
+- **`PreviewRenderHash` に圧縮品質とメタデータ設定が含まれないこと。それらを変えても確認の一致が崩れないこと**
+- **`renderRevision` を上げると `PreviewRenderHash` が変わること**
+- **`PreviewConfirmation` と `overviewConfirmed` が再起動後に保持されず、再確認を求めること**
+- **出力へ影響する子行（`FaceTrack` / `EffectSetting` / `ExportSetting` / `ProjectStampAsset`）の変更で、同一トランザクション内に `projectRevision` が増えること**
 
 ### 2.7 HMAC canonical bytes のゴールデンテスト（9.1）
 
@@ -209,7 +218,7 @@
 
 偽 DB・偽 `ProtectedBlobStore`・偽ファイル・偽 `ProtectedDataAvailability` を注入し、**各中断点**での挙動を検証します。実ストレージの原子性は検証しません（4 章の役割）。
 
-### 3.1 コミット Saga（8.3 / 8.4 / 8.5）
+### 3.1 コミット Saga
 
 - `ExportCommit` が各段階で中断しても、起動時に整合が回復すること
 - `prepared` / `fileVerified` / `finalizing` / `accountingCommitted` / `readyToPublish` のいずれからもコミット行が最終的に消えること
@@ -236,7 +245,20 @@
 - 消費確定が手順 7 であり、保存や共有の回数に影響されないこと
 - **`unavailable` のまま復旧を開始した場合に待機へ入ること**（7.4）
 
-### 3.2 認可とゲート（8.1）
+### 3.1.1 v1 で追加した中断点
+
+- **`prepared` の `outputFile` が `nil` であり、手順 2 で `verifiedOutput` と同時に確定すること**
+- **手順 1 の途中で落ちた一時ファイルが、どのコミットからも参照されず孤児 GC で回収されること**
+- **`finalizeExport` が入力を信用せず、保存済みコミットの `state` / HMAC / `projectID` / `verifiedOutput` を再確認してから導出すること**
+- **`loadRecoverySnapshot` が復旧前に一度だけ読まれ、`checkForeignKeys` が復旧後に別途呼ばれること**
+- **`ExportCommitColumns` が生のバイト列であり、署名検証前に `ProjectID` などへデコードされないこと**
+- **台帳を修復した起動では、署名が正常な非終端コミットも含めてすべて破棄され、キュー項目が `failed` になること**
+- **その破棄で `UsageLedger` へ触れないこと（整合性封鎖のまま）**
+- **`DeliveryAttempt` が残った起動で `deliveryUnknown` になり、自動再保存しないこと**
+- **`deliveryUnknown` が未受け渡しとして 24 時間の保持と離脱確認に数えられること**
+- **`OutputRecord` の `format` / `suggestedCreationDate` から `OutputFile` を復元でき、`Project` の現在値を参照しないこと**
+
+### 3.2 認可とゲート
 
 - 書き出し開始前に `blocked` なら `ExportCommit` を作らないこと
 - 開始後に契約が失効しても、その書き出しは開始時の権限で完了すること
@@ -252,7 +274,7 @@
 - `CancellationError` が Sentry へ送られず、キュー項目が `canceled` になること
 - 実行開始の直前に最新台帳で選択を再検証し、分類が変わっていれば開始しないこと（6.5）
 
-### 3.3 署名不正コミット（8.6）
+### 3.3 署名不正コミット
 
 - `ExportCommit` の署名検証失敗が復旧エラーになり、自動破棄されないこと
 - 復旧エラーを「破棄して続ける」で解除でき、孤立 lease が 1 件なら予約が `TrialEntry` へ確定した上でコミットが削除されること
@@ -261,7 +283,7 @@
 - **署名不正行の `outputFile` / `projectID` が参照されず、他の正常な出力と履歴が削除されないこと**
 - **署名不正行がある間、孤児予約と孤児 lease の自動回収が保留されること**
 
-### 3.4 コミット確定後の実体喪失（8.7）
+### 3.4 コミット確定後の実体喪失
 
 - **実体が無い、または記録値と一致しないとき、`OutputRecord` を削除すること**
 - **`UsageLedger` を 1 バイトも変更しないこと**（月間枠・grant・トライアルのいずれも戻さない）
@@ -277,6 +299,7 @@
 - 同じ素材が `trialEntries` と `trialReservations` の両方に存在しないこと
 - 同じ素材の再書き出しでトライアルクレジットが二重に減らないこと
 - **中止時点で手順 7 が未完了の写真は消費せず、既に手順 7 まで完了した写真のクレジットは戻らないこと**
+- **`BatchPolicySnapshot` が開始時の値を保持し、再起動後もリモート設定の変更で動かないこと**
 
 ### 3.6 保護ストアの読み込み失敗（7.2）
 
@@ -293,7 +316,7 @@
 - 受け渡し成功後も完了画面を離れるまで出力が保持され、保存と共有を任意の順序で実行できること
 - 異常終了後の起動時、`generated` では復旧案内が出て、`delivered` では出ないこと
 - 「履歴を保存しない」設定で、未受け渡し出力・`UsageLedger`・未完了 `ExportCommit`・トライアル用 `SourceRecord` の 4 つ以外が残らないこと
-- `canDeleteHistoryUnit` が非終端キュー・`OutputRecord`・非終端 `ExportCommit`・`WorkingSourceRecord` を保護すること
+- `canDeleteHistoryUnit` が**列挙された全参照元**を保護すること
 - `CustomStamp` を削除しても、それを使用したプロジェクトが再書き出しできること
 - `StampAsset` が**最終保存バイト列**の内容ハッシュで重複排除され、参照カウントが 0 になったときのみ削除されること
 - **`CustomStamp` の登録で参照が 1 増え、一覧削除で 1 減ること。一覧でしか使われていない実体が一覧削除で消えること**
@@ -303,6 +326,10 @@
 - 削除で DB が先に更新され、`PendingFileDeletion` が同じトランザクションへ記録されること
 - `WorkingSourceRecord` の実体が欠けたとき、そのキュー項目が `paused(.sourceReselectionRequired)` へ遷移すること。バッチ全体が止まらないこと
 - **`createdAt` から 24 時間で処理用ファイルと `WorkingSourceRecord` が削除され、キュー項目が `paused(.sourceReselectionRequired)` になること**
+- **`WorkingSourceSnapshot` が署名済み台帳にあり、再起動後も `sourceID` を解決できること**
+- **未署名の DB 行を書き換えても `SourceIdentity` が変わらないこと**
+- **再選択で素材が一致しない場合、そのキュー項目で続行できないこと**
+- **再選択が顔検出をやり直し、`detectionRevision` と `projectRevision` を増やし、旧 `FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` / `PreviewConfirmation` を破棄すること**
 - **その削除で `Project` が消えないこと。`retentionNow == nil` の間は削除しないこと**
 - **`isTerminal` が `completed` / `failed` / `canceled` のみ真であり、履歴削除の保護と完了判定が同じ述語を使うこと**
 
@@ -329,11 +356,13 @@
 
 - 手順 7 の DB トランザクションが原子的であり、`OutputRecord` / `ExportRecord` / キュー状態 / `Project` の更新とコミット削除が同時に成立すること
 - 「コミットあり・`OutputRecord` なし」または「コミットなし・`OutputRecord` あり」以外の状態が観測されないこと
-- `app.db` の `journal_mode` が非 WAL であり、WAL なら復旧エラーになること
 - `synchronous = EXTRA` と `foreign_keys = ON` が設定され、起動時に読み返して検証されること
 - スキーマ移行が単一トランザクションで確定し、途中適用が観測されないこと
 - **外部キー制約が有効であり、`Project` の削除が `OutputRecord` / `ExportCommit` の存在で RESTRICT されること**
-- **`Project` の削除が `OutputRecord` / `ExportCommit` の存在で RESTRICT され、`ExportQueueItem` / `ExportRecord` / `ProjectStampAsset` は CASCADE すること**
+- **`Project` の削除が `OutputRecord` / `ExportCommit` の存在で RESTRICT され、`FaceTrack` / `EffectSetting` / `ExportSetting` / `ExportQueueItem` / `ExportRecord` / `ProjectStampAsset` は CASCADE すること**
+- **`Batch` の削除で `OutputRecord.batchID` / `ExportCommit.batchID` / `ExportRecord.batchID` が SET NULL になること**
+- **`journal_mode` が `DELETE` であり、`TRUNCATE` / `PERSIST` / `WAL` なら復旧エラーになること**
+- **`blobKeyRawValue` が `UsageLedger = 1` / `SubscriptionState = 2` / `RemoteConfigState = 3` で固定されていること**
 - `PRAGMA foreign_key_check` が起動時に実行され、違反があれば復旧エラーになること
 
 ### 4.3 署名と鍵（9.1 / 7.2）
@@ -412,7 +441,7 @@
 
 上下の非対称性は、Y 軸反転の誤りが最も現れやすい形です。中央に顔がある素材では反転しても差が出ません。
 
-### 4.9 受け渡しと診断（8.8 / 9.2）
+### 4.9 受け渡しと診断
 
 - `SharePresenter` が `UIActivityViewController` の結果を 4 値へ正しく写像すること
 - `CrashReporter` が例外メッセージ・パス・URL を除去し、breadcrumbs を列挙済みイベントに限定すること
