@@ -16,7 +16,7 @@
 | # | 名称 | 内容 |
 | --- | --- | --- |
 | 1 | プロジェクト基盤 | Xcode プロジェクトと SwiftPM ローカルパッケージの骨格、CI、SwiftLint、`swift test` の実行基盤 |
-| 2 | ドメイン層 | `QuotaPolicy`、`EntitlementResolver`、`BatchTriagePolicy`、`compileRenderDraft`、キーフレーム補間、`ExportQueue` |
+| 2 | ドメイン層 | `QuotaPolicy`、`EntitlementResolver`、`BatchTriagePolicy`、`compileRenderDraft`、`ExportQueue` |
 | 3 | プラットフォーム層 | プロトコルの実装と適合テスト（下表）。`SharePresenter` は結果写像を先に定義してから実装する |
 | 4 | 永続化とコミットジャーナル | GRDB、2 DB 構成と `ATTACH`、`ProtectedBlobStore`、`CryptoKeyStore`、障害注入テスト基盤 |
 | 5 | 編集フロー UI | detect / effect / export / processing / done |

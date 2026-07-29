@@ -149,7 +149,6 @@
 - 永続データのデコード時にも検証済み値型の `throws` 版が呼ばれること
 - **境界型（`ImageSource` / `LoadedPhoto` / `DetectionResult` / `RenderedImage` / `OutputFile`）が `URL` もパス文字列も持たないこと**
 - **`ImageSource.orientation` が常に `.normalized` であること。未正規化の画像が境界を越えないこと**
-- キーフレーム補間（v2 機能だが仕様確定のため v1 で実装・テスト）
 
 ### 2.6 設定ハッシュと正準化（6.4 / 9.1）
 

@@ -108,7 +108,6 @@ architecture.md（型と境界の正本）
 | 共有 | `UIActivityViewController`（[書き出し Saga](export-saga.md)） |
 | 署名鍵の保管 | Keychain（**鍵のみ**） |
 | 署名付きデータの保管 | アプリ専用ディレクトリ上のファイル（HMAC 付き、原子的置換） |
-| 動画（v2） | AVFoundation / AVAssetWriter |
 
 **鍵とデータ本体を分けます。** Keychain は台帳のような可変データを繰り返し置き換える用途に向きません。`UsageLedger` や `SubscriptionState` の本体はファイルへ置き、Keychain の鍵で HMAC を付けます。`CryptoKeyStore`（鍵）と `ProtectedBlobStore`（署名付きデータ）の 2 プロトコルに分けます。
 
@@ -1493,7 +1492,6 @@ func evaluateUpdate(
 | --- | --- |
 | `Project` | 仕様 19.1。再編集用の `ProjectSourceLocator` を持つ（[画像処理](image-pipeline.md)）。**ここにのみ平文の `localIdentifier` が存在する** |
 | `FaceTrack` | 仕様 19.2 |
-| `FaceKeyframe` | 仕様 19.3。v2 で使用 |
 | `EffectSetting` | 仕様 19.4 |
 | `ExportSetting` | 仕様 19.5 |
 | `CustomStamp` | 仕様 19.6。スタンプ一覧の項目（7.5） |
