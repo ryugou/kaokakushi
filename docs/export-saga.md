@@ -204,7 +204,7 @@ enum ExportAccountingMode: Sendable, Equatable {
 
 月間クォータを使うのは Free の単体処理だけ（Free 利用者が月 5 枚を使い切っていても、クレジットが残っていれば一括トライアルを実行できる）。
 
-**`reissue` の成立条件**: 同一 `Project` の直近の `OutputRecord` が、完了する前（`settledAt == nil`）に破棄（8 章の `markDiscarded`）または実体喪失（7 章）でやり直しになっており、その差し替えとして書き出す場合。回数・時間の制限は無い。完了後（`settledAt` が確定した後）に同じ素材・同じ設定で書き出しても新規消費であり、`reissue` は成立しない。
+**`reissue` の成立条件**（認可時に判定）: 同一 `projectID` の直近の `OutputRecord` が `state == discarded` かつ `settledAt == nil` であること。破棄（8 章の `markDiscarded`）でも実体喪失（7 章）でも `OutputRecord` は物理削除せず `discarded` へ遷移させ `settledAt` を保持するため、この行を根拠に判定できる。回数・時間の制限は無い。`settledAt` が確定した後に `discarded` になった行は `reissue` の根拠にならず、新規消費となる。
 
 ### 1.6 開始後の権限変化
 
@@ -296,9 +296,9 @@ struct OutputRecord: Sendable {
 }
 ```
 
-実装はトランザクション内で次を確認する（不成立なら throw し、手順 4 を実行しない）。`ExportJob.state == running`（二重確定の防止）、同じ `projectID` の `OutputRecord` が存在しない（`OutputRecord.projectID` の UNIQUE 制約。[アーキテクチャ設計](architecture.md) の 7.1。未削除の `delivered` 出力が残る `Project` は再書き出し不可、同 7.5）、`queueItemID` が指定されていれば対応するキュー項目が存在し `projectID` / `batchID` が一致し `state == .exporting`（無関係なキュー項目を `completed` にしない）。
+実装はトランザクション内で次を確認する（不成立なら throw し、手順 4 を実行しない）。`ExportJob.state == running`（二重確定の防止）、同じ `projectID` の**非終端**（`discarded` 以外の）`OutputRecord` が存在しない（`OutputRecord.projectID` の部分 UNIQUE 制約。[アーキテクチャ設計](architecture.md) の 7.1。未削除の `delivered` 出力が残る `Project` は再書き出し不可、同 7.5）、`queueItemID` が指定されていれば対応するキュー項目が存在し `projectID` / `batchID` が一致し `state == .exporting`（無関係なキュー項目を `completed` にしない）。
 
-確認を通ったら、`ExportJob` の値だけから `OutputRecord` と `ExportRecord` を導出する。
+確認を通ったら、同じ `projectID` の `discarded` 行があれば同一トランザクションで削除する（`reissue` 判定の根拠は認可時に読み取り済みであり、この行はもう要らない）。続いて `ExportJob` の値だけから `OutputRecord` と `ExportRecord` を導出する。
 
 | 導出先 | 導出元 |
 | --- | --- |
@@ -349,7 +349,7 @@ struct OutputRecord: Sendable {
 
 | 状況 | 扱い |
 | --- | --- |
-| 実体が無い、または `outputByteSize` / `outputSHA256` と一致しない | `OutputRecord` を削除する（[アーキテクチャ設計](architecture.md) の 7.5 の削除経路） |
+| 実体が無い、または `outputByteSize` / `outputSHA256` と一致しない | `OutputRecord` を `discarded` へ遷移させる（物理削除しない。`settledAt` を保持したまま残す。実体ファイルは削除する） |
 | 台帳 | 変更しない。月間枠・トライアルクレジットのいずれも戻さない |
 | 利用者への提示 | 出力を復元できないこと、および新しい書き出しになることを示す |
 | `settledAt == nil`（未完了）のまま失った場合 | `reissue` でやり直せる（追加消費なし。1.5） |
@@ -416,7 +416,7 @@ struct UnknownLibrarySave: Sendable {
 | `completeShare` | `generated` / `deliveryUnknown` → `delivered` | 共有の `.completed` |
 | `abandonDeliveryAttempt` | `previousState` へ戻す（現在が `delivered` なら維持） | 写真ライブラリ保存の失敗 |
 | `resolveOrphanedAttempts` | `previousState` が `generated` なら `deliveryUnknown`、`delivered` なら維持 | 起動時 |
-| `markDiscarded` | 任意の状態 → `discarded` | 利用者の明示的な破棄のみ |
+| `markDiscarded` | 任意の状態 → `discarded`。行は物理削除せず `settledAt` を保持したまま残す。実体ファイルは削除する | 利用者の明示的な破棄のみ |
 | `markSettled` | 状態は変えない。`settledAt` のみ確定 | 共有の開始時 |
 
 共有には `DeliveryAttempt` を作らない（結果が同期的に返るため中断点が無い）。ただし `settledAt` は確定させる必要があるため、共有の開始時に `markSettled` を呼ぶ。
