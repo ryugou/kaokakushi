@@ -56,8 +56,9 @@ protocol OutputDeliveryStore: Sendable {
     func resolveOrphanedAttempts() async throws -> [OutputDeliverySnapshot]
     func loadUnknownLibrarySaves() async throws -> [UnknownLibrarySave]
     func clearUnknownLibrarySave(_ exportID: ExportID) async throws
-    /// 完了後の出力を利用者が明示的に破棄する。事前条件: settledAt != nil（完了前のやり直しは discardExport を使う）
-    func markDiscarded(_ exportID: ExportID) async throws
+    /// 完了後の出力を利用者が明示的に破棄する。OutputRecord と実体ファイルを物理削除する（状態遷移ではない）。
+    /// UnknownLibrarySave があれば FK CASCADE で消える。事前条件: settledAt != nil（完了前のやり直しは discardExport を使う）
+    func deleteOutput(_ exportID: ExportID) async throws
 }
 
 struct ExportQueueItemID: Sendable, Hashable { let rawValue: UUID }
@@ -363,7 +364,7 @@ struct ExportRecord: Sendable {
 
 | 状況 | 扱い |
 | --- | --- |
-| 実体が無い、または `outputByteSize` / `outputSHA256` と一致しない | `OutputRecord` を削除する |
+| 実体が無い、または `outputByteSize` / `outputSHA256` と一致しない | `OutputRecord` を物理削除する（7 章の `deleteOutput` と同じ、履歴削除の唯一の経路） |
 | 台帳 | 変更しない。月間枠・トライアルクレジットのいずれも戻さない |
 | 利用者への提示 | 出力を復元できないこと、および新しい書き出しになることを示す |
 
@@ -382,7 +383,7 @@ struct ExportRecord: Sendable {
 
 バッチの完了操作は、結果一覧画面での操作 1 回で対象バッチ内の**未確定な全出力**の `settledAt` を同一トランザクションで設定し、確定した枚数分だけクレジットを消費する（`settleBatch`）。完了前は写真単位のやり直しができ、一括保存・共有は完了後にのみ行える。
 
-**不変条件**: `beginDeliveryAttempt` / `completeLibrarySave` / `completeShare` は `settledAt != nil` を事前条件とする（`nil` なら throw）。完了前の出力は UI 上も保存・共有へ到達できないが、防御として明記する。`markDiscarded`（完了後の明示的な破棄）にはこの事前条件を課すが、完了前のやり直しは `discardExport`（4 章）を使うため対象外。保存・共有の成否は問わない（失敗しても出力は保持され再試行できる）。
+**不変条件**: `beginDeliveryAttempt` / `completeLibrarySave` / `completeShare` は `settledAt != nil` を事前条件とする（`nil` なら throw）。完了前の出力は UI 上も保存・共有へ到達できないが、防御として明記する。`deleteOutput`（完了後の明示的な破棄）にもこの事前条件を課すが、完了前のやり直しは `discardExport`（4 章）を使うため対象外。保存・共有の成否は問わない（失敗しても出力は保持され再試行できる）。
 
 ### 7.0 写真ライブラリ保存の結果不明
 
@@ -420,19 +421,19 @@ struct UnknownLibrarySave: Sendable {
 }
 ```
 
-`resolveOrphanedAttempts` で `delivered` を維持したとき upsert する。利用者が「確認した」を選んだとき行を削除する。出力そのものが削除されたときは `OutputRecord` への FK CASCADE で消える。`OutputState` は増やさない（「共有は成功したが写真ライブラリは不明」は `delivered` に付随する注記であり、状態へ混ぜると `isUndelivered` の定義が曖昧になる）。
+`resolveOrphanedAttempts` で `delivered` を維持したとき upsert する。利用者が「確認した」を選んだとき行を削除する。出力そのものが削除されたとき（`deleteOutput`、または 6 章の実体喪失時の削除）は `OutputRecord` への FK CASCADE で消える。`OutputState` は増やさない（「共有は成功したが写真ライブラリは不明」は `delivered` に付随する注記であり、状態へ混ぜると `isUndelivered` の定義が曖昧になる）。
 
 ##### 状態遷移は用途別メソッドで行う
 
-汎用の `updateOutputState(_:to:)` は置かない（任意の逆遷移を防ぐため）。
+汎用の `updateOutputState(_:to:)` は置かない（任意の逆遷移を防ぐため）。`OutputState` は `generated` / `deliveryUnknown` / `delivered` の3値であり、破棄は状態ではなく行の物理削除で表す（`discarded` という状態は存在しない）。
 
-| メソッド | 遷移 | 呼ばれる場面 |
+| メソッド | 効果 | 呼ばれる場面 |
 | --- | --- | --- |
 | `completeLibrarySave` | `generated` / `deliveryUnknown` → `delivered`。`DeliveryAttempt` を削除 | 写真ライブラリ保存の成功 |
 | `completeShare` | `generated` / `deliveryUnknown` → `delivered` | 共有の `.completed` |
 | `abandonDeliveryAttempt` | `previousState` へ戻す（現在が `delivered` なら維持） | 写真ライブラリ保存の失敗 |
 | `resolveOrphanedAttempts` | `previousState` が `generated` なら `deliveryUnknown`、`delivered` なら維持 | 起動時 |
-| `markDiscarded` | 任意の状態 → `discarded` | 完了後の出力を利用者が明示的に破棄したとき |
+| `deleteOutput` | 状態遷移ではない。`OutputRecord` と実体ファイルを物理削除する | 完了後の出力を利用者が明示的に破棄したとき |
 
 共有には `DeliveryAttempt` を作らない（結果が同期的に返るため中断点が無い）。共有の開始時点で既に `settledAt` は確定済み（完了後にのみ共有へ進めるため）である。
 
