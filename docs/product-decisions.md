@@ -88,7 +88,6 @@ Pro の説明は機能の列挙ではなく体験として記述し、**一枚�
 | 分類 | 発火条件 | 誘導先 |
 | --- | --- | --- |
 | `export-limit` | Free の月間枠を使い切った（`blocked(.monthlyLimitReached)`） | Standard |
-| `ledger-blocked` | 台帳の整合性検証に失敗し Free 枠が封じられている（`blocked(.ledgerIntegrityFailure)`） | Standard |
 | `premium-stamp` | 追加スタンプを選ぼうとした | Standard |
 | `custom-stamp` | カスタムスタンプを使おうとした | Standard |
 | `edit-locked` | **有料スタンプを含む**既存作品を編集しようとした | Standard |
@@ -103,13 +102,12 @@ Pro の説明は機能の列挙ではなく体験として記述し、**一枚�
 ```swift
 enum UpgradeReason: Int32, Sendable, Hashable {
     case exportLimit = 0
-    case ledgerBlocked = 1
-    case premiumStamp = 2
-    case customStamp = 3
-    case editLocked = 4
-    case batchCredit = 5
-    case batchSize = 6
-    case batchLimit = 7
+    case premiumStamp = 1
+    case customStamp = 2
+    case editLocked = 3
+    case batchCredit = 4
+    case batchSize = 5
+    case batchLimit = 6
 }
 ```
 

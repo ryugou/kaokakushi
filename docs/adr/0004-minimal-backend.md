@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR 0005](0005-drop-tamper-resistance-backend-and-heavy-fault-tolerance.md)（v1 はバックエンドを持たない）
 
 ## Context
 
