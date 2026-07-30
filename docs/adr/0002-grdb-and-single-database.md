@@ -8,8 +8,8 @@ Accepted
 
 本設計の中核は書き出しコミットジャーナル（[書き出し Saga](../export-saga.md)）であり、次を要求する。
 
-- **明示的なトランザクション境界。** 最終確定の手順 7 は `OutputRecord` の insert、`ExportRecord` の insert、キュー状態の更新、`Project` の更新、`WorkingSourceRecord` の delete、`ExportCommit` の `published` への更新を単一トランザクションで実行する
-- **原子性の検証可能性。** プロセス強制終了テストで、トランザクションが途中適用されないことを確認する
+- **明示的なトランザクション境界。** 出力確認画面の完了操作（`settleExport` / `settleBatch`）は、消費（月間枠またはクレジット）、`ExportRecord` の insert、確定記録の更新、キュー項目の確定、`WorkingSourceRecord` の delete、`ExportJob` の delete を単一トランザクションで実行する
+- **原子性の検証可能性。** 状態機械のユニットテストで、トランザクションが途中適用されないことを確認する（[書き出し Saga](../export-saga.md) の状態数が少ないため実機の process-death 注入を伴わずに検証できる。ADR 0005）
 - **ヘッドレス実行。** ドメインに近い層のテストをシミュレータ起動なしで走らせる
 
 当初は「バックアップの単位はファイルでありテーブルではない」ことを理由に、`runtime.db`（実行時状態）と `user-data.db`（利用者データ）へ分け、`ATTACH DATABASE` で 1 接続から扱う設計を採っていた。
@@ -38,7 +38,7 @@ GRDB は `try dbQueue.write { db in ... }` が SQLite のトランザクショ�
 | 得られるもの | 内容 |
 | --- | --- |
 | **実の外部キー制約** | `ATTACH` した別 DB は外部キーで参照できない。統合すれば SQLite が参照整合を強制し、アプリ側の起動時検査が不要になる |
-| 単一トランザクション | 手順 7 が `ATTACH` なしで成立する |
+| 単一トランザクション | 完了操作の確定処理が `ATTACH` なしで成立する |
 | 単一の `DatabaseMigrator` | 2 つの DB のスキーマバージョンが食い違う状態が存在しない |
 | 検証の単純化 | `PRAGMA` の確認がスキーマ 1 つで済む |
 

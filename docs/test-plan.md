@@ -7,7 +7,7 @@
 | 本書の範囲 | 層ごとの個別テスト項目の網羅一覧 |
 | 本書の対象外 | テスト戦略そのもの（3 層への分割と各層が保証する内容は [アーキテクチャ設計](architecture.md) 11 章が正） |
 
-節番号の参照は [アーキテクチャ設計](architecture.md) のものです。画像処理は [画像処理アーキテクチャ](image-pipeline.md)、書き出し手順は [書き出し Saga](export-saga.md)、ハッシュのバイト表現は [正準スキーマ](canonical-schema.md) を参照します。[ADR 0005](adr/0005-drop-tamper-resistance-backend-and-heavy-fault-tolerance.md) と [ADR 0006](adr/0006-accounting-per-delivered-output.md) の決定を反映済みです。
+節番号の参照は [アーキテクチャ設計](architecture.md) のものです。画像処理は [画像処理アーキテクチャ](image-pipeline.md)、書き出し手順は [書き出し Saga](export-saga.md)、ハッシュのバイト表現は [正準スキーマ](canonical-schema.md) を参照します。[ADR 0005](adr/0005-drop-tamper-resistance-backend-and-heavy-fault-tolerance.md) と [ADR 0006](adr/0006-accounting-per-delivered-output.md)（会計境界 v2：完了操作で消費・確定を一本化）の決定を反映済みです。
 
 ---
 
@@ -19,7 +19,7 @@
 | application saga test | `swift test`（数十秒） | 偽ストアによる各中断点の検証 |
 | adapter integration test | シミュレータ / 実機 | 実 GRDB、実ファイル保護、Vision、Core Image |
 
-**各項目は、検証が成立する最も低い層へ置きます。** 中断・再起動後の挙動は状態機械のユニットテストで検証します（[書き出し Saga](export-saga.md) の状態を 3〜4 個へ削減したため。ADR 0005）。
+**各項目は、検証が成立する最も低い層へ置きます。** 中断・再起動後の挙動は状態機械のユニットテストで検証します（[書き出し Saga](export-saga.md) の状態を少数に抑えたため。ADR 0005）。
 
 ---
 
@@ -30,10 +30,10 @@
 ### 2.1 クォータとトライアル（[アーキテクチャ設計](architecture.md) の 6.3）
 
 - `evaluateMonthlyQuota` / `rollPeriod`（月跨ぎ、端末 TZ 変更後の年月算出）
-- `evaluateMonthlyQuota` が更新後の `UsageLedger` を返し、`unlimited` でも手順 1（`rollPeriod`）が必ず実行されること
+- `evaluateMonthlyQuota` が更新後の `UsageLedger` を返すこと
 - `evaluateMonthlyQuota` が `access`（`SingleExportAccess`）を引数で受け取り `Plan` を見ないこと
 - `monthlyLimit` を引数で受け取り、`consumed >= limit` で `blocked(limit:)` になること
-- `period` が後退しないこと（`current > ledger.period` のときだけ更新される。過去へ戻しても更新されない）
+- **`current != ledger.period` なら `period` が現在の年月へ切り替わること（巻き戻しを含む。ADR 0006）**
 - 月初に `consumedExportIDs` だけがリセットされ、`trialConsumedExportIDs` は月をまたいで保持されること
 - 消費が件数ではなく `ExportID` の集合で持たれ、同一 `exportID` の再適用を拒否できること
 - 時刻は端末の現在時刻・現在タイムゾーンをそのまま使うこと（ADR 0005）
@@ -45,12 +45,12 @@
 - `canEnterBatch` が `canUseProBatch || (canUseBatchTrial && remainingCredits > 0)` で決まること
 - `batch-credit`（残クレジット超過）/ `batch-size`（Free・Standard の総数 5 枚超過）/ `batch-limit`（Pro の総数 50 枚超過）の発火条件。`batch-credit` は総枚数上限より残クレジットが少ない場合に `batch-size` より先に発火すること
 - バッチ選択とクレジット消費の判定が選択枚数と残クレジットのみで行われ、素材の同一性を問わないこと（ADR 0006）
-- 確定した成果物ごとに 1 クレジットを消費し、`reissue`（完了前のやり直し）は追加消費しないこと（1.5 は [書き出し Saga](export-saga.md) の節番号）
+- **確定した成果物ごとに 1 クレジットを消費すること。`settleBatch` は結果一覧での完了操作 1 回で、確定対象の枚数分だけをまとめて消費すること**（ADR 0006）
 - トライアルクレジットに期限が無いこと。トライアルで解放するのは一括処理という操作方式のみで、エフェクト・スタンプの利用範囲は書き換わらないこと
 - Pro へ加入済みならトライアルクレジットを消費しないこと
 - 顔 0 件の案内が `MonthlyQuotaDecision` で分岐すること（単体処理は仕様 14.2 上も消費対象。一括の顔 0 件は `noFaceDetected` の勘定規則に従う）
 
-### 2.2 レビュー状態とトリアージ（[アーキテクチャ設計](architecture.md) の 6.1 / 6.5）
+### 2.2 レビュー状態とトリアージ（[アーキテクチャ設計](architecture.md) の 6.1 / 6.4）
 
 - `triage`（6 つの要確認理由の各単独・複合、空集合）
 - `triage` の入力が [画像処理](image-pipeline.md) の共通モデル（`DetectionResult`）だけであること。OS 固有の値に依存しないこと
@@ -58,10 +58,7 @@
 - `lowConfidence` が顔ごとに 1 件の `ReviewIssue` になること
 - `ReviewIssueID` が `detectionRevision` を含み、`overlappingFaces` では顔 ID が辞書順に並ぶこと
 - `ReviewIssueID` が `projectID` を含み、同じ revision の別写真の `noFaceDetected` が別 ID になること
-- 書き出し認可が `DetectionStatus` を保存値ではなく `triage` の再実行で再導出すること
 - `FaceTrack` が `confidence` / `yawDegrees` / `pitchDegrees` / `rollDegrees` / `isSmallFace` を列として持ち、`triage` を再実行できること
-- `triage` 再導出と `ReviewDecision` 再検査が、書き出し認可の検査一覧（[書き出し Saga](export-saga.md) の 1.2）にも記載されていること
-- `ReviewDecision` の完全性を認可時に再検査し、`ReviewStatus` を DB 改変で `reviewed` にしても開始できないこと
 - `noFaceDetected` の写真は `unmaskedExportConfirmed` 相当の記録が無いかぎり開始できないこと
 - `affectedFaceTrackIDs` が ID から導出され、二重に保持されないこと
 - 再検出で `detectionRevision` が増え、その写真の `ReviewIssue` / `ReviewDecision` / `Reviewed` が破棄されること
@@ -83,7 +80,7 @@
 - 書き出しの成立条件がモードごとに異なること。1 枚ずつ確認では末尾到達と確認ボタンを求めないこと
 - 確認段階から設定へ戻っても検出結果が保持されること。この経路で写真の選択を変更できないこと
 
-### 2.3 バッチ選択と能力（[アーキテクチャ設計](architecture.md) の 6.2 / 6.5）
+### 2.3 バッチ選択と能力（[アーキテクチャ設計](architecture.md) の 6.2 / 6.4）
 
 - `canEnterBatch` が `canUseProBatch` / `canUseBatchTrial` / 残クレジットから導かれること
 - `canUseProBatch` / `canUseBatchTrial` が能力で判定され、`plan = pro` かつ `status = pending` が通常一括にならないこと
@@ -170,8 +167,8 @@
 
 - ストレージ必要量計算、`ExportQueueState` 状態機械
 - 履歴の保存期間と容量判定。24 時間のやり直し保証が容量超過時にも守られること
-- `canDeleteHistoryUnit` が列挙された全参照元を見ること（[アーキテクチャ設計](architecture.md) の 7.5。Saga 経由でも同一判定になることは 3.4 参照）
-- **絶対保護（非終端キュー項目 / `running` の `ExportJob` / `isUndelivered` の `OutputRecord`）が、手動削除でも拒否されること**
+- `canDeleteHistoryUnit` が列挙された全参照元を見ること（[アーキテクチャ設計](architecture.md) の 7.5。Saga 経由でも同一判定になることは 3.6 参照）
+- **絶対保護（非終端キュー項目 / 処理中の `ExportJob` / `isUndelivered` の `OutputRecord`）が、手動削除でも拒否されること**
 - **お気に入り・編集中・`WorkingSourceRecord`・24 時間保証が、自動削除では保護され、明示確認付きの手動削除では上書きできること**
 - **上書き対象ごとに、失われるものを示す確認文言が選ばれること**
 - 未保存バッチが 1 件までに制限されること
@@ -187,49 +184,62 @@
 
 偽 `ExportSagaStore` / `OutputDeliveryStore` / 偽ファイルを注入し、**各中断点**での挙動を検証します。実ストレージの原子性は検証しません（4 章の役割）。
 
-### 3.1 `ExportJob` の確定（[書き出し Saga](export-saga.md) の 3 / 4 章）
+### 3.1 認可と生成
 
-- 手順 0：`startExport` が `expectedProjectRevision` と不一致なら `throw` し、一致すれば `ExportJob(running)` を挿入すること
-- 手順 4：**単一トランザクション**で、`accountingMode` に従った台帳加算またはトライアルクレジット消費（`reissue` なら何もしない）、`ExportRecord` と `OutputRecord(generated)` の作成、キュー項目の `completed` 更新、`Project` の最終更新時刻の更新、`WorkingSourceRecord` の削除、confirmed 設定エントリの記録が同時に成立すること
-- `ExportJob.state == running` を確認し、二重確定を防ぐこと
-- 同じ `projectID` の**非終端**（`discarded` 以外の）`OutputRecord` が存在しないことを確認すること（部分 UNIQUE 制約と整合）
-- `queueItemID` が指定されていれば、対応するキュー項目が存在し `projectID` / `batchID` が一致し `state == .exporting` であることを確認すること
-- 確認を通ったら、同じ `projectID` の `discarded` 行があれば同一トランザクションで削除されること
-- `OutputRecord.outputFile` / `outputByteSize` / `outputSHA256` が `FinalizeExportInput` から、`generatedAt` / `expiresAt` が手順 4 のトランザクション時刻と `+ 24h` から、`format` / `suggestedCreationDate` が `ExportJob.delivery` から導出されること
-- パスを DB へ直接持たないこと（`OutputFileRef` 経由でのみ実体を解決する）
-- **手順 3（健全性確認）**: 存在確認だけでは不足し、サイズが 0 でなく簡易デコードが成功することを確認すること。いずれか不成立なら手順 4 へ進まず中断として扱うこと
-- `deleteJob` が冪等であること（行が無ければ何もしない）
-- 生成の失敗（手順 1〜3）・利用者によるキャンセル・手順 3 の不成立が、すべて `deleteJob` による一律の後始末で足りること。会計要素はまだ書き込まれていないため返還処理が不要であること
-- **手順 4 完了後、出力確認画面での「やり直す」が `deleteJob` ではなく `markDiscarded` で `OutputRecord` を `discarded` へ遷移させ、台帳を変更しないこと**（ADR 0006）。次の書き出しが `reissue` として追加消費なしで行えること
-- **明示的な完了操作（`markSettled`）を経たあとは前進のみで取り消せないこと**。完了後の破棄は新規消費になること
-
-### 3.2 認可とゲート（[書き出し Saga](export-saga.md) の 1 章）
-
-- 認可が 1.1（確認の一致）→ 1.2（`triage` 再導出）→ 1.3（設定内容の能力）→ 1.4（権限とクォータ）の順に検査され、いずれか不成立なら開始しないこと
+- 認可が `PreviewConfirmation` の一致検査と設定内容の能力検査（`authorizeRenderSpec`）の順に行われ、いずれか不成立なら開始しないこと。**`triage` の再導出は行わないこと**（保存済みの `DetectionStatus` / `ReviewStatus` / `ReviewDecision` をそのまま信頼する。ADR 0005）
 - 単体の開始条件が現在の `projectID` / `detectionRevision` / `previewRenderHash` の一致であること。バッチはこれに加え `BatchReviewState.batchID` の一致とモード別の確認条件を満たすこと
-- 確認の再導出が保存済み `reviewed` を根拠にせず、`FaceTrack` から `triage` を再実行して `ReviewDecision` の完全性を再検査すること
+- `reviewRequired` かつ `unreviewed` の写真が残っていれば開始しないこと
 - `WorkingSourceRecord` の実体（ファイルの存在）だけを確認すること。無ければ無効化して再選択導線へ倒すこと
 - 権限とクォータの評価で `.blocked` なら `ExportJob` を作らず、生成も開始しないこと
-- **`reissue` の成立条件が、同一 `projectID` の直近 `OutputRecord` が `state == discarded` かつ `settledAt == nil` であること**（回数・時間の制限は無い）。`settledAt` が確定した後に `discarded` になった行は根拠にならず新規消費になること
-- 開始後に契約の失効・月間上限への到達が起きても、その書き出しは開始時の権限（`ExportJob.authorization`）で完了すること。`running` の写真は完了し、`waiting` の写真は開始しないこと
-- **直列実行キュー1本（並列数1）が、同時に `running` になる `ExportJob` を 1 件までに保つこと**（ADR 0005）
+- 手順 0：`startExport` が `expectedProjectRevision` と不一致なら `throw` し、一致すれば `ExportJob(running)` を挿入すること
+- **生成の完了時点では `OutputRecord`（`settledAt: nil`）と出力ファイルだけが作られること。月間枠・トライアルクレジットのいずれも消費されないこと**（ADR 0006）
+- **生成の完了時点で `ExportRecord` が作成されないこと。確定記録（`ExportedSettingsEntry`）も更新されないこと**
+- **生成の完了時点でキュー項目が確定されないこと**
+- **生成の完了時点で `WorkingSourceRecord` が削除されず保持され、素材を再レンダリングできること**
+- **健全性確認**: 存在確認だけでは不足し、サイズが 0 でなく簡易デコードが成功することを確認すること。いずれか不成立なら中断として扱うこと
+- 生成の失敗（レンダリング・移動・健全性確認の不成立）・利用者によるキャンセルが、`ExportJob` の削除と生成済みファイルのベストエフォート削除で後始末されること。**まだ何も消費していないため返還処理は不要であること**
+- 開始後に契約の失効・月間上限への到達が起きても、`running` の写真は開始時の権限のまま生成を完了すること。`waiting` の写真は開始しないこと
+- **直列実行キュー1本（並列数1）が、同時に処理中の `ExportJob` を 1 件までに保つこと**（ADR 0005）
 - `startExport` が `expectedProjectRevision` つきで `ExportJob(running)` を挿入し、revision が変わっていれば失敗すること
 
-### 3.3 確定後の実体喪失（[書き出し Saga](export-saga.md) の 6 章）
+### 3.2 完了（`settleExport` / `settleBatch`）
 
-- 実体が無い、または `outputByteSize` / `outputSHA256` と一致しないとき、`OutputRecord` を `discarded` へ遷移させること（物理削除しない）
+- **`settleExport` が単一トランザクションで、消費（月間枠またはクレジット）・`settledAt` の設定・`ExportRecord` の作成・確定記録の更新・キュー項目の確定・`WorkingSourceRecord` の削除・`ExportJob` の削除を同時に行うこと**（ADR 0006）
+- 一度設定した `settledAt` は変更されないこと。二重に完了操作を呼んでも消費が重複しないこと
+- **`settleBatch` が結果一覧画面での完了操作 1 回で、対象バッチ内の確定対象の全出力を同一トランザクションで確定し、確定対象の枚数分だけクレジットを消費すること**（ADR 0006）
+- 完了操作の付近に「完了すると 1 枚として確定し、以降の作り直しは新しい 1 枚になる」旨が明示されること
+- 保存・共有が完了後にのみ行え、`beginDeliveryAttempt` / `completeLibrarySave` / `completeShare` が `settledAt != nil` を事前条件とすること（`nil` なら throw）
+- 保存・共有は何度実行しても追加消費せず、成否が枠に影響しないこと（失敗しても出力は保持され再試行できる）
+
+### 3.3 完了前の破棄
+
+- **完了前の「やり直す」が確認用出力（`OutputRecord`）と出力ファイルを削除するだけであること。免除・返還・補償のいずれの処理も伴わないこと**（ADR 0006。まだ何も消費していないため、その概念自体が存在しない）
+- 破棄後も月間枠・トライアルクレジットが変化しないこと
+- **破棄後も素材（`WorkingSourceRecord`）が保持され、同じ設定・別の設定のいずれでも再レンダリングできること**
+- 破棄の回数に制限が無いこと
+- **完了前の出力が永続保護されないこと。アプリの再起動またはフローからの離脱で破棄されること**（消費していないため損失は操作の手間だけにとどまる）
+- 24 時間の保持規則が、完了済みで未受け渡しの出力にのみ適用され、完了前の出力には適用されないこと
+
+### 3.4 確定後の実体喪失（[書き出し Saga](export-saga.md) の 6 章）
+
+- 実体が無い、または `outputByteSize` / `outputSHA256` と一致しないとき、`OutputRecord` を `discarded` へ遷移させること（物理削除しない。`settledAt` は保持したまま残す）
 - **`UsageLedger` を変更しないこと**（月間枠・トライアルクレジットのいずれも戻さない）
-- **`settledAt == nil`（未完了）のまま失った場合、`reissue` でやり直せること**（追加消費なし）
-- **`settledAt` が確定済み（完了後）に失った場合、新規消費でやり直すこと。`reissue` は成立しないこと**
 - 自動再生成を行わないこと。利用者へは新しい書き出しとして案内すること
 
-### 3.4 出力の寿命と履歴（[アーキテクチャ設計](architecture.md) の 7.5）
+### 3.5 起動時復旧
 
-- `OutputRecord` が `ExportJob` の状態と独立に期限判定できること
+- **起動時復旧が次の順序で実行されること**: (1) `running` の `ExportJob` を削除する (2) `settledAt == nil` の未確定出力（`OutputRecord` と出力ファイル）を削除する (3) 孤児ファイルを GC で回収する (4) `resolveOrphanedAttempts` で残存 `DeliveryAttempt` を解決する (5) `UnknownLibrarySave` を読み込む (6) 復旧案内を提示する
+- 復旧が完了するまで新しい書き出しを開始させないこと
+- `DeliveryAttempt` が残っている場合、`previousState == generated` なら `deliveryUnknown` へ、`previousState == delivered` なら `delivered` を維持したうえで「保存結果が不明」を別途提示すること。状態を後退させないこと
+- `resolveOrphanedAttempts` が解決後の全出力の受け渡し状態を返すこと。復旧案内はこの戻り値を使うこと
+
+### 3.6 出力の寿命と履歴（[アーキテクチャ設計](architecture.md) の 7.5）
+
+- `OutputRecord` が独立に期限判定できること
 - 未受け渡しの出力が破棄または 24 時間経過まで保持されること
 - 受け渡し成功後も完了画面を離れるまで出力が保持され、保存と共有を任意の順序で実行できること
 - 異常終了後の起動時、`isUndelivered` では復旧案内が出て、`delivered` では出ないこと
-- 「履歴を保存しない」設定で、未受け渡し出力・保存結果不明の注記が付いた `delivered` 出力・`UsageLedger` の消費記録・未完了の `ExportJob` とその検証済み出力ファイルの 4 つ以外が残らないこと
+- 「履歴を保存しない」設定で、未受け渡し出力・保存結果不明の注記が付いた `delivered` 出力・`UsageLedger` の消費記録・処理中の `ExportJob` とその生成済み出力の 4 つ以外が残らないこと
 - `canDeleteHistoryUnit` が**列挙された全参照元**を保護すること
 - **`Batch` 削除が所属する全 `Project`・キュー項目・`ExportRecord` を 1 トランザクションで削除し、台帳側も全 `projectID` 分を 1 トランザクションで削除すること**
 - **`deleteHistoryUnit` が `DeletionContext` を受け取らず、DB トランザクション内で読み直して再判定すること**
@@ -255,7 +265,7 @@
 - **`PreviewConfirmation` が DB に存在せず、`detectionRevision` の増加だけで確認が無効になること**
 - **`isTerminal` が `completed` / `failed` / `canceled` のみ真であり、履歴削除の保護と完了判定が同じ述語を使うこと**
 
-### 3.5 更新誘導との順序（[アーキテクチャ設計](architecture.md) の 6.6）
+### 3.7 更新誘導との順序（[アーキテクチャ設計](architecture.md) の 6.6）
 
 - 更新判定が起動時復旧の完了後に実行されること
 - `.recommended` が編集中・書き出し中・未受け渡し出力があるときに表示されないこと
@@ -271,13 +281,13 @@
 
 `MediaKit` / `Persistence` / `Billing` / `Ads` の各プロトコルに対し、**実装と偽実装の両方へ同じスイート**を実行します。偽実装が本物と違う挙動をすると saga テストが無意味になるため、この一致を検証します。
 
-### 4.2 永続化の原子性（[アーキテクチャ設計](architecture.md) の 7.1、[書き出し Saga](export-saga.md) の 3）
+### 4.2 永続化の原子性（[アーキテクチャ設計](architecture.md) の 7.1）
 
-- 手順 4 の DB トランザクションが原子的であり、`OutputRecord` / `ExportRecord` / キュー状態 / `Project` / `WorkingSourceRecord` の更新と `ExportJob` の `completed` 更新が同時に成立すること
-- **「`ExportJob` が `completed` かつ `OutputRecord` が存在する」が手順 4 の成功後だけ観測されること**
+- **`settleExport` / `settleBatch` の DB トランザクションが原子的であり、`OutputRecord.settledAt` の設定・`ExportRecord` / キュー状態 / `Project` / `WorkingSourceRecord` の更新・`ExportJob` の削除が同時に成立すること**
+- **完了操作の成功後にのみ `OutputRecord.settledAt` が確定していること。途中状態（消費だけ・`settledAt` だけ等）が観測されないこと**
 - `synchronous = EXTRA` と `foreign_keys = ON` が設定され、起動時に読み返して検証されること
 - スキーマ移行が単一トランザクションで確定し、途中適用が観測されないこと
-- **外部キー制約が有効であり、`Project` の削除が `OutputRecord`（非終端）/ `running` の `ExportJob` の存在で RESTRICT されること**
+- **外部キー制約が有効であり、`Project` の削除が `OutputRecord`（非終端）/ 処理中の `ExportJob` の存在で RESTRICT されること**
 - **`Batch` の削除で `OutputRecord.batchID` / `ExportRecord.batchID` / `ExportJob.batchID` が SET NULL になること**
 - **`OutputRecord.projectID` の部分 UNIQUE インデックス（`state != discarded`）が非終端出力を 1 プロジェクトにつき 1 件へ制限すること**
 - **`journal_mode` が `DELETE` であり、`TRUNCATE` / `PERSIST` / `WAL` なら復旧エラーになること**
@@ -353,6 +363,7 @@
 
 - `SharePresenter` が `UIActivityViewController` の結果を 4 値へ正しく写像すること
 - `CrashReporter` が例外メッセージ・パス・URL を除去し、breadcrumbs を列挙済みイベントに限定すること
+- **Sentry への送信対象がクラッシュと未分類例外のみであること。広告読み込み失敗・容量不足・保存権限拒否など想定内のエラーは送らないこと**
 
 ---
 
