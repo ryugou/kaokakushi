@@ -669,7 +669,7 @@ func makeCIRect(_ rect: PixelRect, canvasHeight: Int) -> CGRect {
 | `StampRasterizer` | スタンプのラスタライズ（3 章） | `Rendering` | Core Graphics |
 | `ProtectedDataAvailability` | 保護データの利用可否と復帰待ち | `App` | `UIApplication` と 2 つの通知 |
 
-永続化・課金・排他のプロトコル（`CryptoKeyStore` / `ProtectedBlobStore` / `ManagedFileStore` / `UsageLedgerStore` / `ExportStartGate` / `CrashReporter`）は [アーキテクチャ設計](architecture.md) が正本です。
+永続化・排他のプロトコル（`ManagedFileStore` / `HistoryDeletionStore` / `CrashReporter`）は [アーキテクチャ設計](architecture.md)、書き出し関連のポート（`ExportSagaStore` / `OutputDeliveryStore`）は [書き出し Saga](export-saga.md) が正本です。
 
 ##### 境界型
 
