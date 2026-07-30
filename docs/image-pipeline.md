@@ -506,7 +506,7 @@ struct RasterizedStampAsset: Sendable {
 }
 ```
 
-`ImageEffectRenderer` はこの型を `rasterAssets: [String: RasterizedStampAsset]` として受け取ります。**プロトコルの宣言は 5 章が正本です**（下記の検証済み境界の節）。ここでは受け渡す値の形だけを定めます。
+`ImageEffectRenderer` はこの型を `rasterAssets: [String: RasterizedStampAsset]` として受け取ります。**プロトコルの宣言は 5 章の「プロトコルのシグネチャ」が正本です。** ここでは受け渡す値の形だけを定めます。
 
 **実体はファイル経由で渡します。** 1 バッチ 50 枚では、原寸スタンプのビットマップを複数枚同時にメモリへ載せることになります。一時ファイルにすれば `CGDataProvider(url:)` でメモリマップして読めます。
 
@@ -768,9 +768,21 @@ v1 が生成する生ビットマップは常に次の値をとります。
 
 ```swift
 protocol PickedPhotoLoader: Sendable {
-    /// 取り込み時のみ。まだ binding が無い新しいファイルを読み、向きを正規化する。
-    /// 既存 Project の素材には使わない（5 章の検証済み境界）
+    /// 取り込み時のみ。まだ Project に結び付いていない新しいファイルを読み、向きを正規化する。
+    /// 既存 Project の素材は WorkingSourceRecord 経由の ImageSource で読む
     func load(_ file: ManagedFileRef) async throws -> LoadedPhoto
+}
+
+protocol FaceDetector: Sendable {
+    func detect(_ source: ImageSource) async throws -> DetectionResult
+}
+
+protocol ImageEffectRenderer: Sendable {
+    func render(
+        source: ImageSource,
+        plan: RenderPlan,
+        rasterAssets: [String: RasterizedStampAsset]
+    ) async throws -> RenderedImage
 }
 
 protocol ImageEncoder: Sendable {
@@ -857,7 +869,7 @@ struct PickedPhotoInput: Sendable {
 
 **手順 3 が要点です。** 48 メガピクセルの画像を `Data` のまま抱えると、50 枚の一括処理でメモリが尽きます。
 
-**`providerAssetIdentifier` は `PickedPhotoInput` の寿命の中でのみ使います。** ログへ出さず、永続化しません。ハッシュ化した値だけが台帳へ入ります。
+**`providerAssetIdentifier` は `PickedPhotoInput` の寿命の中でのみ使います。** ログへ出さず、永続化しません。ハッシュ化した値だけが DB へ入ります。
 
 ##### ピッカー固有の契約
 
@@ -913,118 +925,67 @@ struct WorkingSourceRecord: Sendable {
 
 ##### インポート Saga
 
-**ファイルシステムと SQLite、および DB と `ProtectedBlobStore` は、それぞれ同一トランザクションに参加できないため、補償可能な 1 つのインポート Saga として順序を固定して定義します。** 取り込みファイルは bridge がすでに物質化済み（選択手順 3）であり、Saga はそれを作り直しません。**手順 1 は所有権の移管です。**
+**ADR 0005 により署名台帳が無くなり、ファイルシステムと単一の `app.db` トランザクションだけの手順になります。** 取り込みファイルは bridge がすでに物質化済み（選択手順 3）であり、Saga はそれを作り直しません。
 
-| 順 | 操作 | 保存先 | 失敗時 |
-| --- | --- | --- | --- |
-| 1 | `PickedPhotoInput.importedFile` の**所有権を受け取る**（以降の削除責務は Saga 側） | — | ファイルを削除して選択を失敗として返す |
-| 2 | `contentFingerprint` と EXIF を読む | — | 同上 |
-| 3 | **向きを正規化した原寸ファイルを作成し、その SHA-256 とサイズを測る** | ファイルシステム | 手順 8 へ |
-| 4 | **台帳トランザクションで、素材 identity を `SourceRecord` へ解決（無ければ作成）し、`ProjectSourceSnapshot` と `WorkingSourceBinding` を保存する** | ProtectedBlobStore | 手順 8 へ |
-| 5 | **DB トランザクションで `Project`・キュー項目・`WorkingSourceRecord`（正規化ファイルを指す）を作成する** | DB | 手順 7 へ |
-| 6 | **取り込みファイルを削除する。** 削除に失敗したら `PendingFileDeletion` へ積む | ファイルシステム | 起動時 GC へ委ねる |
-| 7 | 手順 5 が失敗したら、**snapshot と binding を補償削除し、参照されなくなった `SourceRecord` も同じトランザクションで削除する** | ProtectedBlobStore | 起動時 GC へ委ねる |
-| 8 | 失敗したら、作成済みのファイル（取り込み・正規化の両方）を削除するか `PendingFileDeletion` へ追加する | ファイルシステム | 起動時 GC へ委ねる |
-| 9 | **手順 5 の完了後にのみ、選択処理の成功を呼び出し元へ返す** | — | — |
+1. `PickedPhotoInput.importedFile` の所有権を受け取り、`contentFingerprint` と EXIF を読む
+2. 向きを正規化した原寸ファイルを作成し `working/` へ書き込む
+3. 単一 DB トランザクションで、素材 identity を `SourceRecord` へ解決（無ければ作成）し、`ProjectSourceSnapshot`・`Project`・キュー項目・`WorkingSourceRecord`（正規化ファイルを指す）を作成する
+4. 取り込みファイルを削除する（削除に失敗したら `PendingFileDeletion` へ積む）
 
-**手順 6 を DB 確定の後に置くのは、先に消すと手順 5 失敗時に再試行できないためです。** DB が確定していれば取り込みファイルはもう誰からも参照されないため、残っても孤児 GC が回収します。取り込みファイルは残しません。正規化後の原寸があれば処理は成立し、未加工の顔画像を端末へ二重に置く理由がありません。
-
-**手順 4 で `SourceRecord` も作るのは、台帳の不変条件 9（全 `ProjectSourceSnapshot.identity` の alias がいずれかの `SourceRecord` に存在する）を満たすためです**（[アーキテクチャ設計](architecture.md) の 6.4）。snapshot 自体に `sourceID` は持たせず identity のまま持ち、解決は開始ゲートの内側で行います。統合後に古い `sourceID` を握ることを避けるためです。snapshot を DB より先に保存するのは、逆順だと「DB 行はあるが identity が無い」状態が生まれ `sourceID` を解決できなくなるためで、この順なら余るのは「snapshot はあるが `Project` が無い」状態だけです。これは起動時復旧の手順 5.5 で、`exportedSettingsEntries` の孤児と同じ走査により GC します（[書き出し Saga](export-saga.md) の 5）。
-
-**`WorkingSourceRecord` は最初から向き正規化済みの原寸ファイルを指し、取り込みファイルを登録してから差し替える構成は採りません。** 差し替えの正誤規則が追加で必要になるためです。`contentFingerprint` は取り込みファイル（ピッカーが返した実データ）から計算します（[アーキテクチャ設計](architecture.md) の 6.4）。正規化後から計算すると、デコード実装の変更で同じ写真が別素材になります。
-
-**手順 1〜4 の途中終了ではファイルがどの `WorkingSourceRecord` からも参照されず、起動時の孤児 GC が回収します。** 逆順（行を先に作る）は採りません。実体の無い `WorkingSourceRecord` を参照するキュー項目ができ、復元時に必ず `paused(.sourceReselectionRequired)` へ落ちるためです。**失っても復旧できない側を避ける**という原則（[アーキテクチャ設計](architecture.md) の DB とファイルの更新順序）に従います。
+**手順 3 が失敗した場合、作成済みのファイル（取り込み・正規化の両方）を `PendingFileDeletion` へ積み、起動時の孤児 GC に委ねます。** `contentFingerprint` は取り込みファイル（ピッカーが返した実データ）から計算します（[アーキテクチャ設計](architecture.md) の 6.4）。正規化後から計算すると、デコード実装の変更で同じ写真が別素材になります。
 
 ##### 素材スナップショットを署名して保存する
 
-**`WorkingSourceRecord` だけでは、再起動後に `sourceID` を解決できません。** 選択・検出のあと書き出し開始前に終了すると、次がすべて失われます。
-
-| 失われる値 | 影響 |
-| --- | --- |
-| `SourceIdentity`（`providerAssetKeyHash` / `contentFingerprint`） | 正規 `sourceID` を解決できない |
-| `SourceRepresentation` | 診断の区分値が欠ける |
-| EXIF 由来の撮影日時 | `suggestedCreationDate` を組み立てられない |
-| 写真ライブラリの登録日時 | 同上 |
-
-正規化済みファイルからは再計算できません。`contentFingerprint` は取り込みファイル基準の規約であり、取り込みファイルは手順 6 で削除済みだからです。**これらを未署名の DB 行へ置くと、`SourceIdentity` を書き換えて「別素材」を装い無料枠を回避できてしまいます。** `ProtectedBlobStore` の署名対象へ持たせます。型定義は [アーキテクチャ設計](architecture.md) の 6.3 が正本です。
-
-| 契機 | 操作 |
-| --- | --- |
-| インポート Saga の手順 4 | **同じ台帳トランザクション**で追加する |
-| 書き出しの手順 −2 | この snapshot から `sourceID` を解決する |
-| 再選択 Saga の手順 3 | 候補の `SourceIdentity` と照合する |
-| 履歴からの再編集・「変更せず再書き出し」 | 素材が同じであることの根拠にする |
-| **`Project` の削除** | **ここでのみ削除する**（[アーキテクチャ設計](architecture.md) の 7.5） |
-
-書き出しの完了でも保持期限到達でも削除しません。どちらで消しても再選択の照合元と再編集時の素材同一性が失われるためです。`sourceID` まで確定させない理由は上記インポート Saga のとおりで、alias 統合が認可と同じトランザクションで起こるためです（[アーキテクチャ設計](architecture.md) の 6.4）。要素数は履歴の保存期間内の `Project` 数で上限があります（同 6.3）。
+**ADR 0005 により署名を廃止し、`ProjectSourceSnapshot` は `app.db` へ平文で保存します。** インポート Saga の手順 3 で `Project` 作成と同じトランザクションで保存し、`Project` の削除でのみ削除します（再選択・再編集時の素材同一性の照合元として必要なため、保持期限到達や書き出し完了では削除しません）。
 
 ##### 検出用の縮小画像の寿命
 
-**縮小画像をファイルにしません。** `FaceDetector` の実装がメモリ内で作り、呼び出しの復帰時に解放します（5 章）。
+**縮小画像をファイルにしません。** `FaceDetector` の実装がメモリ内で作り、呼び出しの復帰時に解放します。
 
 | 項目 | 規約 |
 | --- | --- |
-| 生成 | **`FaceDetector` の実装の中。** `VerifiedImageSource.handle` から `withMappedBytes` で読む |
+| 生成 | **`FaceDetector` の実装の中。** `ImageSource.file`（`ManagedFileRef`）から読む |
 | 実体 | **メモリのみ。** `ManagedFileStore` へ書かない |
 | 寿命 | `detect` の呼び出しから復帰までのスコープ |
 | DB への登録 | **しない。** `WorkingSourceRecord` が指すのは原寸だけ |
 | 再検出 | そのつど作り直す |
 
-再検出は利用者が明示的に行う操作で頻度が低く、原寸から作り直す費用は 1 回の縮小だけです。**縮小をファイル化すると、binding を持たない派生ファイルへの読み取り経路が生まれ、検証済み境界（下記）を迂回した差し替えが可能になります。** 検出器の内側へ閉じ込めることで、この経路自体を無くします。
+再検出は利用者が明示的に行う操作で頻度が低く、原寸から作り直す費用は 1 回の縮小だけです。縮小をファイル化すると未加工の顔画像の複製が端末に増えるため、検出器の内側だけで完結させます。
 
 ##### 再選択後の Saga
 
-**`paused(.sourceReselectionRequired)` と履歴からの再編集は、どちらも「素材を選び直して既存 `Project` へ結び直す」操作です。** 定めないと、別の写真を選び直しても以前の顔座標・`ReviewIssue`・`ReviewDecision` を保持したまま再開できてしまいます。通常のインポート Saga は新しい `Project` を作り `ProjectSourceSnapshot` を上書きするため、比較対象を比較前に壊してしまい再利用できません。前半（手順 1〜4）は共通で、後半だけが分岐します。
+**`paused(.sourceReselectionRequired)` と履歴からの再編集は、どちらも「素材を選び直して既存 `Project` へ結び直す」操作です。** 通常のインポート Saga は新しい `Project` を作り `ProjectSourceSnapshot` を上書きするため、比較対象を比較前に壊してしまい再利用できません。
 
-| 順 | 操作 | 失敗時 |
-| --- | --- | --- |
-| 1 | 候補ファイルを**一時的に**物質化し、`contentFingerprint` と EXIF を読む | 候補ファイルを削除して終了 |
-| 2 | **旧 `ProjectSourceSnapshot` は変更しない** | — |
-| 3 | `transact` の内側で、候補の `SourceIdentity` と snapshot の `identity` が**同じ alias 連結成分へ解決されるか**を判定する（[アーキテクチャ設計](architecture.md) の 6.4） | 候補ファイルを削除して終了 |
-| 4 | 不一致なら候補ファイルを削除し、選び直しを求める | — |
-| 5 | 一致したら、**同じ台帳トランザクションで候補の alias を勝者 `SourceRecord` へ追加する** | 候補ファイルを削除して終了 |
-| 6 | 向きを正規化した原寸ファイルを作り、SHA-256 とサイズを測る | 手順 10 へ |
-| 7 | **台帳トランザクション**で `WorkingSourceBinding` を新しい値へ置換する。**置換前の値を保持しておく** | 手順 10 へ |
-| 8 | **DB トランザクション**で後半（下記）を実行する | 手順 9 へ |
-| 9 | 手順 8 が失敗したら、**台帳トランザクションで binding を置換前の値へ戻す** | 起動時の照合へ委ねる |
-| 10 | 失敗経路では、作成済みの正規化ファイルと候補ファイルを `PendingFileDeletion` へ積む | — |
-| 11 | 成功したら**候補ファイル（正規化前）を削除する。** 失敗したら `PendingFileDeletion` へ積む | — |
+1. 候補ファイルを一時的に物質化し、`contentFingerprint` と EXIF を読む
+2. 候補の `SourceIdentity` と旧 `ProjectSourceSnapshot.identity` が同じ alias 連結成分へ解決されるかを判定する（[アーキテクチャ設計](architecture.md) の 6.4）。不一致なら候補ファイルを削除し選び直しを求める
+3. 向きを正規化した原寸ファイルを作成し `working/` へ書き込む
+4. 単一 DB トランザクションで、alias を勝者 `SourceRecord` へ追加し、`WorkingSourceRecord` の置換または新規作成、`FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` の破棄、`detectionRevision` / `projectRevision` の増加を行う
+5. 候補ファイル（正規化前）と、置換された旧 `sourceFile` を削除する（失敗したら `PendingFileDeletion` へ積む）
 
-後半（手順 8）は `WorkingSourceRecord` の有無で決まります。**「再選択」と「再編集」を利用者の導線ではなく、DB の状態で分岐させます。**
+手順 4 は `WorkingSourceRecord` の有無で分岐します。
 
-| 現在の状態 | 呼ぶメソッド | 内容 |
-| --- | --- | --- |
-| `WorkingSourceRecord` **あり**（実体が欠損している場合を含む） | `replaceWorkingSource` | `sourceFile` を置換し、**トランザクション内で読んだ現在値**を `PendingFileDeletion` へ入れる。`createdAt` を `replacedAt` へ更新する |
-| `WorkingSourceRecord` **なし**（24 時間で削除済み・履歴から開いた） | `attachWorkingSourceToExistingProject` | 行を新規作成する。`createdAt` は `attachedAt` |
+| 現在の状態 | 呼ぶメソッド |
+| --- | --- |
+| `WorkingSourceRecord` **あり**（実体が欠損している場合を含む） | `replaceWorkingSource`（`sourceFile` を置換し `createdAt` を `replacedAt` へ更新） |
+| `WorkingSourceRecord` **なし**（24 時間で削除済み・履歴から開いた） | `attachWorkingSourceToExistingProject`（行を新規作成し `createdAt` は `attachedAt`） |
 
-どちらも同一 DB トランザクションで `FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` を破棄し、`detectionRevision` / `projectRevision` を増加させます。完了後に顔検出をやり直し、新しい確認が完了するまで書き出しできません。**`PreviewConfirmation` は DB に無くセッション内の値のため**（[正準スキーマ](canonical-schema.md) の 5.2）、`detectionRevision` が増えた時点で不一致になり、破棄操作自体が不要です。
+完了後に顔検出をやり直し、新しい確認が完了するまで書き出しできません。**`PreviewConfirmation` は DB に無くセッション内の値のため**（[正準スキーマ](canonical-schema.md) の 5.2）、`detectionRevision` が増えた時点で不一致になり、破棄操作自体が不要です。
 
 ##### 台帳と DB は同時に更新できない
 
-**`WorkingSourceBinding` は署名済み台帳に、`WorkingSourceRecord` は `app.db` にあり、DB トランザクションの内側から台帳を更新することはできません**（[アーキテクチャ設計](architecture.md) の 7.1）。そのため手順 7 と 8 の間には片側だけが進んだ区間が必ず存在し、専用の変更ジャーナルを設ける代わりに起動時に安全側へ回復させます。
-
-| 中断位置 | 台帳 | DB | 起動時の判定 |
-| --- | --- | --- | --- |
-| 手順 7 の前 | 旧 binding | 旧 record | 一致。**何も起きない** |
-| **手順 7 と 8 の間** | **新 binding** | **旧 record** | 不一致。**`paused(.sourceReselectionRequired)` へ倒し、選び直しからやり直す** |
-| 手順 8 の後 | 新 binding | 新 record | 一致。**完了している** |
-| 手順 9（補償）の後 | 旧 binding | 旧 record | 一致。**何も起きない** |
-
-中断区間では再選択の操作だけがやり直しになり、素材・設定・検出結果は壊れず、別画像が正規の binding として通ることもありません。**逆順（DB を先）にはできません。** 新しいファイルが binding に無い状態で `WorkingSourceRecord` から参照される区間が生まれ、「binding があって record が無い」＝孤児、「record があって binding が無い」＝差し替え、という一意な解釈が崩れるためです。**更新は台帳先行、削除は DB 先行で固定します（この原則は他の更新・削除経路すべてに適用します）。**
-
-`createdAt` は保持期限の起点であるため更新します。更新しないと再選択直後に 24 時間期限へ到達し再び削除されます。`previousSourceFile` は呼び出し側から渡さず、置換対象は DB トランザクション内で読みます。読んだ時点とトランザクションの間に別経路が置換すると、現在使用中のファイルを削除対象として渡しかねないためです。手順 8 以降は再検出の既存規則（[アーキテクチャ設計](architecture.md) の 6.1）と同じで、再選択は再検出を伴うため確認状態の破棄も自動的に成立します。
+**ADR 0005 により署名台帳が `app.db` の平文行になり、この問題自体が消滅しました。** すべての更新は単一の DB トランザクションに閉じます（`createdAt` は保持期限の起点のため、置換・再接続のたびに更新します）。
 
 ##### 実装の所在
 
-**インポート・再選択・再接続・複製の 4 つの Saga と、検証失敗時の無効化は `Application` の `SourceImportCoordinator` が所有します。** いずれもファイル・DB・台帳を協調させるため、`App` の境界サービスにも `Domain` にも置けません（[アーキテクチャ設計](architecture.md) の 4.3）。
+**インポート・再選択・再接続・複製の 4 つの Saga は `Application` の `SourceImportCoordinator` が所有します。** いずれもファイルシステムと DB を協調させるため、`App` の境界サービスにも `Domain` にも置けません（[アーキテクチャ設計](architecture.md) の 4.3）。
 
 ```swift
 // Domain — 永続化ポート
 protocol WorkingSourceStore: Sendable {
-    /// インポート Saga の手順 5。単一 DB トランザクション
+    /// インポート Saga の手順 3。単一 DB トランザクション
     func createProjectWithWorkingSource(_ input: CreateWorkingSourceInput) async throws
 
-    /// 素材更新 Saga の手順 8（DB 側）。単一 DB トランザクション
+    /// 素材更新 Saga の手順 4。単一 DB トランザクション
     func replaceWorkingSource(_ input: ReplaceWorkingSourceInput) async throws
 
     /// 履歴の既存 Project へ処理用素材を再接続する（下記）
@@ -1032,12 +993,12 @@ protocol WorkingSourceStore: Sendable {
         _ input: AttachWorkingSourceInput
     ) async throws
 
-    /// 保持期限と台帳修復での破棄
+    /// 保持期限での破棄
     func deleteWorkingSource(_ projectID: ProjectID) async throws
 }
 ```
 
-**`WorkingSourceStore` は DB トランザクションだけを実装します。** 入力に署名済み台帳の値（`WorkingSourceBinding` や解決済み `SourceID`）を持たせません。持たせると、DB アダプタが台帳を書けるかのような契約になり、**「同一トランザクションで両方を更新する」という実装できない読み方**を招きます。台帳の更新は Saga 側が別トランザクションで行います（インポートは手順 4、再選択・再接続は手順 3・5・7）。
+`WorkingSourceStore` は単一の `app.db` トランザクションとして実装します。
 
 ```swift
 
@@ -1067,253 +1028,31 @@ struct AttachWorkingSourceInput: Sendable {
 
 ##### 実体と署名済み identity を結び付ける
 
-**`ProjectSourceSnapshot` は署名済みですが、実体側の `WorkingSourceRecord` は未署名の DB 行です。** `sourceFile` を別プロジェクトの `.processingTemporary` ファイルへ差し替えると、次の状態を作れます（`kind` の検査ではどちらも `.processingTemporary` のため防げません）。
-
-| 参照するもの | 値 |
-| --- | --- |
-| クォータ・トライアルの判定 | 元の署名済み `identity` |
-| 実際にレンダリングする画像 | 差し替えた別の写真 |
-
-署名対象へ、実体との結び付きを持たせます。
-
-```swift
-/// UsageLedger の一部。projectID ごとに 0 件または 1 件
-struct WorkingSourceBinding: Sendable, Equatable {
-    let projectID: ProjectID
-    let sourceFile: WorkingSourceFileRef
-    let normalizedFileSHA256: Data     // 32 バイト。正規化後ファイルの全バイト
-    let byteSize: Int64
-}
-```
-
-| 契機 | 操作 |
-| --- | --- |
-| インポート（手順 4）・再選択・再接続 | 正規化ファイルの作成後、**その台帳トランザクションで追加または置換する** |
-| 起動時復旧（手順 4.5） | `WorkingSourceRecord` を持つ全 `Project` について実体と照合する |
-| **書き出しの手順 −2** | 認可の内側で照合する。不一致なら開始しない |
-| `WorkingSourceRecord` の削除 | **DB を先に消す。** 残った binding は孤児として台帳側で回収する（下記） |
-
-| 照合結果 | 扱い |
-| --- | --- |
-| 一致 | 続行する |
-| `sourceFile` が binding と違う | **差し替え。** その `Project` の `WorkingSourceRecord` を破棄し、`paused(.sourceReselectionRequired)` へ |
-| ハッシュまたはサイズが違う | 同上 |
-| **`WorkingSourceRecord` があり binding が無い** | 同上。**照合できないものを通しません** |
-| **binding があり `WorkingSourceRecord` が無い** | **孤児。** 台帳トランザクションで binding を削除する |
-
-起動時と書き出し開始時の 2 回照合します。起動時だけでは起動後の差し替えを検出できず、書き出し開始時だけでは編集画面が差し替え後の画像を表示したまま操作できてしまうためです。
+**ADR 0005 により、実体の署名照合機構（`WorkingSourceBinding` と台帳との結び付け）を廃止します。** `WorkingSourceRecord`（`app.db` の平文行）がファイル参照とメタデータを持ち、実体を開くときは**ファイルの存在確認のみ**行います。存在しなければ `WorkingSourceRecord` を破棄し `paused(.sourceReselectionRequired)` へ遷移させ、再選択の導線を出します（起動時と書き出し開始時の 2 回確認します）。`FaceDetector` / `ImageEffectRenderer` は検証済みラッパを介さず、通常の `ImageSource`（上記「境界型」）を受け取ります（プロトコル宣言は上記「プロトコルのシグネチャ」）。
 
 ##### binding は DB を先に消す
 
-**`WorkingSourceRecord`（DB）と binding（台帳）は同一トランザクションで消せないため、上記の原則どおり DB を先に消します。**
-
-| 順 | 操作 |
-| --- | --- |
-| 1 | DB トランザクションで `WorkingSourceRecord` を削除し、実体を `PendingFileDeletion` へ積む |
-| 2 | 台帳トランザクションで binding を削除する（または起動時の孤児回収に委ねる） |
-
-逆順にすると「record があり binding が無い」状態になり、正常な削除の途中経過が差し替えとして誤検出されます。DB を先に消せば余るのは孤児 binding だけで、照合の判定に影響しません。**この順序は書き出しの手順 7、24 時間期限の削除、`Project` 削除 Saga、台帳修復のすべてに適用します。**
-
-照合は起動時復旧の手順 4.5 で行います。コミット復旧（手順 4）より前に置くと、手順 7 完了で消えるはずの `WorkingSourceRecord` を差し替えとして誤検出するためです（[書き出し Saga](export-saga.md) の 5）。
+**ADR 0005 により廃止。** `WorkingSourceBinding` を含む署名台帳が無くなり、`WorkingSourceRecord` は `app.db` の通常の行として単一トランザクションで削除します。
 
 ##### 検証済み境界を通してのみ実体を開く
 
-**起動時と書き出し開始時の 2 点だけでは足りません。** その間に DB の `sourceFile` を別画像へ差し替えられると、起動時照合を通過した `Project` でもプレビュー・再検出・「Free 版として複製」が別画像を読み、複製先に誤って新しい正規 binding が作られてしまいます（本書内で扱う差し替え系の脅威はすべてこの 1 パターンです）。**そのため `WorkingSourceRecord` を直接読ませず、原寸ファイルを開くすべての入口を検証済み境界へ集約します。**
-
-```swift
-enum WorkingSourceInvalidity: Sendable, Hashable {
-    case fileMismatch        // sourceFile が binding と違う
-    case contentMismatch     // ハッシュまたはサイズ不一致
-    case bindingMissing      // record があり binding が無い
-    case recordMissing       // 行が無い（再接続が必要）
-    case entityMissing       // 実体ファイルが無い
-}
-
-```
-
-`VerifiedWorkingSource` と `withVerifiedSource` の定義は下記です。
-
-| 入口 | 検証 |
-| --- | --- |
-| プレビュー表示 | 必須 |
-| 顔検出・再検出 | 必須 |
-| 書き出し（手順 −2 と手順 1） | 必須 |
-| **「Free 版として複製」のコピー元** | **必須** |
-| 履歴サムネイルの生成 | 必須 |
-| その他の原寸ファイル読み込み | 必須 |
+**ADR 0005 により廃止。** 実体を開く前の確認は、上記「実体と署名済み identity を結び付ける」のファイル存在確認のみに簡素化されました。
 
 ##### 検証と無効化を分ける
 
-**resolver は永続状態を変更しません。** 検証失敗の後始末（`WorkingSourceRecord` の破棄・削除予約・`paused` 遷移・binding 削除）は DB・台帳・ファイルへの書き込みであり、読み取り専用の契約と両立しないためです。
-
-| 役割 | 主体 | 内容 |
-| --- | --- | --- |
-| 検証 | `WorkingSourceVerifier`（resolver の実装） | 照合して `body` を実行する。**`projectID` ごとに直列化する**（下記） |
-| **無効化** | **`SourceImportCoordinator` の `invalidateWorkingSource(projectID:)`** | DB（record 破棄・キュー遷移・`PendingFileDeletion`）→ 台帳（binding 削除）の順で実行する |
-
-**無効化を新しい Coordinator にしません。** 無効化は同じ `projectID` の再選択・再接続と競合するため、**`SourceImportCoordinator` の `projectID` 待機キューで直列化する必要があります**（[アーキテクチャ設計](architecture.md) の 4.3）。別の actor に置くと、2 つの排他機構が同じ `Project` を同時に触ります。
-
-| `withVerifiedSource` の結果 | 呼び出し側の対応 |
-| --- | --- |
-| `completed(R)` | 続行する |
-| `invalid(.recordMissing)` | 再接続の導線を出す（無効化は不要。壊れた状態ではない） |
-| `invalid`（それ以外） | **`invalidateWorkingSource(projectID:)` を呼ぶ** |
+**ADR 0005 により廃止。** 署名照合が無くなったため resolver と無効化処理の分離は不要になりました。実体が無ければ `SourceImportCoordinator` が `WorkingSourceRecord` を直接破棄します。
 
 ##### 無効化は理由を受け取らず、内側で再判定する
 
-**呼び出し側が観測した理由を無効化の根拠にしません。** 再選択 Saga の手順 7（台帳）と手順 8（DB）の間に読み取りが挟まると `.fileMismatch` が返りますが、待機キュー取得時点では再選択が正常完了している可能性があり、陳腐化した理由で破棄すると正しく張り替えられた `WorkingSourceRecord` を壊してしまいます。
-
-```swift
-// Application — SourceImportCoordinator。projectID ごとに直列化する
-func invalidateWorkingSource(projectID: ProjectID) async throws -> InvalidationOutcome
-
-enum InvalidationOutcome: Sendable, Equatable {
-    case invalidated(WorkingSourceInvalidity)   // 再判定でも無効だったので破棄した
-    case nowValid                               // 再判定で有効。何もしなかった
-    case alreadyAbsent                          // 既に record が無い
-}
-```
-
-| 規則 | 内容 |
-| --- | --- |
-| 引数 | **`projectID` だけ。** `reason` を受け取らない |
-| 最初の操作 | **排他区間の内側で照合をやり直す**（DB の現在値・台帳の現在値・実体） |
-| 再判定で有効 | **`nowValid` を返して何もしない。** 破棄しない |
-| 再判定でも無効 | DB → 台帳の順で破棄し、`invalidated` を返す |
-| 冪等性 | 2 回目以降は `alreadyAbsent` を返す |
-
-**この原則は `replaceWorkingSource` の `previousSourceFile`（上記）と `deleteHistoryUnit` の `DeletionContext`（[アーキテクチャ設計](architecture.md) の 7.5）にも共通します。** 実装主体は `Application` です。DB・台帳・ファイルの 3 者を読むため `Persistence` の単一アダプタにも `Domain` にも置けません（同 4.3）。プロトコルは `Domain` が定義します。
-
-**`VerifiedWorkingSource` を `body` の引数にするのは、検証を通らずに `WorkingSourceFileRef` を得る経路を無くすためです。** ハッシュは正規化後ファイル（`contentFingerprint` とは別物）に対して取ります。照合したいのは「いま処理しようとしている実体」だからです。
+**ADR 0005 により廃止。** 陳腐化した理由による誤破棄を避けるための再判定機構は、署名照合の廃止に伴い不要になりました。
 
 ##### 照合と読み取りを 1 つのスコープへ閉じる
 
-**「ハッシュを読む」と「実体を開く」が別の読み取りだと、その間に差し替えられます。** 24 時間以内の再書き出しは `freeMonthlyReexport` で消費 0 のため、検証直後に別画像へ差し替えれば 1 枠の消費で任意枚数を書き出せてしまいます。**照合と利用を同じスコープへ閉じ、`VerifiedWorkingSource` を外へ持ち出せない形にします。**
-
-```swift
-// Domain — 処理用実体を開く唯一の入口
-protocol VerifiedWorkingSourceResolver: Sendable {
-    /// 照合してから body を実行する。body の実行中だけ実体が有効。
-    /// 照合が成立しなければ body を呼ばず WorkingSourceInvalidity を返す
-    func withVerifiedSource<R: Sendable>(
-        _ projectID: ProjectID,
-        _ body: @Sendable (VerifiedWorkingSource) async throws -> R
-    ) async throws -> VerifiedUseResult<R>
-}
-
-enum VerifiedUseResult<R: Sendable>: Sendable {
-    case completed(R)
-    case invalid(WorkingSourceInvalidity)
-}
-```
-
-**照合したディスクリプタを、消費側へそのまま渡します。** 開き直す経路を残すと、その間に inode を差し替えられるためです。
-
-```swift
-/// 検証済みの実体。開いたファイルそのものを表す
-struct VerifiedWorkingSource: Sendable {
-    let projectID: ProjectID
-    let binding: WorkingSourceBinding      // 照合に使った値
-    let verifiedAt: Date
-
-    /// 照合に使ったのと同一のディスクリプタから読み出す。
-    /// パスを解決し直さない。body のスコープ内でのみ有効
-    let handle: OpenFileHandle
-}
-
-/// 開いたファイルの読み取り口。Domain は fd の値を見ない
-protocol OpenFileHandle: Sendable {
-    var byteSize: Int64 { get }
-
-    /// ハッシュ計算などの逐次読み出し
-    func read(offset: Int64, length: Int) async throws -> Data
-
-    /// 全体を一括で参照する。Image I/O / Core Image への受け渡しに使う。
-    /// 同期・非エスケープ。ポインタは body の外へ持ち出せない
-    func withMappedBytes<R>(
-        _ body: (UnsafeRawBufferPointer) throws -> R
-    ) throws -> R
-}
-```
-
-`withMappedBytes` は `Domain` が参照できない `CoreGraphics` / `CoreImage` に触れずにメモリマップした領域を渡すための入口で、`Adapters` 側が `CFData` / `CGDataProvider` を組み立てます（[アーキテクチャ設計](architecture.md) の 3.3）。`read` だけでは 48 メガピクセルの原寸を `Data` として抱えることになり 50 枚の一括処理でメモリが尽きるため、マップ経由の入口が必要です。
-
-| 規則 | 内容 |
-| --- | --- |
-| 同期にする | `async` にすると `UnsafeRawBufferPointer` を `Sendable` 境界へ通すことになる。**マップ中に中断点を作らない** |
-| 非エスケープ | `body` の外でポインタを保持したら未定義動作とする |
-| 実装 | 照合に使ったのと同じディスクリプタを `mmap` する。**パスを解決し直さない** |
-| **`body` の役割** | **「バイト列 → デコード済みピクセルバッファ」の変換だけ**（下記） |
-
-**`body` の外へ持ち出すのは、デコード済みピクセルではなく圧縮バイト列のコピーです。** 検出では縮小済み `CGImage`、書き出しでは圧縮バイト列を `Data` へコピーして返し、デコードは `body` の外（マップ解除後）で行います。デコード結果を持ち出すと 48 メガピクセルの RGBA8 を合成・エンコードの全期間抱えることになるため採りません（3 章が退けたのはラスタ化済みスタンプのビットマップ（非圧縮）についてであり、原寸写真の圧縮バイト列とは区別します）。`CIImage` はタイル単位で評価されるため `CGContext` へ原寸を描き込む方式より使用量が小さく、`batchConcurrencyLimit = 1`（v1）で同時に処理するのは 1 枚です。
-
-処理用素材のファイルは書き込みが一度きりで、既存の inode へ追記も切り詰めも行う経路が存在しません。削除は `PendingFileDeletion` 経由の `unlink` であり、開いているディスクリプタのマップは無効化されません。
-
-| 規則 | 内容 |
-| --- | --- |
-| `VerifiedWorkingSource` の寿命 | **`body` の実行中のみ。** `handle` を外へ保持したら未定義動作とする |
-| ファイルを開く主体 | **`WorkingSourceVerifier` が 1 回だけ開く。** 消費側は開かない |
-| 照合の位置 | **開いた `handle` からハッシュを計算する。** パスを解決し直さない |
-| 消費側への受け渡し | **`handle` を渡す。** `ManagedFileRef` や `URL` を渡して開き直させない |
-| 復帰後の再利用 | **禁止。** 別の操作は `withVerifiedSource` を再度呼ぶ |
-| 編集セッション中の使い回し | **禁止。** プレビューの再描画も、そのつどこの入口を通る |
-
-**`FaceDetector` と `ImageEffectRenderer` の引数を `ImageSource` から `VerifiedImageSource` へ変えます。** `ManagedFileRef` を受け取る限り実装が自分でパスから開き直せてしまうため、型の上で開き直せないようにします。**`PickedPhotoLoader` は対象外です。** 取り込み時点では `WorkingSourceBinding` がまだ存在せず照合対象が無いため、`ManagedFileRef` のままとします（「まだどこからも参照されていない新しいファイル」しか読まないため安全です。既存 `Project` の素材を読む経路には使いません）。
-
-```swift
-/// レンダラーと検出器へ渡す入力。開いたディスクリプタを持つ
-struct VerifiedImageSource: Sendable {
-    let handle: OpenFileHandle
-    let pixelSize: PixelSize          // 向き正規化後
-    let format: ImageFormat
-}
-
-protocol FaceDetector: Sendable {
-    func detect(_ source: VerifiedImageSource) async throws -> DetectionResult
-}
-
-protocol ImageEffectRenderer: Sendable {
-    func render(
-        source: VerifiedImageSource,
-        plan: RenderPlan,
-        rasterAssets: [String: RasterizedStampAsset]
-    ) async throws -> RenderedImage
-}
-```
-
-検出用の縮小は `FaceDetector` の内側で行います。縮小画像は `.processingTemporary` の派生ファイルであり binding を持たないため `VerifiedImageSource` を作れず、呼び出し側で縮小する構成にはできません。
-
-| 項目 | 規約 |
-| --- | --- |
-| 縮小の実行者 | **`FaceDetector` の実装（`Adapters`）** |
-| 入力 | **`VerifiedImageSource`**（原寸。`handle` 経由） |
-| 縮小の方法 | `withMappedBytes` で得たバイト列から `CGImageSourceCreateThumbnailAtIndex`（`kCGImageSourceThumbnailMaxPixelSize = 1920`） |
-| 中間ファイル | **作らない。** メモリ内で完結する |
-| 報告 | `DetectionResult.detectionPixelSize` に**実際に検出へ渡した寸法**を入れる |
-
-`LoadedPhoto` から `detectionSource` は外し、再検出も `withVerifiedSource` → `VerifiedImageSource` → `detect` の 1 経路に統一します（`PickedPhotoLoader` は通りません）。**`ImageSource` は残します。** 処理用素材以外（ラスタ一時ファイル、履歴サムネイルの入力）には binding が無く照合の対象にならないためで、`VerifiedImageSource` を要求するのは `WorkingSourceRecord` が指す原寸を読む経路だけです。
-
-**上書き（同じ inode への書き込み）も防ぎます。** `body` の完了後、同じ `handle` からハッシュを再計算して開始時の値と一致することを確認し、不一致なら `R` を破棄し `invalid(.contentMismatch)` を返します。
-
-| 段階 | 照合 |
-| --- | --- |
-| `body` の開始前（`handle` を開いた直後） | ハッシュとサイズを binding と照合する |
-| **`body` の完了後（`handle` を閉じる前）** | **同じ `handle` で再計算し、開始時の値と一致することを確認する** |
-
-この 2 段構えが成立するのは `body` 内のすべての読み取りが同じ `handle` を経由するからで、消費側が開き直せる設計では旧 inode を見続け差し替えを構造的に検出できません。**排他が必要です。** `body` は書き出しやプレビュー描画の全体を包む長時間スコープであり、その間に `replaceWorkingSource` や `invalidateWorkingSource` が走ると開いている実体が削除対象になります。`WorkingSourceVerifier` も `projectID` ごとに直列化し、`SourceImportCoordinator` と同じ待機キューを共有します（[アーキテクチャ設計](architecture.md) の 4.3）。**プレビューも同じ規則に従い、1 回の `withVerifiedSource` の内側で描画を完結させ、パラメータ変更ごとに入口を通り直します。**
+**ADR 0005 により廃止。** `mmap` による TOCTOU 対策（`withMappedBytes` / `OpenFileHandle` / `VerifiedWorkingSource` 系）は改ざん対抗機構の一部であり、実体の読み取りは通常の `ImageSource` 経由で行います。
 
 ##### 照合に使ってよいもの・使ってはいけないもの
 
-| 使う | 使わない |
-| --- | --- |
-| 署名済み `ProjectSourceSnapshot.identity` と台帳の alias グラフ | `ProjectSourceLocator`（未署名の平文参照。ファイル取り込みでは `nil`） |
-| `transact` の内側での解決 | `SourceIdentity` 同士の直接比較（取得経路の差で同じ写真が不一致になる） |
-
-**別の写真での続行を許しません。** バッチの一項目が別素材へ差し替わると、`sourceID` が変わってクォータの前提が崩れ、利用者にとっても「どの写真を処理したか」が分からなくなります。新しい写真を処理したい場合は、新しいバッチを作ります。
-
-**検出結果を再利用しません。** 元素材のバイト列が同じでも、正規化の実装が更新されていれば座標がずれます。再選択・再接続はいずれも再検出を伴います。
-
-**`ProjectSourceSnapshot` は `Project` の削除でのみ消します。** 素材の欠損・保持期限の到達・書き出しの完了のいずれでも削除しません。どれで消しても比較対象が失われます。
+**ADR 0005 により署名照合は廃止しましたが、次の運用ルールは機能として維持します。** バッチの一項目が別素材へ差し替わっても続行を許さず、新しい写真を処理したい場合は新しいバッチを作ります。検出結果も再利用しません。元素材のバイト列が同じでも正規化の実装が更新されていれば座標がずれるため、再選択・再接続はいずれも再検出を伴います。
 
 ##### 未完了作業の保持期限
 
@@ -1323,7 +1062,7 @@ protocol ImageEffectRenderer: Sendable {
 | --- | --- |
 | 保持期限 | `createdAt` から **24 時間** |
 | 判定に使う時刻 | `retentionNow`。`nil` の間は削除しない（[アーキテクチャ設計](architecture.md) の 6.3） |
-| 期限到達時 | **DB トランザクションで `WorkingSourceRecord` を削除**し、実体を `PendingFileDeletion` へ積む。台帳の binding はその後に削除する（順序は上記） |
+| 期限到達時 | **DB トランザクションで `WorkingSourceRecord` を削除**し、実体を `PendingFileDeletion` へ積む |
 | キュー項目 | `paused(.sourceReselectionRequired)` へ遷移させる |
 | `Project` | **削除しない。** 設定と検出結果は履歴の保存期間に従う |
 | `ProjectSourceSnapshot` | **削除しない。** 再選択の照合元として必要 |
