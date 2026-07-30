@@ -52,7 +52,6 @@
 
 | 型 | 符号化 |
 | --- | --- |
-| `ProjectID` / `BatchID` / `ExportID` / `RegionID` / `SourceID` / `ManagedFileID` | `UUID` の 16 バイト |
 | `StampAssetHash` | **32 バイト固定長**（長さ前置きしない） |
 | `FaceTrackID` | `UUID` の 16 バイト |
 | `ManagedFileRef` および種別つき参照（`OutputFileRef` ほか） | `kind`（`UInt32`）→ `fileID`（16 バイト） |
