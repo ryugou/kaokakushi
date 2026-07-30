@@ -7,11 +7,11 @@ import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 
 /**
- * 加工済み出力の生成が終わった時点で無料枠を消費するため、
+ * 完了操作（settle）で無料枠を消費するため（ADR 0006）、
  * 保存も共有もしないまま写真を失う経路を作らない。
  *
- * 役割分離（ADR 0006）: 「やり直しは無料」という reissue の約束は
- * 出力確認画面（output-confirm-screen.tsx）だけが行う。このファイルの
+ * 役割分離: 「完了前のやり直しは無料」という案内は出力確認画面
+ * （output-confirm-screen.tsx）だけが行う。このファイルの
  * ダイアログは「完了後（settled）だが未保存の出力」を扱う場面が中心で、
  * 無料を主張すると事実と矛盾するため、ここでは一切表現しない。
  */
@@ -111,7 +111,7 @@ export function UnsavedOutputDialog() {
 }
 
 /**
- * 完了前（settled === false）の破棄は無料枠を消費しない reissue の一種、
+ * 完了前（settled === false）の破棄はまだ何も消費していないやり直しの一種、
  * 完了後（settled === true）の破棄は確定済みの成果物を失う操作。
  * 両者は無料かどうかが逆なので、settled で表示を出し分ける（ADR 0006）。
  */
