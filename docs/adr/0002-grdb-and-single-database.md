@@ -8,7 +8,7 @@ Accepted
 
 本設計の中核は書き出しコミットジャーナル（[書き出し Saga](../export-saga.md)）であり、次を要求する。
 
-- **明示的なトランザクション境界。** 最終確定の手順 7 は `OutputRecord` の insert、`ExportRecord` の insert、キュー状態の更新、`Project` の更新、`ExportCommit` の delete を単一トランザクションで実行する
+- **明示的なトランザクション境界。** 最終確定の手順 7 は `OutputRecord` の insert、`ExportRecord` の insert、キュー状態の更新、`Project` の更新、`WorkingSourceRecord` の delete、`ExportCommit` の `published` への更新を単一トランザクションで実行する
 - **原子性の検証可能性。** プロセス強制終了テストで、トランザクションが途中適用されないことを確認する
 - **ヘッドレス実行。** ドメインに近い層のテストをシミュレータ起動なしで走らせる
 

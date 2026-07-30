@@ -337,6 +337,7 @@ actor ExportCoordinator { }            // 手順 −2〜7、ロールバック
 actor StartupRecoveryCoordinator { }   // 起動時復旧（[書き出し Saga](export-saga.md)）
 actor OutputDeliveryCoordinator { }    // MediaSaver / SharePresenter の呼び出しと状態遷移
 actor SourceImportCoordinator { }      // インポート / 再選択 / 再接続 / 複製（[画像処理](image-pipeline.md)）
+actor WorkingSourceVerifier { }        // VerifiedWorkingSourceResolver の実装（同上）
 actor HistoryDeletionCoordinator { }   // Project / Batch 削除、編集中の破棄（7.5）
 ```
 
@@ -349,6 +350,7 @@ actor HistoryDeletionCoordinator { }   // Project / Batch 削除、編集中の�
 | `ExportCoordinator` | **アプリ全体で 1 件**（v1） | `ExportStartGate` の permit（[書き出し Saga](export-saga.md) の 1.5） |
 | `OutputDeliveryCoordinator` | **`exportID` ごと** | 明示的な待機キュー（[書き出し Saga](export-saga.md) の 8.0） |
 | `SourceImportCoordinator` | **`projectID` ごと**（新規インポートは新しい `projectID` なので競合しない） | 明示的な待機キュー |
+| `WorkingSourceVerifier` | **排他不要**（読み取りのみ。結果は `VerifiedWorkingSource` として呼び出し元が保持する） | — |
 | `HistoryDeletionCoordinator` | **アプリ全体で 1 件** | 明示的な待機キュー |
 | `StartupRecoveryCoordinator` | 起動時に 1 回のみ。**完了まで他のすべてを開始させない** | 起動シーケンス |
 
@@ -746,7 +748,7 @@ Free 範囲のプロジェクトとは、モザイク・ぼかし・黒塗り・
 | 2 | 元素材の実体がある場合、**`VerifiedWorkingSourceResolver` を通してコピー元を取得し**（[画像処理](image-pipeline.md)）、**別の `WorkingSourceFile` を作る**。SHA-256 とサイズを測る | ファイルシステム | 手順 6 へ |
 | 3 | **1 つの台帳トランザクション**で、元 snapshot の内容を新しい `projectID` で追加し（`registeredAt` は現在時刻）、実体を作った場合は `WorkingSourceBinding` も同時に追加する。identity は既存 `SourceRecord` へ解決する（無ければ作成） | ProtectedBlobStore | 手順 6 へ |
 | 4 | DB トランザクションで `Project` と設定を複製し、有料スタンプの領域を選択された方式へ置換する。実体を作った場合は `WorkingSourceRecord` も作る | DB | 手順 5 へ |
-| 5 | 手順 4 が失敗したら、**追加した snapshot と binding を補償削除する** | ProtectedBlobStore | 起動時 GC へ委ねる |
+| 5 | 手順 4 が失敗したら、**追加した snapshot と binding を補償削除し、参照されなくなった `SourceRecord` も同じトランザクションで削除する** | ProtectedBlobStore | 起動時 GC へ委ねる |
 | 6 | 失敗したら、作成済みのファイルを `PendingFileDeletion` へ積む | ファイルシステム | 起動時 GC へ委ねる |
 
 **手順 3 を 1 トランザクションにします。** snapshot だけが入って binding が入らない状態は、`Project` が無いため実害こそありませんが、**補償の対象が 2 つに分かれて手順 5 が複雑になります。**
@@ -798,7 +800,7 @@ Free 範囲のプロジェクトとは、モザイク・ぼかし・黒塗り・
 
 | 契機 | 操作 |
 | --- | --- |
-| 手順 4 | `AccountingIntent` に従って **`pendingExportedSettingsEntries` へ**暫定適用する。置換前の確定値も `intent` へ保存する |
+| 手順 4 | `AccountingIntent.settingsEntryToApply` を **`pendingExportedSettingsEntries` へ**追加する。確定側には触れない |
 | **手順 8** | **`published` に到達した証拠を確認し、`exportedSettingsEntries` へ昇格する**（[書き出し Saga](export-saga.md) の 3） |
 | ロールバック | `ownerExportID` がこの `exportID` の pending を削除する。確定側は触らない |
 | **署名不正コミットの破棄** | **pending を削除する。** `SourceLease.accountingMode` と同じく、台帳側だけを根拠にする |
@@ -809,7 +811,7 @@ Free 範囲のプロジェクトとは、モザイク・ぼかし・黒塗り・
 
 **昇格の根拠は `published` 状態のコミット行です。** 手順 7 でコミットを消さずに `published` を書くため、手順 8 が中断しても次回起動で同じ昇格を冪等に再実行できます。`published` に到達していないコミットの pending は、昇格せず削除します。
 
-**確定側の置換前の値を `intent` に持つのは変わりません。** 同じ `Project` を 2 回目以降に書き出す場合、昇格は「既存の確定値を新しい値で置換する」操作になります。
+**置換前の確定値を `intent` に持ちません。** ロールバックは pending を削除するだけで確定側を触らないため、戻すべき値が存在しません。同じ `Project` の 2 回目以降の書き出しでは、手順 8 の昇格が「既存の確定値を新しい値で上書きする」操作になります。
 
 **設定ハッシュだけでは足りません。** 再書き出しには処理用素材が要り、24 時間で消えていれば再接続します。このとき別の写真を結び直せると、**設定は同じままで中身の違う写真が「変更なし」として無料で処理されます。** 再接続は署名済み `ProjectSourceSnapshot.identity` との一致を必須とします（[画像処理](image-pipeline.md)）。
 
@@ -1067,9 +1069,28 @@ usageNow = max(
 
 | 条件 | 値 |
 | --- | --- |
-| 信頼できる時刻がある（サーバーまたは RevenueCat から最近取得した値） | その値 |
+| 信頼できる時刻がある（下記） | その値 |
 | 端末時刻が `lastObservedAt` から 30 日を超えて前進している | **`nil`** |
 | それ以外 | 端末時刻 |
+
+##### 信頼できる時刻の取得元
+
+**`/v1/config` の HTTPS レスポンスを主取得元とします。** 全利用者が通る自前の経路であり、契約の有無に依存しません。
+
+| 項目 | 規則 |
+| --- | --- |
+| 主取得元 | **`/v1/config` のレスポンス本文に含まれる `serverTime`**（UTC epoch milliseconds の `Int64`） |
+| 補助経路 | RevenueCat の `CustomerInfo.requestDate`。設定取得が失敗し、購入状態の取得に成功した場合のみ |
+| どちらも失敗 | **`trustedNow = nil`。** 端末時刻を信頼時刻として扱わない |
+| 鮮度 | 取得から **6 時間以内**の値だけを「最近取得した信頼時刻」とする。超えたら `nil` |
+| 保存 | `RemoteConfigState` と同じ `ProtectedBlobStore` の署名対象へ、取得時刻とともに保存する |
+| 単調性 | 保存済みの信頼時刻より**過去の値を受理しない**（巻き戻しの防止） |
+
+**HTTP の `Date` ヘッダを使いません。** CDN や中間キャッシュが差し替えた値を掴む可能性があり、キャッシュヒット時には**取得のたびに同じ古い値**が返ります。`serverTime` をレスポンス本文へ入れ、**`Cache-Control: no-store` を設定した専用の応答**とします。設定本体のキャッシュ可否とは分けます。
+
+**鮮度を 6 時間とするのは、整合性封鎖の解除に使うためです。** 長すぎると封鎖の解除が古い時刻で通り、短すぎるとオフラインの利用者が解除できません。**封鎖の解除は月単位の判定であり、6 時間の粒度で足ります。**
+
+**過去の値を受理しないのは、サーバー応答を差し替えられた場合の巻き戻しを防ぐためです。** HTTPS で保護されますが、**保存側でも単調性を守ります。**
 
 **2 つに分けるのは、単調性が削除判定と両立しないためです。** 単調な時刻は一度未来へ進むと時計を正しい値へ戻しても未来のままで、削除が保留されません。`retentionNow` に `max` を掛けないからこそ、時計を直したときに通常の判定へ復帰します。巻き戻しによる保持期間の延長は利用者に不利ではないため許容します。
 
@@ -2503,19 +2524,27 @@ extension OutputRecord {
 
 **注記のある `delivered` 出力を削除しません。** 削除すると再試行するファイルが消え、`OutputRecord` の CASCADE で注記そのものも消えます。**追加した仕組みが 1 回の起動で無効になります。**
 
+**`UnknownLibrarySave` は別テーブルです。** `OutputRecord` にフラグを持たせず、集約型で結合します。
+
 ```swift
-extension OutputRecord {
+/// OutputRecord と UnknownLibrarySave を結合した読み取り用の値
+struct OutputDeliverySnapshot: Sendable {
+    let output: OutputRecord
+    let hasUnknownLibrarySave: Bool
+
     /// 利用者の対応が要る。isUndelivered とは別の軸
     var requiresDeliveryAttention: Bool {
-        isUndelivered || hasUnknownLibrarySave
+        output.isUndelivered || hasUnknownLibrarySave
     }
 }
 ```
 
-| 述語 | 用途 |
-| --- | --- |
-| `isUndelivered` | 未受け渡しの件数。離脱確認・24 時間保持・更新誘導・新規加工の禁止 |
-| **`requiresDeliveryAttention`** | **ファイルを保持する条件。** 起動時の削除対象から外す |
+| 述語 | 置き場所 | 用途 |
+| --- | --- | --- |
+| `isUndelivered` | `OutputRecord` | 未受け渡しの件数。離脱確認・24 時間保持・更新誘導・新規加工の禁止 |
+| **`requiresDeliveryAttention`** | **`OutputDeliverySnapshot`** | **ファイルを保持する条件。** 起動時の削除対象から外す |
+
+**起動時の削除判定・24 時間の保持判定・案内表示は、いずれもこの集約型を入力にします。** `OutputRecord` 単体では注記の有無が分からず、判定が成立しません。
 
 **2 つを分けます。** 注記付きの `delivered` は「受け取れている」ため未受け渡し件数には数えませんが、**再試行の余地を残すためファイルは保持します。** 利用者が「保存済みを確認」「再試行」「破棄」のいずれかを選ぶまで保持し、選んだ時点で注記を消して通常の `delivered` として扱います。
 
@@ -2567,7 +2596,7 @@ struct DeletionContext: Sendable {
     let isBeingEdited: Bool
     let hasNonTerminalQueueItem: Bool
     let hasUndeliveredOutputRecord: Bool   // isUndelivered のみ。delivered は保護しない
-    let hasNonTerminalExportCommit: Bool
+    let hasExportCommit: Bool          // published を含む
     let hasWorkingSourceRecord: Bool
     let isWithinReexportWindow: Bool   // 24 時間のやり直し保証
 }
@@ -2583,7 +2612,7 @@ func canDeleteHistoryUnit(
 | 分類 | 参照元 | 巻き込んだ場合に起こること |
 | --- | --- | --- |
 | **絶対保護**（どの契機でも削除しない） | **非終端のキュー項目**（`isTerminal == false`。6.5） | 処理中のバッチが消える |
-| 同上 | **非終端の `ExportCommit`** | 復旧の手がかりを失い、会計を戻せなくなる |
+| 同上 | **`ExportCommit` の行**（`published` を含む。[書き出し Saga](export-saga.md) の 2） | 復旧の手がかりを失い、会計を戻せない／設定エントリを昇格できない |
 | 同上 | **`isUndelivered` の `OutputRecord`**（`hasUndeliveredOutputRecord`） | 利用者が受け取っていない成果物が消える |
 | **利用者が上書きできる** | お気に入り | 利用者が明示的に保護した履歴が消える |
 | 同上 | 編集中のプロジェクト | 編集画面が参照先を失う |
@@ -2631,10 +2660,14 @@ func canDeleteHistoryUnit(
 | 中断位置 | 起動時の扱い |
 | --- | --- |
 | 手順 2 の途中 | DB トランザクションが巻き戻る。削除は成立していない |
-| 手順 2 と 3 の間 | **`Project` が存在しない台帳要素（pending を含む 4 集合）を台帳トランザクションで削除する** |
+| 手順 2 と 3 の間 | **`Project` が存在しない台帳要素（4 集合）と、未参照になった `SourceRecord` を台帳トランザクションで削除する** |
 | 手順 3 と 4 の間 | `PendingFileDeletion` の GC が実体を回収する |
 
-**この照合には全 `projectID` が要ります。** 起動時復旧は `RecoverySnapshot.projectIDs` を使い、同じ 1 回の走査で 3 種類の孤児（`exportedSettingsEntries` / `projectSourceSnapshots` / `workingSourceBindings`）を削除します（[書き出し Saga](export-saga.md) の 5）。
+**この照合には全 `projectID` が要ります。** 起動時復旧は `PostCommitRecoverySnapshot.projectIDs` を使い、同じ 1 回の台帳トランザクションで次を削除します（[書き出し Saga](export-saga.md) の 5）。
+
+> `pendingExportedSettingsEntries` / `exportedSettingsEntries` / `projectSourceSnapshots` / `workingSourceBindings` の 4 集合から `Project` の無い要素を消し、**その結果どこからも参照されなくなった `SourceRecord`** も同じトランザクションで消す。
+
+**`SourceRecord` の GC を同じトランザクションに含めます。** 別にすると、snapshot だけが消えて alias レコードが残る区間ができ、繰り返すと台帳が単調に増えます。
 
 ##### `Batch` 削除と編集中 `Project` の破棄
 
@@ -2685,7 +2718,7 @@ struct DeletionInspection: Sendable {
 
 enum AbsoluteProtection: Sendable, Hashable {
     case nonTerminalQueueItem
-    case nonTerminalExportCommit
+    case exportCommitPresent
     case undeliveredOutput
 }
 ```
@@ -3281,6 +3314,12 @@ pub struct DiagnosticsContext {
 `/v1/config` は無料枠、トライアル枚数、一括処理上限、並列数、トリアージ閾値、広告頻度、最低バージョン、機能停止フラグを変更できます。**壊れた値や古い値をそのまま適用すると、アプリ更新なしで全利用者を壊せます。**
 
 ```swift
+/// /v1/config のレスポンス全体。serverTime は envelope の外に置く
+struct RemoteConfigResponse: Sendable, Decodable {
+    let serverTime: Date          // UTC epoch ms。信頼できる時刻の主取得元（6.3）
+    let envelope: RemoteConfigEnvelope
+}
+
 struct RemoteConfigEnvelope: Sendable, Decodable {
     let schemaVersion: Int32
     let configVersion: Int64
@@ -3328,6 +3367,8 @@ struct KillSwitches: Sendable, Decodable, Equatable {
 ```
 
 **フィールドを追加する場合は末尾へ足し、`schemaVersion` を上げます。** 符号化順は [正準スキーマ](canonical-schema.md) の 4.4 が正本です。
+
+**`serverTime` を `RemoteConfigEnvelope` の外へ置きます。** 中に入れると取得のたびに payload が変わり、**同一 `configVersion` での内容差し替えを拒否する規則**（下記）が正常な再取得で発火します。`RemoteConfigState` として保存するのは `envelope` だけで、`serverTime` は信頼時刻として別に保存します（6.3）。
 
 | 状況 | 扱い |
 | --- | --- |
@@ -3509,7 +3550,6 @@ v1 のリリース範囲、動画の扱い、課金訴求の分類、利用者�
 | `lowConfidence` の閾値 | `FaceObservation.confidence` の下限。実素材の分布を見て決定（[画像処理](image-pipeline.md) / 6.1） | v1 実機検証時 |
 | `extremePose` の角度閾値 | yaw / pitch の絶対値の上限。検出品質テストの結果から決定（6.1） | v1 実機検証時 |
 | プライバシーポリシーの記載 | トライアル台帳（`SourceRecord`）を期限なく端末内へ保持することを記載し、7.5 の例外と整合させる | ストア申請前 |
-| 共有結果 `.unknown` 後の利用者操作 | `generated` を維持するため、共有後に画面を離れると未保存の確認が出る。明示確認して `delivered` にするか、`generated` のまま保存・再共有・破棄を選ばせるか（[書き出し Saga](export-saga.md)） | 実装計画で確定 |
 | 基本スタンプの意匠 | ベクターで自作する 12〜20 種の具体的な図案 | v1 実装中 |
 | 履歴の使用容量上限 | 初期値 200MB は暫定。加工後サムネイルの実サイズを計測して確定 | v1 実装中 |
 | カスタムスタンプの保存解像度 | 長辺 1,024px は暫定。顔が大きく写る素材での見え方を実機で確認（7.5） | v1 実機検証時 |
@@ -3517,4 +3557,3 @@ v1 のリリース範囲、動画の扱い、課金訴求の分類、利用者�
 | 一括処理の同時並列数を 2 へ引き上げるか | v1 は 1 固定。引き上げには二段階ゲートの実装と実機計測が要る | v2 検討時 |
 | ファイル同期の方式 | `F_FULLFSYNC` と通常の `fsync` の所要時間差を実機計測し、耐久性とのつり合いで決定（7.1） | v1 実機検証時 |
 | 手順 7-b の再確認しきい値 | `usageNow - finalizedAt` の許容差 5 分は暫定。手順 3〜7 の実測時間から確定（[書き出し Saga](export-saga.md)） | v1 実機検証時 |
-| 信頼できる時刻の取得元 | `retentionNow` と `MonthlyIntegrityLock` の解除に使う時刻を、`/v1/config` のレスポンスヘッダから取るか RevenueCat の `CustomerInfo` から取るか（6.3） | 実装計画で確定 |

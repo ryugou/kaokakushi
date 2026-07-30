@@ -958,7 +958,7 @@ struct WorkingSourceRecord: Sendable {
 | 4 | **台帳トランザクションで、素材 identity を `SourceRecord` へ解決（無ければ作成）し、`ProjectSourceSnapshot` と `WorkingSourceBinding` を保存する** | ProtectedBlobStore | 手順 8 へ |
 | 5 | **DB トランザクションで `Project`・キュー項目・`WorkingSourceRecord`（正規化ファイルを指す）を作成する** | DB | 手順 7 へ |
 | 6 | **取り込みファイルを削除する。** 削除に失敗したら `PendingFileDeletion` へ積む | ファイルシステム | 起動時 GC へ委ねる |
-| 7 | 手順 5 が失敗したら、**snapshot と binding を補償削除する** | ProtectedBlobStore | 起動時 GC へ委ねる |
+| 7 | 手順 5 が失敗したら、**snapshot と binding を補償削除し、参照されなくなった `SourceRecord` も同じトランザクションで削除する** | ProtectedBlobStore | 起動時 GC へ委ねる |
 | 8 | 失敗したら、作成済みのファイル（取り込み・正規化の両方）を削除するか `PendingFileDeletion` へ追加する | ファイルシステム | 起動時 GC へ委ねる |
 | 9 | **手順 5 の完了後にのみ、選択処理の成功を呼び出し元へ返す** | — | — |
 
@@ -1088,10 +1088,10 @@ struct WorkingSourceRecord: Sendable {
 ```swift
 // Domain — 永続化ポート
 protocol WorkingSourceStore: Sendable {
-    /// インポート Saga の手順 5
+    /// インポート Saga の手順 5。単一 DB トランザクション
     func createProjectWithWorkingSource(_ input: CreateWorkingSourceInput) async throws
 
-    /// 再選択 Saga の手順 6。単一 DB トランザクション
+    /// 素材更新 Saga の手順 8（DB 側）。単一 DB トランザクション
     func replaceWorkingSource(_ input: ReplaceWorkingSourceInput) async throws
 
     /// 履歴の既存 Project へ処理用素材を再接続する（下記）
@@ -1102,6 +1102,11 @@ protocol WorkingSourceStore: Sendable {
     /// 保持期限と台帳修復での破棄
     func deleteWorkingSource(_ projectID: ProjectID) async throws
 }
+```
+
+**`WorkingSourceStore` は DB トランザクションだけを実装します。** 入力に署名済み台帳の値（`WorkingSourceBinding` や解決済み `SourceID`）を持たせません。持たせると、DB アダプタが台帳を書けるかのような契約になり、**「同一トランザクションで両方を更新する」という実装できない読み方**を招きます。台帳の更新は Saga 側（手順 3・4・7）が別トランザクションで行います。
+
+```swift
 
 struct CreateWorkingSourceInput: Sendable {
     let projectID: ProjectID
@@ -1116,7 +1121,6 @@ struct CreateWorkingSourceInput: Sendable {
 struct ReplaceWorkingSourceInput: Sendable {
     let projectID: ProjectID
     let newSourceFile: WorkingSourceFileRef
-    let newBinding: WorkingSourceBinding
     let replacedAt: Date       // createdAt もこの値へ更新する
     // 旧ファイルは DB トランザクション内で読む。呼び出し側から渡さない
 }
@@ -1124,10 +1128,7 @@ struct ReplaceWorkingSourceInput: Sendable {
 struct AttachWorkingSourceInput: Sendable {
     let projectID: ProjectID
     let sourceFile: WorkingSourceFileRef
-    let binding: WorkingSourceBinding
     let attachedAt: Date
-    /// 照合済みであることの根拠。台帳側で解決済みの sourceID
-    let verifiedSourceID: SourceID
 }
 ```
 
@@ -1229,6 +1230,8 @@ struct VerifiedWorkingSource: Sendable, Equatable {
 | binding と `sourceFile` が違う / ハッシュ不一致 | `throw`。その `Project` を `paused(.sourceReselectionRequired)` へ |
 | binding が無い | 同上 |
 | 実体が無い | 同上 |
+
+**実装主体は `Application` です。** DB（`WorkingSourceRecord`）・台帳（`WorkingSourceBinding`）・ファイル（ハッシュ計算）の 3 者を読むため、`Persistence` の単一アダプタにも `Domain` にも置けません（[アーキテクチャ設計](architecture.md) の 4.3）。プロトコルは `Domain` が定義します。
 
 **`VerifiedWorkingSource` を返り値の型にするのは、検証を通らずに `WorkingSourceFileRef` を得る経路を無くすためです。** `ImageEffectRenderer` や `FaceDetector` へ渡す値の出所がこの型に限られます。
 

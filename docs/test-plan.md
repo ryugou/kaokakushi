@@ -52,6 +52,10 @@
 - **端末時刻を過去へ戻すと保持期間が延長されること**（利用者に不利ではないため許容する。`retentionNow` に `max` を掛けない）
 - **信頼時刻を得た後は、その時刻に従って保持期間が判定されること**
 - **リモート設定の `expiresAt` 判定には `trusted ?? usageNow` を使い、時計を過去へ戻しても古い設定が延命されないこと**
+- **信頼時刻が `/v1/config` の `serverTime` から取られ、HTTP の `Date` ヘッダを使わないこと**
+- **取得から 6 時間を超えた信頼時刻が `nil` として扱われること**
+- **保存済みの信頼時刻より過去の値を受理しないこと**
+- **設定取得が失敗し購入状態の取得に成功した場合だけ `CustomerInfo.requestDate` を使うこと。どちらも失敗なら `trustedNow = nil` になること**
 - `trialIntegrityLocked` のとき `remainingCredits` が 0 になり、トライアル画面へ進入できないこと
 - `trialReservations` が残数計算に含まれること
 - `batchTrial` が月間枠を消費しないこと
@@ -274,6 +278,9 @@
 
 - **`prepared` の `outputFile` が `nil` であり、`fileVerified` 以降は `OutputFileRef` が入っていること。手順 2 で `verifiedOutput` と同時に確定すること**
 - **手順 7 が `published` を書き、コミット行を削除しないこと**
+- **`finalizeExport` がコミットを削除せず、`deletePublished` が手順 9 で削除すること**
+- **`deletePublished` が HMAC・`state == published`・手順 8 の完了を再検査すること**
+- **`published` 以外の `state` で `deletePublished` が throw すること**
 - **`published` から手順 8・9 を冪等に再実行でき、手順 3 へ戻らないこと**
 - **`published` で 2 つ目の `OutputRecord` が作られないこと**
 - **ゲートの解放が手順 9 またはロールバック完了であること**
@@ -293,6 +300,9 @@
 - **`AccountingApplied` を単独の根拠にしないこと。`applied` 未保存で落ちても正しくロールバックできること**
 - **`ProjectSourceSnapshot` が書き出しで追加も削除もされず、ロールバックの対象にもならないこと**
 - **台帳を修復した起動では、署名が正常な非終端コミットも含めてすべて破棄され、キュー項目が `failed(.ledgerRepaired)` になること**
+- **`loadPostCommitRecoverySnapshot()` が手順 4 の完了直後に 1 回だけ呼ばれること**
+- **`readyToPublish` から復旧して作られた出力が、手順 7.5 の復元対象と手順 8 の件数に含まれること**
+- **手順 7 で削除された `WorkingSourceRecord` が、手順 4.5 の照合対象から外れていること**
 - **同じ起動で `WorkingSourceRecord` もすべて破棄され、実体が `PendingFileDeletion` へ積まれること**
 - **その破棄が署名不正行の規則（行 ID だけで削除し、フィールドを使わない）と同じ手順で行われること**
 - **その破棄で `UsageLedger` へ触れないこと（整合性封鎖のまま）**
@@ -315,7 +325,8 @@
 - **`delivered` 維持で `UnknownLibrarySave` が永続化され、再度の異常終了後も案内が残ること**
 - **注記のある `delivered` 出力が起動時に削除されず、ファイルが保持されること**
 - **`loadUnknownLibrarySaves()` で起動時に注記を取得できること**
-- **`requiresDeliveryAttention` が保持条件、`isUndelivered` が件数に使われ、混同されないこと**
+- **`requiresDeliveryAttention` が `OutputDeliverySnapshot` 上にあり、`OutputRecord` 単体では判定できないこと**
+- **保持条件に `requiresDeliveryAttention`、件数に `isUndelivered` が使われ、混同されないこと**
 - **注記付き出力も 24 時間で削除され、その際に通知しないこと**
 - **利用者が確認すると `UnknownLibrarySave` が消え、`OutputRecord` 削除でも CASCADE で消えること**
 - **`resolveOrphanedAttempts()` が起動時復旧の手順 7 で必ず呼ばれ、7.5 と 8 がその後に実行されること**
@@ -348,7 +359,11 @@
 - **`consumedExportIDs` への追加が冪等であること**
 - **孤立 lease が 0 件のとき（`accountingCommitted` / `readyToPublish` で壊れた場合）、台帳を変更せずコミット行だけが削除されること**
 - 孤立 lease が 2 件以上なら復旧エラーを維持し、台帳へ触れないこと
-- **署名不正行の `outputFile` / `projectID` が参照されず、他の正常な出力と履歴が削除されないこと**
+- **署名不正行の `outputFile` / `projectID` / `exportID` が参照されず、他の正常な出力と履歴が削除されないこと**
+- **孤立 lease 1 件・孤立 pending 0 件で消費が確定し、pending は作られないこと**
+- **孤立 lease 0 件・孤立 pending 1 件で pending が削除され、確定側へ昇格しないこと**
+- **孤立 lease 0 件・孤立 pending 0 件で台帳が 1 バイトも変わらないこと**
+- **lease と pending がともに 1 件ある場合に復旧エラーが維持されること**
 - **署名不正行がある間、孤児予約と孤児 lease の自動回収が保留されること**
 
 ### 3.4 コミット確定後の実体喪失
@@ -452,7 +467,7 @@
 ### 4.2 永続化の原子性（[アーキテクチャ設計](architecture.md) の 7.1、[書き出し Saga](export-saga.md) の 3）
 
 - 手順 7 の DB トランザクションが原子的であり、`OutputRecord` / `ExportRecord` / キュー状態 / `Project` の更新とコミット削除が同時に成立すること
-- 「コミットあり・`OutputRecord` なし」または「コミットなし・`OutputRecord` あり」以外の状態が観測されないこと
+- **「コミットあり・`OutputRecord` あり」が `published` のときだけ観測されること。それ以外の `state` では観測されないこと**
 - `synchronous = EXTRA` と `foreign_keys = ON` が設定され、起動時に読み返して検証されること
 - スキーマ移行が単一トランザクションで確定し、途中適用が観測されないこと
 - **外部キー制約が有効であり、`Project` の削除が `OutputRecord` / `ExportCommit` の存在で RESTRICT されること**
@@ -491,6 +506,8 @@
 - **インポート Saga の手順 1〜3 の途中で終了した場合、作成済みファイルが孤児として起動時 GC で回収されること**
 - **`ProjectSourceSnapshot` が `Project` 行より先に台帳へ保存されること**
 - **インポート手順 4 が同じ台帳トランザクションで `SourceRecord` を解決または作成し、不変条件 9 を満たすこと**
+- **DB 登録に失敗した補償で、snapshot・binding・未参照 `SourceRecord` の 3 つが削除されること**
+- **DB 登録を繰り返し失敗させても alias レコードが蓄積しないこと**
 - **新規写真の初回インポート直後に台帳を保存できること**
 - **DB 登録に失敗した場合、その snapshot が補償削除されること**
 - **補償削除の前に終了しても、対応する `Project` が無い snapshot が起動時復旧の手順 5.5 で回収されること**
@@ -595,8 +612,9 @@
 - **DB 確定（手順 5）の直後に落ちた場合、`Project` と snapshot の両方が残り、そのまま編集を再開できること**
 - **`PHAssetCreationRequest` の成功直後・DB 更新の前に落ちた場合、`previousState` に応じて `deliveryUnknown` または `delivered` へ解決されること**
 - **同じ経路で `delivered` が `deliveryUnknown` へ後退しないこと**
-- **`Project` 削除の DB 確定直後・台帳削除の前に落ちた場合、次回起動で台帳側の 2 種類が回収されること**
-- **再選択 Saga の手順 7（台帳）と手順 8（DB）の間で落ちた場合、次回起動で `paused(.sourceReselectionRequired)` へ倒れ、素材・設定・検出結果のいずれも壊れないこと**
+- **`Project` 削除の DB 確定直後・台帳削除の前に落ちた場合、次回起動で 4 集合と未参照 `SourceRecord` が回収されること**
+- **台帳だけが進んだ状態は存在しうるが、次回起動で `paused(.sourceReselectionRequired)` へ遷移し、別画像を利用できないこと**
+- **その状態で素材・設定・検出結果のいずれも壊れないこと**
 - **手順 9 の補償が走った場合、旧 binding へ戻って何も変わらない状態になること**
 
 ---

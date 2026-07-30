@@ -56,6 +56,12 @@ protocol ExportSagaStore: Sendable {
 
     /// 署名不正行を DB 内部の行 ID で削除する（6 章）
     func deleteCommitByRowID(_ rowID: Int64) async throws
+
+    /// 手順 9。HMAC・state == published・手順 8 の完了を再検査してから削除する
+    func deletePublished(_ exportID: ExportID) async throws
+
+    /// 手順 4 の完了後に、変化した DB 状態を読み直す（5 章）
+    func loadPostCommitRecoverySnapshot() async throws -> PostCommitRecoverySnapshot
 }
 
 /// 受け渡し（8 章）。ExportSagaStore とは寿命が異なるため分ける
@@ -162,9 +168,34 @@ struct ForeignKeyViolation: Sendable {
 }
 ```
 
-`finalizeExport` の実装が、`OutputRecord` の insert・`ExportRecord` の insert・キュー項目の `completed` 更新・`Project` の最終更新時刻・`ExportCommit` の delete を **1 回の DB トランザクション**で行います。**この境界が手順 7 の正本です。**
+`finalizeExport` の実装が、`OutputRecord` の insert・`ExportRecord` の insert・キュー項目の `completed` 更新・`Project` の最終更新時刻・`WorkingSourceRecord` の delete・**`ExportCommit` の `published` への更新**を **1 回の DB トランザクション**で行います。**この境界が手順 7 の正本です。** コミット行の削除は手順 9（`deletePublished`）です。
 
-**`RecoverySnapshot` は起動時に一度だけ読みます。** 復旧中に個別クエリを繰り返さないのは、手順の途中で DB が変化しないことを保証するためです。
+**`RecoverySnapshot` はコミット復旧（手順 4）の入力です。** 手順 4 の前に一度だけ読み、その間に個別クエリを繰り返しません。手順の途中で DB が変化しないことを保証するためです。
+
+**手順 4 は DB を変える**ため、その後の手順は同じ snapshot を使えません。
+
+| 手順 4 で起こる変化 | 影響を受ける後続手順 |
+| --- | --- |
+| `readyToPublish` の復旧で**新しい `OutputRecord`** ができる | 手順 7.5（未受け渡し出力の復元）、手順 8（更新判定の件数） |
+| 手順 7 の完了で **`WorkingSourceRecord` が消える** | 手順 4.5（binding の照合） |
+| `published` の手順 8・9 が進み **pending と `published` コミットが消える** | 手順 5.5（孤児の回収） |
+
+```swift
+/// コミット復旧の後に読み直す。手順 4.5 以降の入力
+struct PostCommitRecoverySnapshot: Sendable {
+    let outputRecords: [OutputRecord]
+    let deliveryAttempts: [DeliveryAttempt]
+    let unknownLibrarySaves: [UnknownLibrarySave]
+    let workingSources: [WorkingSourceRecord]
+    let nonTerminalQueueItems: [ExportQueueItemSnapshot]
+    let projectIDs: Set<ProjectID>
+    let publishedCommitExportIDs: Set<ExportID>   // 手順 8・9 が残っているもの
+}
+```
+
+**`loadPostCommitRecoverySnapshot()` を手順 4 の完了直後に 1 回だけ呼びます。** 手順 4.5 以降は毎回のクエリではなくこの値を使います。**手順 4.5 以降は DB を大きく変えないため、2 回で足ります。**
+
+**可変な作業集合を `Application` 内で持ち回る案は採りません。** 復旧操作ごとに手で反映する形になり、反映漏れが型で検出できません。
 
 **`SignedCommitRow` は検証前の生の列を持ちます。** `ExportCommit` としてデコードしてしまうと、署名不正行のフィールドを使う経路ができます（6 章）。検証を通った行だけが `ExportCommit` になります。
 
@@ -292,7 +323,7 @@ struct BatchReviewState: Sendable, Equatable {
 | 3 | **手順 0 で `Project` の revision を再取得し、`ExportCommit` の insert と同一 DB トランザクションで固定する**（`insertPrepared(_:expectedProjectRevision:)`） |
 | 4 | revision が変わっていれば insert が失敗する。**台帳の lease・予約を補償して終了する** |
 
-**非終端の `ExportCommit` が存在する間、対象 `Project` を変更できません。** 編集操作は拒否し、書き出しの完了またはキャンセルを求めます。これにより手順 1〜7 の途中で設定が変わる経路が消えます。
+**`ExportCommit` の行が存在する間、対象 `Project` を変更できません**（`published` を含む。2 章）。編集操作は拒否し、書き出しの完了またはキャンセルを求めます。これにより手順 1〜9 の途中で設定が変わる経路が消えます。
 
 ### 1.2 権限とクォータ
 
@@ -538,6 +569,29 @@ enum ExportCommitState: Sendable, Equatable {
 
 **`readyToPublish` は成果物がまだ非公開で、コミット行も残っている状態です。** **`published` は公開済みで、残る仕事は台帳側の昇格（手順 8）だけです。**
 
+##### 「非終端」の定義
+
+**`published` を非終端に含めません。** 会計は確定しており、ロールバックの対象ではないためです。
+
+```swift
+extension ExportCommitState {
+    /// ロールバックしうる状態。published は含まない
+    var isNonTerminal: Bool { self != .published }
+}
+```
+
+| 判定 | `prepared` 〜 `readyToPublish` | `published` |
+| --- | --- | --- |
+| ロールバックの対象 | **対象** | 対象外（前進のみ） |
+| 台帳修復時の破棄（5.2） | **破棄する** | **破棄しない。** 手順 8（台帳が空なので no-op）と手順 9 を実行して完了させる |
+| 同一素材の直列化（1.6） | **数える** | 数えない。ゲートは手順 9 で解放する |
+| `Project` の編集禁止（1.1） | **禁止する** | **禁止する**（下記） |
+| 履歴削除の絶対保護（[アーキテクチャ設計](architecture.md) の 7.5） | **保護する** | **保護する**（下記） |
+
+**編集禁止と削除保護には `published` も含めます。** どちらも「コミット行が存在する間」を条件とします。手順 8 の昇格対象は `ownerExportID` で特定するため編集の影響を受けませんが、**`Project` が削除されると昇格先の `Project` が消えます。** 通常の経路では手順 7 から 9 までが連続するため、この区間は一瞬です。
+
+**台帳修復では `published` を破棄しません。** 出力は既に `OutputRecord` として存在し、利用者へ渡せる状態です。破棄するとファイルが孤児になり、**受け取れるはずの成果物を失います。** 修復で `pendingExportedSettingsEntries` は空になるため、手順 8 は何もせず手順 9 が行を消します。
+
 **`outputFile` は `prepared` では `nil` です。** `ManagedFileStore.createFile` はファイルの作成が完了してからでないと `ref` を返さないため（[アーキテクチャ設計](architecture.md) の 7.3）、手順 0 の時点で参照を作れません。手順 1 で生成し、手順 2 で `verifiedOutput` と同時に保存します。
 
 **`prepared` で落ちた場合、削除すべき出力ファイルは存在しません。** 手順 1 の途中で作られた一時ファイルは、どのコミット行からも参照されないため起動時の孤児 GC が回収します。
@@ -636,13 +690,14 @@ prepared → fileVerified → finalizing → accountingCommitted → readyToPubl
 
 **「公開しない」と文章で書くだけでは防げません。** `OutputRecord` を会計直後に作ると、GRDB の `ValueObservation` はその時点から `generated` を観測でき、UI の購読先が `OutputRecord` である以上、最終確定より前に画面へ現れます。
 
-**`OutputRecord` の作成を手順 7 へ移し、コミット行の削除と同一の DB トランザクションで実行します。**
+**`OutputRecord` の作成を手順 7 へ移し、コミットの `published` 更新と同一の DB トランザクションで実行します。**
 
-| DB の状態 | 意味 |
-| --- | --- |
-| コミットあり・`OutputRecord` なし | **非公開**（処理中または復旧対象） |
-| コミットなし・`OutputRecord` あり | **公開済み**（会計確定済み） |
-| 両方あり | **起こらない**（トランザクションが保証する） |
+| DB の状態 | コミットの `state` | 意味 |
+| --- | --- | --- |
+| コミットあり・`OutputRecord` なし | `prepared` 〜 `readyToPublish` | **非公開**（処理中または復旧対象） |
+| コミットあり・`OutputRecord` あり | **`published`** | **公開済み。** 手順 8・9 の完了待ち |
+| コミットなし・`OutputRecord` あり | — | **全手順が完了している** |
+| コミットあり・`OutputRecord` あり | `published` 以外 | **起こらない**（トランザクションが保証する） |
 
 手順 6 の健全性確認が `OutputRecord` ではなく `verifiedOutput` を参照するのは、この順序変更のためです。
 
@@ -680,7 +735,7 @@ prepared → fileVerified → finalizing → accountingCommitted → readyToPubl
 
 ### 3.5 手順 7 の内容
 
-**DB に保存する状態は `OutputRecord` だけではありません。** `ExportRecord` と写真ごとのキュー状態も同じ DB にあり、`OutputRecord` の insert とコミットの delete だけでは「出力は公開済みだがキューは `exporting`」「キューは `completed` だが `ExportRecord` が無い」が残ります。
+**DB に保存する状態は `OutputRecord` だけではありません。** `ExportRecord` と写真ごとのキュー状態も同じ DB にあり、`OutputRecord` の insert だけでは「出力は公開済みだがキューは `exporting`」「キューは `completed` だが `ExportRecord` が無い」が残ります。
 
 | 操作 | 対象 |
 | --- | --- |
@@ -690,7 +745,7 @@ prepared → fileVerified → finalizing → accountingCommitted → readyToPubl
 | プロジェクトの最終更新時刻を更新 | `Project` |
 | **`WorkingSourceRecord` を delete** | `WorkingSourceRecord` |
 | **その処理用ファイルを `PendingFileDeletion` へ追加** | `PendingFileDeletion` |
-| `ExportCommit` を delete | `ExportCommit` |
+| **`ExportCommit` を `published` へ更新**（削除しない） | `ExportCommit` |
 
 **処理用の元画像は書き出しの完了で不要になります。** 削除を別トランザクションにすると、「出力は公開済みだが未加工の元画像が残る」区間ができます。
 
@@ -792,13 +847,15 @@ pendingExportedSettingsEntries のうち ownerExportID == 対象 exportID の要
 
 ### 4.1 会計の最終確定境界
 
-**コミット行の削除をもって会計を最終確定とします。ジャーナルが残っている間だけ、会計をロールバックできます。**
+**`published` への到達をもって会計を最終確定とします。`published` より前の間だけ、会計をロールバックできます。**
+
+`published` のコミット行は残りますが、**ロールバックの対象ではありません。** 残す目的は手順 8（設定エントリの昇格）の根拠を保持することだけです。
 
 理由は 2 つです。
 
-**1. 消費の確定点が曖昧になる。** 生成完了後の異常終了では消費を戻さず、利用者が破棄しても戻さず、トライアルは初回の正常生成で消費します。コミット削除まで完了した出力は正常生成が確定済みであり、その後のストレージ障害だけを払い戻し対象にすると「異常終了では戻さないがストレージ障害では戻す」という区別が必要になります。
+**1. 消費の確定点が曖昧になる。** 生成完了後の異常終了では消費を戻さず、利用者が破棄しても戻さず、トライアルは初回の正常生成で消費します。`published` へ到達した出力は正常生成が確定済みであり、その後のストレージ障害だけを払い戻し対象にすると「異常終了では戻さないがストレージ障害では戻す」という区別が必要になります。
 
-**2. 所有者モデルが破綻する。** Export A が grant を作り所有者になる → A のコミットを正常に削除する → 同じ素材を Export B で正常に再書き出しする（B は既存 grant を利用するため所有者は A のまま）→ 後から A の出力ファイルが失われる → `ownerExportID` を根拠に grant を削除する → **B も正常成功しているのに grant が消える。** 非終端コミットの直列化は非終端の間しか効かず、A のコミットは既に削除済みなので B の開始を止められません。
+**2. 所有者モデルが破綻する。** Export A が grant を作り所有者になる → A が `published` に到達する → 同じ素材を Export B で正常に再書き出しする（B は既存 grant を利用するため所有者は A のまま）→ 後から A の出力ファイルが失われる → `ownerExportID` を根拠に grant を削除する → **B も正常成功しているのに grant が消える。** 非終端コミットの直列化は `readyToPublish` までしか効かず、A は既に `published` なので B の開始を止められません。
 
 ### 4.2 キャンセルの境界
 
@@ -808,7 +865,7 @@ pendingExportedSettingsEntries のうち ownerExportID == 対象 exportID の要
 | 手順 4 以降・手順 7 より前 | 暫定会計を取り消してロールバック |
 | 手順 7 の完了後 | **キャンセルではなく破棄として扱う。** 枠は戻さない |
 
-手順 7 が完了した時点で成果物は公開されており、正常生成が確定しています。UI 上も、手順 7 の完了後は取り消せるかのような文言にしません。
+手順 7 が完了した時点で成果物は公開されており、正常生成が確定しています。UI 上も、手順 7 の完了後は取り消せるかのような文言にしません。**`published` のコミット行が残っていても、キャンセルの根拠にはなりません。**
 
 ---
 
@@ -829,13 +886,14 @@ pendingExportedSettingsEntries のうち ownerExportID == 対象 exportID の要
 | 2 | `ExportCommit` を読み込み、行ごとの署名を検証する | 0 の完了 |
 | 2.5 | **手順 1 で台帳を修復した場合、全非終端コミットを破棄する**（5.2） | 1・2 の完了 |
 | 3 | **有効なコミットに対応しない `trialReservations` と `sourceLeases` を削除する** | 1・2 の完了 |
-| 4 | 有効な未完了コミットを復旧する（5.3） | 1・2・3・2.5 の完了 |
-| 4.5 | **`WorkingSourceBinding` と処理用実体を照合する**（[画像処理](image-pipeline.md)） | **4 の完了** |
+| 4 | 有効な未完了コミットを復旧する（5.3）。**`published` のコミットは手順 8・9 を再実行して完了させる** | 1・2・3・2.5 の完了 |
+| 4.2 | **`loadPostCommitRecoverySnapshot()` を 1 回だけ実行する**（0 章） | 4 の完了 |
+| 4.5 | **`WorkingSourceBinding` と処理用実体を照合する**（[画像処理](image-pipeline.md)） | **4.2 の完了** |
 | 5 | `PRAGMA foreign_key_check` で外部キー違反が無いことを確認する | 4.5 の完了 |
-| 5.5 | **`Project` が存在しない台帳要素（pending を含む 4 集合）、`WorkingSourceRecord` が無い孤児 binding、対応するコミットが無い pending を削除する**（[アーキテクチャ設計](architecture.md) の 7.5） | 5 の完了。`projectIDs` が必要 |
+| 5.5 | **`Project` が存在しない台帳要素（4 集合）、`WorkingSourceRecord` が無い孤児 binding、有効なコミットが無い pending、そして未参照になった `SourceRecord` を削除する**（[アーキテクチャ設計](architecture.md) の 7.5） | 5 の完了。4.2 の `projectIDs` が必要 |
 | 6 | `PendingFileDeletion` と孤児ファイルを回収する | 5.5 の完了 |
-| 7 | **`resolveOrphanedAttempts()` を実行し、残存 `DeliveryAttempt` を `previousState` に従って解決する**（8.0） | 5 の完了 |
-| 7.5 | 未受け渡し出力（`isUndelivered`）を復元する | **7 の完了** |
+| 7 | **`resolveOrphanedAttempts()` を実行し、残存 `DeliveryAttempt` を `previousState` に従って解決する**（8.0） | 5 の完了。**4.2 の `deliveryAttempts` を使う** |
+| 7.5 | 未受け渡し出力（`isUndelivered`）を復元する。**手順 4 で新しく作られた出力も含める** | **7 の完了** |
 | 8 | **`evaluateUpdate` を実行する** | 7.5 の完了。**`isUndelivered` の件数**が必要 |
 | 9 | `.required` なら更新画面、それ以外は通常画面を表示し、**新しい書き出しを許可する** | 全手順の完了 |
 
@@ -884,7 +942,8 @@ pendingExportedSettingsEntries のうち ownerExportID == 対象 exportID の要
 
 | 対象 | 操作 |
 | --- | --- |
-| 非終端の `ExportCommit` | **すべて削除する**（署名の有効・無効を問わない。下記） |
+| 非終端の `ExportCommit`（`published` 以外） | **すべて削除する**（署名の有効・無効を問わない。下記） |
+| **`published` の `ExportCommit`** | **削除しない。** 手順 8（no-op）と手順 9 を実行して完了させる |
 | 出力ファイル | 参照が消えるため、起動時の孤児 GC が回収する |
 | **すべての `WorkingSourceRecord`** | **行を削除し、処理用ファイルを `PendingFileDeletion` へ** |
 | `UsageLedger` | **触らない。** 既に修復済みで、整合性封鎖が掛かっている |
@@ -1000,11 +1059,20 @@ pendingExportedSettingsEntries のうち ownerExportID == 対象 exportID の要
 
 **復旧の根拠は署名済み `UsageLedger` 側だけとします。** まず、有効な署名済みコミットに対応しない `SourceLease`（孤立 lease）を抽出します。v1 は全体ゲートにより同時 1 件なので、孤立 lease は 0 件か 1 件のはずです。
 
-| 孤立 lease | 処理 |
-| --- | --- |
-| **0 件** | **台帳を一切変更せず**、署名不正行を DB 内部の行 ID だけで削除する |
-| **1 件** | その `accountingMode` に従って消費を確定し、`SourceLease` を削除する（下表）。台帳の保存成功を確認してから、署名不正行を行 ID で削除する |
-| **2 件以上** | 対応を一意に決められない。**復旧エラーを維持し、台帳へ触れない** |
+同時に、**有効な署名済みコミットに対応しない `pendingExportedSettingsEntries`（孤立 pending）**も数えます。手順 4 で lease が消えて pending が生まれるため、**この 2 つの個数の組み合わせが「どこまで進んでいたか」を一意に表します。**
+
+| 孤立 lease | 孤立 pending | 到達点 | 処理 |
+| --- | --- | --- | --- |
+| **1 件** | **0 件** | 手順 4 より前 | `accountingMode` に従って消費を確定し、`SourceLease` を削除する（下表） |
+| **0 件** | **1 件** | 手順 4 以降 | **pending を削除する。** 確定側へ昇格しない。消費は既に確定済みなので触らない |
+| **0 件** | **0 件** | 手順 8 完了後、または最初から会計要素なし | **台帳を一切変更しない** |
+| 上記以外 | | 一意に決められない | **復旧エラーを維持し、台帳へ触れない** |
+
+いずれの場合も、台帳の保存成功を確認してから署名不正行を DB 内部の行 ID だけで削除します。
+
+**孤立 pending を無視すると、未成功の設定が残ります。** 手順 4 で lease は消えるため、lease だけを見る規則では「0 件＝台帳へ触れない」となり、**一度も正常書き出ししていない設定が pending に残ったまま**になります。pending は「変更せず再書き出し」の判定に使われませんが、**次の書き出しで同じ `projectID` の pending を上書きできず、不変条件 10（`projectID` ごとに 1 件）に抵触します。**
+
+**署名不正行の `exportID` は使いません。** 判断材料は「孤立要素の個数」と「台帳自身が持つ `ownerExportID`」だけです。削除対象の pending は、有効なコミットが存在しない `ownerExportID` を持つものとして台帳側から特定します。
 
 `SourceLease.accountingMode` から消費を確定します。
 
@@ -1020,9 +1088,9 @@ pendingExportedSettingsEntries のうち ownerExportID == 対象 exportID の要
 
 **`consumedExportIDs` への追加も冪等です。** 集合であるため、既に含まれていれば何も起こりません。手順 4 の完了後に壊れた場合（孤立 lease は 0 件）と合わせて、二重計上は生じません。
 
-**0 件は正常な状態です。** `SourceLease` は手順 4 の台帳トランザクションで削除されるため、`accountingCommitted` / `readyToPublish` / 手順 4 完了後・手順 5 保存前にコミット行だけが壊れた場合、孤立 lease は 0 件になります。0 件は「台帳側にこの書き出しの痕跡が残っていない」ことを意味し、**台帳へ何もしないことが正しい対応**です。会計は既に確定しており、払い戻しは行いません。
+**lease 0 件は「手順 4 を通過した」ことを意味します。** `SourceLease` は手順 4 の台帳トランザクションで削除されるためです。このとき pending が 1 件あれば手順 8 の前、0 件なら手順 8 の後です。**いずれも会計は確定済みであり、払い戻しは行いません。**
 
-2 件以上は全体ゲートが 1 件しか許さないはずの状態と矛盾するため、自動で決めず復旧エラーを維持します。
+lease と pending がともに 1 件ある、あるいはどちらかが 2 件以上ある状態は、全体ゲートが同時 1 件しか許さない設計と矛盾します。**自動で決めず復旧エラーを維持します。**
 
 **1 件の場合に台帳の保存が失敗したら、コミットを削除せず復旧エラーを維持します。** 台帳を確定できていないのにコミットを消すと、次回起動で孤児予約として払い戻されます。
 

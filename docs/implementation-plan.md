@@ -19,7 +19,7 @@
 | 2 | ドメイン層 | `Domain` | `QuotaPolicy`、`EntitlementResolver`、`BatchTriagePolicy`、`compileRenderDraft`、`ExportQueue` の状態機械、正準エンコーダ |
 | 3 | 永続化アダプタ | `Persistence` | GRDB と `app.db`、`ManagedFileStore`、`ProtectedBlobStore`、`CryptoKeyStore`、`UsageLedgerStore`、`ExportSagaStore`、`WorkingSourceStore`、`OutputDeliveryStore`、`HistoryDeletionStore` |
 | 4 | **書き出し Saga** | **`Application`** | `ExportCoordinator` / `StartupRecoveryCoordinator` / `OutputDeliveryCoordinator`、`ExportStartGate`、障害注入テスト基盤 |
-| 5 | プラットフォーム層 | `MediaKit` / `Rendering` / `App` / **`Application`** | 画像処理プロトコルの実装と適合テスト、選択の境界サービス、**`SourceImportCoordinator`（インポート／再選択／再接続／複製の 4 Saga）**、`ProtectedDataAvailability` |
+| 5 | プラットフォーム層 | `MediaKit` / `Rendering` / `App` / **`Application`** | 画像処理プロトコルの実装と適合テスト、選択の境界サービス、**`SourceImportCoordinator`（インポート／再選択／再接続／複製の 4 Saga）と `WorkingSourceVerifier`**、`ProtectedDataAvailability` |
 | 6 | 編集フロー UI | `App` | detect / effect / export / processing / done |
 | 7 | 課金と権限 | `Billing` | RevenueCat、Paywall、復元、`SubscriptionState` の読み込み失敗経路 |
 | 8 | 広告 | `Ads` | `AdPresenter`、`AdFrequencyPolicy` の適用 |
@@ -95,7 +95,7 @@
 | `Rendering` | `StampRasterizer` |
 | `Persistence` | `ProtectedBlobStore`、`ManagedFileStore`、`UsageLedgerStore`、**`ExportSagaStore`**、GRDB、ファイル管理 |
 | `Persistence/Security` | `CryptoKeyStore` |
-| `Application` | `ExportStartGate` の実装、`ExportCoordinator` / `StartupRecoveryCoordinator` / `OutputDeliveryCoordinator`（サブプロジェクト 4）、`SourceImportCoordinator`（サブプロジェクト 5）、`HistoryDeletionCoordinator`（サブプロジェクト 10）。**コミット Saga・素材 Saga・削除 Saga の主体はここ** |
+| `Application` | `ExportStartGate` の実装、`ExportCoordinator` / `StartupRecoveryCoordinator` / `OutputDeliveryCoordinator`（サブプロジェクト 4）、`SourceImportCoordinator` / **`WorkingSourceVerifier`**（サブプロジェクト 5）、`HistoryDeletionCoordinator`（サブプロジェクト 10）。**コミット Saga・素材 Saga・削除 Saga の主体はここ** |
 | `Analytics` | `CrashReporter`、`AnalyticsEvent` の送信 |
 | `Ads` | `AdPresenter` |
 | `App` | `PrivacyShield`、`PhotosPicker` / `fileImporter` の提示、`PhotoSelectionBridge` / `FileSelectionBridge`、`ProtectedDataAvailability` |
@@ -106,9 +106,11 @@
 
 [アーキテクチャ設計](architecture.md) の未決事項のうち、実装計画の段階で決めるものです。
 
-| 項目 | 影響するサブプロジェクト |
-| --- | --- |
-| 共有結果 `.unknown` 後の利用者操作 | 5、6 |
-| 信頼できる時刻の取得元 | 3、4、7、11 |
+**着手前に確定が必要な未決事項はありません。** 以前あった 2 件はいずれも確定済みです。
+
+| 項目 | 確定内容 | 正本 |
+| --- | --- | --- |
+| 共有結果 `.unknown` 後の利用者操作 | **現在の状態を維持する。** 利用者が手動で `delivered` にする操作は設けない | [書き出し Saga](export-saga.md) の 8.0 |
+| 信頼できる時刻の取得元 | **`/v1/config` の HTTPS レスポンスを主取得元とする** | [アーキテクチャ設計](architecture.md) の 6.3 |
 
 実機計測で決まる項目（`lowConfidence` の閾値、`extremePose` の角度、同期方式、手順 7-b のしきい値、並列数）は、該当サブプロジェクトの実装後に計測して確定します。
