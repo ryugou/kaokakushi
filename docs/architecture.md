@@ -245,7 +245,7 @@ actor HistoryDeletionCoordinator { }   // Project / Batch 削除、編集中の�
 | Coordinator | 排他の単位 | 実装 |
 | --- | --- | --- |
 | `ExportCoordinator` | **アプリ全体で 1 件**（v1） | 直列実行キュー 1 本（[書き出し Saga](export-saga.md) の 1.7。専用ゲートは持たない） |
-| `OutputDeliveryCoordinator` | **`exportID` ごと** | 明示的な待機キュー（[書き出し Saga](export-saga.md) の 8.0） |
+| `OutputDeliveryCoordinator` | **`exportID` ごと** | 明示的な待機キュー（[書き出し Saga](export-saga.md) の 7.0） |
 | `SourceImportCoordinator` | **`projectID` ごと**（新規インポートは新しい `projectID` なので競合しない） | 明示的な待機キュー |
 | `HistoryDeletionCoordinator` | **アプリ全体で 1 件。** 加えて**削除対象の各 `projectID` の待機キューを取得する**（下記） | 明示的な待機キュー |
 | `StartupRecoveryCoordinator` | 起動時に 1 回のみ。**完了まで他のすべてを開始させない** | 起動シーケンス |
@@ -1576,13 +1576,13 @@ extension OutputRecord {
 | 状態 | DB 列値 | 意味 | 保持する期間 |
 | --- | --- | --- | --- |
 | `generated` | 1 | 生成済み。受け渡しは未成功 | 明示的に破棄するまで、または 24 時間経過するまで |
-| `deliveryUnknown` | 2 | 写真ライブラリ保存の結果が不明（[書き出し Saga](export-saga.md) の 8.0） | 同上 |
+| `deliveryUnknown` | 2 | 写真ライブラリ保存の結果が不明（[書き出し Saga](export-saga.md) の 7.0） | 同上 |
 | `delivered` | 3 | 保存または共有が 1 回以上成功した | **完了画面を離れるまで** |
-| `discarded` | 4 | 生成後の破棄、または実体喪失（下記） | **実体ファイルは直ちに削除する。行は保持し、次回 finalize での置換削除または履歴削除の通常サイクルで消える**（[書き出し Saga](export-saga.md) の 1.5・7 章。ADR 0006） |
+| `discarded` | 4 | 生成後の破棄、または実体喪失（下記） | **実体ファイルは直ちに削除する。行は保持し、次回 finalize での置換削除または履歴削除の通常サイクルで消える**（[書き出し Saga](export-saga.md) の 1.5・6 章。ADR 0006） |
 
-**`OutputRecord` は `settledAt: Date?` を持つ**（生成直後は `nil`。出力確認画面での明示的な完了操作で確定する。[書き出し Saga](export-saga.md) の 8 章が正本）。**`discarded` は物理削除ではなく状態遷移とする**（`settledAt == nil` の `discarded` 行は、同一 `Project` の次回書き出しが追加消費なしの `reissue` になるかどうかの判定根拠になる。行を消すと判定できない。ADR 0006）。**`OutputRecord.projectID` の一意性は非終端（`discarded` 以外）の行に限る**（部分 UNIQUE。7.1）。
+**`OutputRecord` は `settledAt: Date?` を持つ**（生成直後は `nil`。出力確認画面での明示的な完了操作で確定する。[書き出し Saga](export-saga.md) の 7 章が正本）。**`discarded` は物理削除ではなく状態遷移とする**（`settledAt == nil` の `discarded` 行は、同一 `Project` の次回書き出しが追加消費なしの `reissue` になるかどうかの判定根拠になる。行を消すと判定できない。ADR 0006）。**`OutputRecord.projectID` の一意性は非終端（`discarded` 以外）の行に限る**（部分 UNIQUE。7.1）。
 
-**列値を固定するのは `case` の宣言順に依存させないため**（`OutputState` は署名対象外だが DB 列としてスキーマ移行をまたぐ）。**`delivered` は後退させない**（受け渡しは複数回・任意順序で行え、一度成立した事実を `deliveryUnknown` で打ち消すと共有成功済みの出力が未受け渡しへ戻ってしまう。[書き出し Saga](export-saga.md) の 8.0）。**`isUndelivered` を次のすべてで使う**（個別に `state == .generated` と書くと `deliveryUnknown` だけが残った状態で判定を素通りする）。
+**列値を固定するのは `case` の宣言順に依存させないため**（`OutputState` は署名対象外だが DB 列としてスキーマ移行をまたぐ）。**`delivered` は後退させない**（受け渡しは複数回・任意順序で行え、一度成立した事実を `deliveryUnknown` で打ち消すと共有成功済みの出力が未受け渡しへ戻ってしまう。[書き出し Saga](export-saga.md) の 7.0）。**`isUndelivered` を次のすべてで使う**（個別に `state == .generated` と書くと `deliveryUnknown` だけが残った状態で判定を素通りする）。
 
 - 完了画面の離脱確認と未保存件数の集計
 - 起動時復旧の案内
@@ -1590,7 +1590,7 @@ extension OutputRecord {
 - 新しい加工の開始禁止
 - 24 時間の保持
 
-**保存や共有が 1 回成功しても、その場では削除しない**（何度実行しても追加消費しないため、1 回目でファイルを消すと共有後に写真ライブラリへも保存する操作が成立しなくなる）。**状態は写真ごとの出力レコードに保持し、バッチ単位では持たない**（一括処理は部分成功が起こり、32 枚中 20 枚保存・12 枚容量不足という状態は 1 つの状態では表現できない。バッチの状態は各 `OutputRecord` から集計導出する）。一括保存が部分的に成功した場合、既に `delivered` の写真は再保存せず `isUndelivered` の写真だけを再試行する（`deliveryUnknown` は自動再試行の対象外。[書き出し Saga](export-saga.md) の 8.0）。
+**保存や共有が 1 回成功しても、その場では削除しない**（何度実行しても追加消費しないため、1 回目でファイルを消すと共有後に写真ライブラリへも保存する操作が成立しなくなる）。**状態は写真ごとの出力レコードに保持し、バッチ単位では持たない**（一括処理は部分成功が起こり、32 枚中 20 枚保存・12 枚容量不足という状態は 1 つの状態では表現できない。バッチの状態は各 `OutputRecord` から集計導出する）。一括保存が部分的に成功した場合、既に `delivered` の写真は再保存せず `isUndelivered` の写真だけを再試行する（`deliveryUnknown` は自動再試行の対象外。[書き出し Saga](export-saga.md) の 7.0）。
 
 **`isUndelivered` の出力が 1 枚以上残った状態で完了画面を離れようとした場合、確認を表示する**（判定はその残数で行い文言にも枚数を含める）。
 
@@ -1608,7 +1608,7 @@ extension OutputRecord {
 | `delivered`（注記なし） | 一時ファイルを削除し、**復旧案内の対象に含めない** |
 | `discarded` | 残存ファイルを削除する |
 
-`DeliveryAttempt` が残っている出力は、この判定の前に `previousState` に従って解決する（[書き出し Saga](export-saga.md) の 8.0。`previousState` が `delivered` なら `delivered` を維持し `UnknownLibrarySave` を記録する）。**注記のある `delivered` 出力は削除しない**（削除すると再試行ファイルが消え `OutputRecord` の CASCADE で注記も消え、追加した仕組みが 1 回の起動で無効になる）。**`UnknownLibrarySave` は別テーブル**（`OutputRecord` にフラグを持たせず集約型で結合する）。
+`DeliveryAttempt` が残っている出力は、この判定の前に `previousState` に従って解決する（[書き出し Saga](export-saga.md) の 7.0。`previousState` が `delivered` なら `delivered` を維持し `UnknownLibrarySave` を記録する）。**注記のある `delivered` 出力は削除しない**（削除すると再試行ファイルが消え `OutputRecord` の CASCADE で注記も消え、追加した仕組みが 1 回の起動で無効になる）。**`UnknownLibrarySave` は別テーブル**（`OutputRecord` にフラグを持たせず集約型で結合する）。
 
 ```swift
 /// OutputRecord と UnknownLibrarySave を結合した読み取り用の値
@@ -1782,7 +1782,7 @@ enum AbsoluteProtection: Sendable, Hashable {
 
 | 経路 | 対象 | `OutputRecord` への操作 |
 | --- | --- | --- |
-| **discard 遷移** | 利用者による破棄、`isUndelivered` の 24 時間経過、壊れた出力の復元不能（[書き出し Saga](export-saga.md) の 7 章・8 章） | `discarded` へ**更新する**（`settledAt` は変更せず保持する） |
+| **discard 遷移** | 利用者による破棄、`isUndelivered` の 24 時間経過、壊れた出力の復元不能（[書き出し Saga](export-saga.md) の 6 章・7 章） | `discarded` へ**更新する**（`settledAt` は変更せず保持する） |
 | **物理削除** | `delivered` での完了画面離脱、`Project` / `Batch` の削除、次回 finalize による置換（[書き出し Saga](export-saga.md) の 3 章） | 行を**削除する** |
 
 いずれの経路も「ファイルを消す」だけでは孤児が残るため、DB 操作とファイル削除を同じ手順に統一する。
