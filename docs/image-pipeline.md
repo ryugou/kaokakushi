@@ -865,11 +865,10 @@ struct PickedPhotoInput: Sendable {
 | 3 | **`Data` のまま保持せず、`ManagedFileStore` で処理用ファイルへ物質化する** | `App` → `Persistence` |
 | 4 | `PhotosPickerItem` を破棄する | `App` |
 | 5 | `PickedPhotoInput` だけを `Application` へ渡す | `App` → `Application` |
-| 6 | `providerAssetIdentifier` を HMAC 化して `SourceIdentity` を作る | `Application` / `Persistence` |
 
 **手順 3 が要点です。** 48 メガピクセルの画像を `Data` のまま抱えると、50 枚の一括処理でメモリが尽きます。
 
-**`providerAssetIdentifier` は `PickedPhotoInput` の寿命の中でのみ使います。** ログへ出さず、永続化しません。ハッシュ化した値だけが DB へ入ります。
+**`providerAssetIdentifier` は `PickedPhotoInput` の寿命の中でのみ使います。** ログへ出さず、永続化しません（ADR 0006 により素材同一性の識別に使わなくなったため、ハッシュ化して保存することもありません）。
 
 ##### ピッカー固有の契約
 
@@ -885,7 +884,7 @@ struct PickedPhotoInput: Sendable {
 )
 ```
 
-それでも `Optional` として扱い、取得できない場合は `SourceIdentity.providerAssetKeyHash` を `nil` として `contentFingerprint` だけで判定します（[アーキテクチャ設計](architecture.md) の 6.4）。
+それでも `Optional` として扱います。取得できない場合、`providerAssetIdentifier` は `nil` のままとなります（ADR 0006 により素材同一性の判定に使わなくなったため、代替値による補完は不要です）。
 
 **`fileImporter` が返す `URL` は security-scoped です。** 利用前にアクセスを開始し、処理後に必ず解放します。start と stop を均衡させないとカーネル資源をリークします。
 
@@ -927,16 +926,16 @@ struct WorkingSourceRecord: Sendable {
 
 **ADR 0005 により署名台帳が無くなり、ファイルシステムと単一の `app.db` トランザクションだけの手順になります。** 取り込みファイルは bridge がすでに物質化済み（選択手順 3）であり、Saga はそれを作り直しません。
 
-1. `PickedPhotoInput.importedFile` の所有権を受け取り、`contentFingerprint` と EXIF を読む
+1. `PickedPhotoInput.importedFile` の所有権を受け取り、EXIF を読む
 2. 向きを正規化した原寸ファイルを作成し `working/` へ書き込む
-3. 単一 DB トランザクションで、素材 identity を `SourceRecord` へ解決（無ければ作成）し、`ProjectSourceSnapshot`・`Project`・キュー項目・`WorkingSourceRecord`（正規化ファイルを指す）を作成する
+3. 単一 DB トランザクションで `ProjectSourceSnapshot`・`Project`・キュー項目・`WorkingSourceRecord`（正規化ファイルを指す）を作成する
 4. 取り込みファイルを削除する（削除に失敗したら `PendingFileDeletion` へ積む）
 
-**手順 3 が失敗した場合、作成済みのファイル（取り込み・正規化の両方）を `PendingFileDeletion` へ積み、起動時の孤児 GC に委ねます。** `contentFingerprint` は取り込みファイル（ピッカーが返した実データ）から計算します（[アーキテクチャ設計](architecture.md) の 6.4）。正規化後から計算すると、デコード実装の変更で同じ写真が別素材になります。
+**手順 3 が失敗した場合、作成済みのファイル（取り込み・正規化の両方）を `PendingFileDeletion` へ積み、起動時の孤児 GC に委ねます。**
 
 ##### 素材スナップショットを署名して保存する
 
-**ADR 0005 により署名を廃止し、`ProjectSourceSnapshot` は `app.db` へ平文で保存します。** インポート Saga の手順 3 で `Project` 作成と同じトランザクションで保存し、`Project` の削除でのみ削除します（再選択・再編集時の素材同一性の照合元として必要なため、保持期限到達や書き出し完了では削除しません）。
+**ADR 0005 により署名を廃止し、`ProjectSourceSnapshot` は `app.db` へ平文で保存します。** **ADR 0006 により素材同一性の識別は持たず**、再編集用の参照（`ProjectSourceLocator`）と撮影メタデータ（`OriginalCaptureMetadata`）だけを持ちます。インポート Saga の手順 3 で `Project` 作成と同じトランザクションで保存し、`Project` の削除でのみ削除します。
 
 ##### 検出用の縮小画像の寿命
 
@@ -954,15 +953,13 @@ struct WorkingSourceRecord: Sendable {
 
 ##### 再選択後の Saga
 
-**`paused(.sourceReselectionRequired)` と履歴からの再編集は、どちらも「素材を選び直して既存 `Project` へ結び直す」操作です。** 通常のインポート Saga は新しい `Project` を作り `ProjectSourceSnapshot` を上書きするため、比較対象を比較前に壊してしまい再利用できません。
+**`paused(.sourceReselectionRequired)` と履歴からの再編集は、どちらも「素材を選び直して既存 `Project` へ結び直す」操作です。** 通常のインポート Saga は新しい `Project` を作るため、既存 `Project` への結び付けにはそのまま使えません。**ADR 0006 により、選び直された写真は常に新しい素材として扱い、既存素材との同一性判定は行いません。**
 
-1. 候補ファイルを一時的に物質化し、`contentFingerprint` と EXIF を読む
-2. 候補の `SourceIdentity` と旧 `ProjectSourceSnapshot.identity` が同じ alias 連結成分へ解決されるかを判定する（[アーキテクチャ設計](architecture.md) の 6.4）。不一致なら候補ファイルを削除し選び直しを求める
-3. 向きを正規化した原寸ファイルを作成し `working/` へ書き込む
-4. 単一 DB トランザクションで、alias を勝者 `SourceRecord` へ追加し、`WorkingSourceRecord` の置換または新規作成、`FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` の破棄、`detectionRevision` / `projectRevision` の増加を行う
-5. 候補ファイル（正規化前）と、置換された旧 `sourceFile` を削除する（失敗したら `PendingFileDeletion` へ積む）
+1. 向きを正規化した原寸ファイルを作成し、EXIF を読む
+2. 単一 DB トランザクションで、`WorkingSourceRecord` の置換または新規作成、`ProjectSourceSnapshot` の更新、`FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` の破棄、`detectionRevision` / `projectRevision` の増加を行う
+3. 置換された旧 `sourceFile` を削除する（失敗したら `PendingFileDeletion` へ積む）
 
-手順 4 は `WorkingSourceRecord` の有無で分岐します。
+手順 2 は `WorkingSourceRecord` の有無で分岐します。
 
 | 現在の状態 | 呼ぶメソッド |
 | --- | --- |
@@ -985,7 +982,7 @@ protocol WorkingSourceStore: Sendable {
     /// インポート Saga の手順 3。単一 DB トランザクション
     func createProjectWithWorkingSource(_ input: CreateWorkingSourceInput) async throws
 
-    /// 素材更新 Saga の手順 4。単一 DB トランザクション
+    /// 素材更新 Saga の手順 2。単一 DB トランザクション
     func replaceWorkingSource(_ input: ReplaceWorkingSourceInput) async throws
 
     /// 履歴の既存 Project へ処理用素材を再接続する（下記）
@@ -1065,10 +1062,10 @@ struct AttachWorkingSourceInput: Sendable {
 | 期限到達時 | **DB トランザクションで `WorkingSourceRecord` を削除**し、実体を `PendingFileDeletion` へ積む |
 | キュー項目 | `paused(.sourceReselectionRequired)` へ遷移させる |
 | `Project` | **削除しない。** 設定と検出結果は履歴の保存期間に従う |
-| `ProjectSourceSnapshot` | **削除しない。** 再選択の照合元として必要 |
+| `ProjectSourceSnapshot` | **削除しない。** 再編集用の参照とメタデータとして必要 |
 | 判定の契機 | 起動時の孤児 GC と同じタイミング |
 
-期限で消すのは実体だけです。snapshot まで消すと再選択直後に「同じ写真か」を判定する材料が無くなり `paused(.sourceReselectionRequired)` から復帰できません。24 時間は未受け渡し出力の保持期間と揃え、利用者から見た「作業を再開できる窓」を 1 つにします。`Project` を残すのは設定と検出結果が未加工画像を含まないためで、同じ写真を選び直せば `sourceID` が一致し無料の再書き出しも成立します。
+期限で消すのは実体だけです。24 時間は未受け渡し出力の保持期間と揃え、利用者から見た「作業を再開できる窓」を 1 つにします。`Project` を残すのは設定と検出結果が未加工画像を含まないためです。
 
 ##### 写真ライブラリの読み取り権限
 
@@ -1089,14 +1086,14 @@ struct AttachWorkingSourceInput: Sendable {
 | 出力 EXIF への書き戻し（[アーキテクチャ設計](architecture.md) の 7.5） | 同上。ローカル表記のまま往復させる |
 | 写真ライブラリ保存時の `creationDate` | `PHAsset.creationDate`（権限がある場合のみ）→ EXIF → 設定しない |
 
-**`contentFingerprint` には撮影日時を含めません**（[アーキテクチャ設計](architecture.md) の 6.4）。日時は同一性の判定材料ではなく出力メタデータの材料であり、EXIF パーサの差が fingerprint を動かす経路を作らないため、入力はファイルの全バイトだけに限ります。`capture` を権限に依存させないのは、権限取得の前後で撮影日時が変わると出力 EXIF と `suggestedCreationDate` が起動ごとに揺れるためです。
+**`capture` を権限に依存させないのは、権限取得の前後で撮影日時が変わると出力 EXIF と `suggestedCreationDate` が起動ごとに揺れるためです。**
 
 ##### 再編集にはハッシュではなく平文の参照が要る
 
-**`providerAssetKeyHash` から `PHAsset` は取得できません。** クォータ用の alias は復元不能なハッシュです。これしか保存していなければ、履歴からの再編集は権限があっても実行できません。
+**履歴からの再編集には `PHAsset.localIdentifier` が要りますが、ハッシュ化すると復元できません。** そのため平文のまま別フィールドとして保持します。
 
 ```swift
-/// 再編集のための参照。クォータ用の SourceAlias とは別物
+/// 再編集のための参照
 struct ProjectSourceLocator: Sendable, Equatable {
     /// PHAsset.localIdentifier。ファイル取り込み等で取得できない場合は nil
     let photoLibraryLocalIdentifier: String?
@@ -1108,11 +1105,10 @@ struct ProjectSourceLocator: Sendable, Equatable {
 | 保存先 | **`app.db` の `Project` のみ** |
 | バックアップ | 対象外（[アーキテクチャ設計](architecture.md) の 7.4） |
 | ログ・分析・診断 | **一切出さない。** 分析イベントのフィールド型にしない（[アーキテクチャ設計](architecture.md) の 9.2） |
-| `UsageLedger` への保存 | **しない。** クォータ側は `providerAssetKeyHash` のまま |
 | `nil` の場合 | 再編集で再選択を求める |
 | `Project` の削除 | 同じ行なので同時に消える |
 
-**クォータ側を平文に戻しません。** 仕様 14.5 が制限しているのは不正利用防止のための識別子収集です。再編集は利用者自身が要求する機能であり、その実現に必要な最小の参照を利用者のデータと同じ寿命・同じ保護で持つことは目的が異なります。**2 つを 1 つのフィールドへまとめないことが要点です。**
+**仕様 14.5 が制限しているのは不正利用防止のための識別子収集であり、再編集に必要な最小の参照を利用者のデータと同じ寿命・同じ保護で持つこととは目的が異なります。**
 
 ## 6. 手動領域
 
