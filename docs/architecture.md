@@ -15,8 +15,8 @@
 | --- | --- |
 | **本書** | 目的、技術スタック、モジュール構成と依存方向、並行性、ドメインモデル、永続化、セキュリティ境界、設定定数、テスト戦略、逸脱と未決事項 |
 | [画像処理アーキテクチャ](image-pipeline.md) | `RenderSpec` / `RenderDraft` / `RenderPlan`、座標・色・合成規約、スタンプラスタライズ、写真選択の境界型 |
-| [書き出し Saga](export-saga.md) | 認可、`ExportCommit` の状態、処理手順、ロールバック、起動時復旧、実体喪失時の扱い、受け渡し |
-| [正準スキーマ](canonical-schema.md) | ハッシュ定義（`contentFingerprint`・設定ハッシュ・`StampAssetHash`）と基本型の符号化（ADR 0005） |
+| [書き出し Saga](export-saga.md) | 認可、`ExportJob` の状態、処理手順、中断時の後始末、起動時復旧、実体喪失時の扱い、受け渡し |
+| [正準スキーマ](canonical-schema.md) | ハッシュ定義（設定ハッシュ・`StampAssetHash`）と基本型の符号化（ADR 0005、ADR 0006） |
 | [運用](operations.md) | 更新誘導の運用、審査への配慮、診断と Sentry の運用制約 |
 | [商品面の決定](product-decisions.md) | v1 のリリース範囲、動画の扱い、課金訴求の分類、利用者向け表現 |
 | [実装計画](implementation-plan.md) | サブプロジェクトへの分解、依存、モジュール割り当て |
@@ -206,8 +206,7 @@ Swift 6 の strict concurrency を有効にします。
 | 対象 | 隔離 |
 | --- | --- |
 | `Domain` の値型 | `Sendable`。判定関数はすべて純粋関数 |
-| `UsageLedgerStore` | `Domain` は**プロトコル**。実装は待機キューを持つ `actor`（4.2） |
-| `ExportStartGate` | 同上 |
+| `ExportSagaStore` / `OutputDeliveryStore`（[書き出し Saga](export-saga.md)） | `Domain` は**プロトコル**。呼び出しは `ExportCoordinator` の直列実行キュー 1 本を経由する（4.2。専用の待機キュー・ゲートは持たない） |
 | `Application` の Coordinator | `actor` |
 | `SharePresenter` / `AdPresenter` | **`@MainActor`**（UIKit を操作する） |
 | UI の状態オブジェクト | `@MainActor` |
@@ -217,14 +216,14 @@ Swift 6 の strict concurrency を有効にします。
 
 **`actor` は再入可能であり、単独では「読み取りから保存完了まで」の論理的クリティカルセクションを保持できない**（`await` で中断すると同じ actor のメソッドへ別の呼び出しが入り、FIFO も保証されない）。**書き出しと台帳の更新は、単純な直列実行キュー 1 本（v1 は並列数 1）で直列化する**（ADR 0005。actor 再入・二重 resume・tombstone つきの自前待機キューは持たない）。同時に処理する項目は常に 1 件とし、次の項目はキューの前が完了してから着手する。
 
-**キャンセル**は「キュー投入前」と「キューから取り出して処理を開始する直前」の 2 箇所で `Task.checkCancellation()` を確認する。手順 7（公開）より前でのキャンセルは常にロールバックして枠を返還する一律規則とし、手順 7 完了後はキャンセルではなく破棄として扱う（枠は戻さない。成果物は公開済みのため）。`CancellationError` は業務エラーとして扱わず、Sentry へは送らない（9.2）。
+**キャンセル**は「キュー投入前」と「キューから取り出して処理を開始する直前」の 2 箇所で `Task.checkCancellation()` を確認する。確定境界（[書き出し Saga](export-saga.md) の手順 4）より前でのキャンセルは、`ExportJob` 行の削除という一律の後始末で足りる（同 4 章）。手順 4 完了後は `CancellationError` を投げず、出力確認画面での明示的な操作（やり直す／完了）として扱う（同 4 章、ADR 0006）。`CancellationError` は業務エラーとして扱わず、Sentry へは送らない（9.2）。
 
 ### 4.3 Application 層
 
 次の処理は `Domain`（純粋 Swift）にも `App`（SwiftUI）にも置けません。
 
-- 書き出しの手順 −2〜9（[書き出し Saga](export-saga.md)）と補償トランザクション
-- 起動時復旧、ロールバック
+- 書き出しの手順 0〜4（[書き出し Saga](export-saga.md)）と中断時の後始末
+- 起動時復旧
 - DB・台帳・ファイルの協調、ゲートの取得と解放
 - 出力の受け渡し
 
@@ -232,7 +231,7 @@ Swift 6 の strict concurrency を有効にします。
 
 ```swift
 // Application — Domain のプロトコルだけを使う
-actor ExportCoordinator { }            // 手順 −2〜9、ロールバック
+actor ExportCoordinator { }            // 手順 0〜4、中断時の後始末（[書き出し Saga](export-saga.md)）
 actor StartupRecoveryCoordinator { }   // 起動時復旧（[書き出し Saga](export-saga.md)）
 actor OutputDeliveryCoordinator { }    // MediaSaver / SharePresenter の呼び出しと状態遷移
 actor SourceImportCoordinator { }      // インポート / 再選択 / 再接続 / 複製（[画像処理](image-pipeline.md)）
@@ -246,7 +245,7 @@ actor HistoryDeletionCoordinator { }   // Project / Batch 削除、編集中の�
 
 | Coordinator | 排他の単位 | 実装 |
 | --- | --- | --- |
-| `ExportCoordinator` | **アプリ全体で 1 件**（v1） | `ExportStartGate` の permit（[書き出し Saga](export-saga.md) の 1.5） |
+| `ExportCoordinator` | **アプリ全体で 1 件**（v1） | 直列実行キュー 1 本（[書き出し Saga](export-saga.md) の 1.7。専用ゲートは持たない） |
 | `OutputDeliveryCoordinator` | **`exportID` ごと** | 明示的な待機キュー（[書き出し Saga](export-saga.md) の 8.0） |
 | `SourceImportCoordinator` | **`projectID` ごと**（新規インポートは新しい `projectID` なので競合しない） | 明示的な待機キュー |
 | `WorkingSourceVerifier` | **`projectID` ごと**。`SourceImportCoordinator` と**同じ待機キューを共有する** | 明示的な待機キュー |
@@ -257,7 +256,7 @@ actor HistoryDeletionCoordinator { }   // Project / Batch 削除、編集中の�
 
 **`WorkingSourceVerifier` が待機キューを共有するのは `withVerifiedSource` の `body` が長時間スコープだからである。** 書き出し手順 1 やプレビュー描画の全体を包む間に `replaceWorkingSource` や無効化が走ると、開いている実体が削除対象になる。読み取りだけでも実体の寿命に対する排他が必要。
 
-**`HistoryDeletionCoordinator` を全体で直列化する**（削除は複数の `Project` を跨ぐため `projectID` 単位の排他では `Batch` 削除を保護できない）。**加えて削除対象の各 `projectID` の待機キューも取得する。** 全体キューだけでは `withVerifiedSource` の `body` と排他されず、再検出が `body` 内側で `FaceTrack` を書き換える途中に同じ `Project` が削除されると外部キー違反になる（プレビュー描画中は `ExportCommit` が存在せず 7.5 の絶対保護も効かない）。
+**`HistoryDeletionCoordinator` を全体で直列化する**（削除は複数の `Project` を跨ぐため `projectID` 単位の排他では `Batch` 削除を保護できない）。**加えて削除対象の各 `projectID` の待機キューも取得する。** 全体キューだけでは `withVerifiedSource` の `body` と排他されず、再検出が `body` 内側で `FaceTrack` を書き換える途中に同じ `Project` が削除されると外部キー違反になる（プレビュー描画中は `ExportJob` が存在せず 7.5 の絶対保護も効かない）。
 
 | 規則 | 内容 |
 | --- | --- |
@@ -265,7 +264,7 @@ actor HistoryDeletionCoordinator { }   // Project / Batch 削除、編集中の�
 | 取得の位置 | **DB トランザクションへ入る前。** 全体キューを取得したあと |
 | 解放 | `defer` で必ず行う |
 
-**`ExportStartGate` は取得しない**（2 つの全体キューを跨ぐ取得はデッドロックの発生源になる）。整合は `canDeleteHistoryUnit` が非終端の `ExportCommit` を絶対保護として同一 DB トランザクション内で見ることで成立する（7.5）。**書き出しと削除は互いに排他ではなく**、判定と削除を同一 DB トランザクションへ閉じることで整合する。`DatabaseQueue` がトランザクションを直列化するため判定と挿入は交差しない。
+**`ExportCoordinator` の直列実行キューと `HistoryDeletionCoordinator` の全体キューは共有しない**（2 つの全体キューを跨ぐ取得はデッドロックの発生源になる）。整合は `canDeleteHistoryUnit` が非終端の `ExportJob` および未削除の `OutputRecord` を絶対保護として同一 DB トランザクション内で見ることで成立する（7.5）。**書き出しと削除は互いに排他ではなく**、判定と削除を同一 DB トランザクションへ閉じることで整合する。`DatabaseQueue` がトランザクションを直列化するため判定と挿入は交差しない。
 
 **`Application` が直接 `import` してはいけないもの**を明示する。
 
@@ -674,7 +673,7 @@ func resolveCapabilities(
 /// 能力判定と Paywall 文言の入力。Project とその子行から組み立てる
 struct ProjectCapabilityRequirement: Sendable, Equatable {
     /// この Project の RenderSpec が使う全スタンプの必要能力。
-    /// StampRequirement の定義は [書き出し Saga](export-saga.md) の 1.1.1
+    /// StampRequirement の定義は [書き出し Saga](export-saga.md) の 1.3
     let stampRequirements: Set<StampRequirement>
 }
 
@@ -688,7 +687,7 @@ func canEdit(
 ) -> Bool
 ```
 
-**`RenderSpec` を直接受け取らない**（判定に必要なのはスタンプの必要能力だけであり座標や強度は無関係。同じ `ProjectCapabilityRequirement` を書き出し認可の `authorizeRenderSpec`〈同 1.1.1〉と共有し UI と認可で判定材料を一致させる）。**`requiredPlan` の戻り値で可否を決めない**（プラン名の比較だと `status = pending` が素通りする）。作成時のプランで判定すると、Standard 時代に作ったプロジェクトが Free で編集できないのに同じ元写真を選び直せば Free の機能で同じものを作れるという説明のつかない差が生まれるため、現在の設定内容で判定する。
+**`RenderSpec` を直接受け取らない**（判定に必要なのはスタンプの必要能力だけであり座標や強度は無関係。同じ `ProjectCapabilityRequirement` を書き出し認可の `authorizeRenderSpec`〈同 1.3〉と共有し UI と認可で判定材料を一致させる）。**`requiredPlan` の戻り値で可否を決めない**（プラン名の比較だと `status = pending` が素通りする）。作成時のプランで判定すると、Standard 時代に作ったプロジェクトが Free で編集できないのに同じ元写真を選び直せば Free の機能で同じものを作れるという説明のつかない差が生まれるため、現在の設定内容で判定する。
 
 | 操作 | Free 範囲のプロジェクト | 有料スタンプを含むプロジェクト |
 | --- | --- | --- |
@@ -708,18 +707,16 @@ Free 範囲のプロジェクトとは、モザイク・ぼかし・黒塗り・
 
 ##### 複製 Saga
 
-**新しい `projectID` が付くため、元の台帳要素をそのまま共有できない**（`ProjectSourceSnapshot` は `projectID` ごとに 1 件であり参照ではなく複製が要る）。
+**新しい `projectID` が付くため、元素材の記録をそのまま共有できない**（`WorkingSourceRecord` は `projectID` ごとの記録であり参照ではなく複製が要る。[画像処理](image-pipeline.md) が正本）。
 
 | 順 | 操作 | 保存先 | 失敗時 |
 | --- | --- | --- | --- |
 | 1 | 新しい `ProjectID` を発行する | — | — |
-| 2 | 元素材の実体がある場合、**`VerifiedWorkingSourceResolver` を通してコピー元を取得し**（[画像処理](image-pipeline.md)）、**別の `WorkingSourceFile` を作る**。SHA-256 とサイズを測る | ファイルシステム | 手順 6 へ |
-| 3 | **1 つの台帳トランザクション**で、元 snapshot の内容を新しい `projectID` で追加し（`registeredAt` は現在時刻）、実体を作った場合は `WorkingSourceBinding` も同時に追加する。identity は既存 `SourceRecord` へ解決する（無ければ作成） | app.db（台帳テーブル） | 手順 6 へ |
-| 4 | DB トランザクションで `Project` と設定を複製し、有料スタンプの領域を選択された方式へ置換する。実体を作った場合は `WorkingSourceRecord` も作る | DB | 手順 5 へ |
-| 5 | 手順 4 が失敗したら、**追加した snapshot と binding を補償削除し、参照されなくなった `SourceRecord` も同じトランザクションで削除する** | app.db（台帳テーブル） | 起動時 GC へ委ねる |
-| 6 | 失敗したら、作成済みのファイルを `PendingFileDeletion` へ積む | ファイルシステム | 起動時 GC へ委ねる |
+| 2 | 元素材の実体がある場合、**`VerifiedWorkingSourceResolver` を通してコピー元を取得し**（[画像処理](image-pipeline.md)）、新しい `projectID` を指す `WorkingSourceRecord` を作る | ファイルシステム / DB | 手順 3 へ |
+| 3 | DB トランザクションで `Project` と設定を複製し、有料スタンプの領域を選択された方式へ置換する | DB | 手順 4 へ |
+| 4 | 手順 3 が失敗したら、作成済みの `WorkingSourceRecord` と実体を補償削除する | DB / ファイルシステム | 起動時 GC へ委ねる |
 
-**手順 3 を 1 トランザクションにする**（snapshot だけが入って binding が入らない状態は実害は無いが補償対象が 2 つに分かれ手順 5 が複雑になる）。**手順 3 で `SourceRecord` を解決する**（通常は既存レコードが見つかるが、不変条件 9 を満たすことを明示的な手順として持つ。6.4）。**処理用ファイルを共有しない**（同じ `WorkingSourceFileRef` を 2 つの `Project` が指すと一方の書き出し完了/破棄が他方の素材を削除する。`WorkingSourceRecord` の削除規則は参照カウントを持たない）。**元素材の実体が無い場合は `WorkingSourceRecord` と binding を作らずに複製する**（利用者の再選択時に通常の再接続〈[画像処理](image-pipeline.md)〉が走り、照合対象は手順 3 で複製した新しい snapshot）。**`ExportedSettingsEntry` は複製しない**（複製先はまだ書き出しておらず「変更せず再書き出し」の対象にならない）。この Saga も `SourceImportCoordinator` が所有する（ファイル・DB・台帳の 3 者を跨ぐ点はインポートと同じ）。
+**処理用ファイルを共有しない**（同じ実体を 2 つの `Project` が指すと一方の書き出し完了/破棄が他方の素材を削除する）。**元素材の実体が無い場合は `WorkingSourceRecord` を作らずに複製する**（利用者の再選択時に通常の再接続〈[画像処理](image-pipeline.md)〉が走る）。**`ExportedSettingsEntry` は複製しない**（複製先はまだ書き出しておらず「変更せず再書き出し」の対象にならない）。この Saga も `SourceImportCoordinator` が所有する。
 
 バッチ**全体**に対する操作は内容によらず能力で決まる。
 
@@ -739,25 +736,14 @@ Free 範囲のプロジェクトとは、モザイク・ぼかし・黒塗り・
 
 ##### 比較対象を台帳へ持つ
 
-**現在の設定ハッシュと比べる対象「最後に正常書き出しした設定」は、台帳（`ExportedSettingsEntry`。6.3）へ持たせる**（改ざん対抗のためではなく、書き出し Saga の確定点と同じトランザクション境界で更新するため。台帳・DB とも平文の app.db テーブルであり、区別は保存先ではなく確定タイミングにある）。
-
-**暫定と確定を別の集合に分ける**（1 つにすると、公開の確定前にコミットが中断し補償ロールバックされた場合、成功していない設定が「最後の正常書き出し」として残ってしまう）。
+**現在の設定ハッシュと比べる対象「最後に正常書き出しした設定」は、台帳（`ExportedSettingsEntry`。6.3）へ持たせる**（書き出しの確定と同じトランザクション境界で更新するため）。**中間状態（pending）は持たない**（書き出しの確定は単一トランザクションであり、確定前の値を根拠にしてしまう経路が無い。ADR 0005）。
 
 | 契機 | 操作 |
 | --- | --- |
-| 認可時の適用 | 変更後の設定ハッシュを **`pendingExportedSettingsEntries` へ**追加する。確定側には触れない |
-| **公開の確定** | **`exportedSettingsEntries` へ昇格する**（[書き出し Saga](export-saga.md) が正本） |
-| ロールバック | `ownerExportID` がこの `exportID` の pending を削除する。確定側は触らない |
-| 判定 | `currentSettingsHash == entry.settingsHash` **かつ** 素材が `ProjectSourceSnapshot.identity` と一致する。**pending は判定に使わない** |
-| entry が無い | **「変更せず再書き出し」の対象にしない。** Standard 以上を要求する |
-| `Project` の削除 | **`Project` 削除 Saga**（DB 確定後）で両方とも削除する（7.5） |
-| 起動時 | **コミットが存在しない pending を削除する**（起動時復旧） |
+| 公開の確定 | **`exportedSettingsEntries` へ直接書き込む**（手順 4。[書き出し Saga](export-saga.md)） |
+| `Project` の削除 | **`Project` 削除 Saga**（DB 確定後）で削除する（7.5） |
 
-**置換前の確定値を `intent` に持たない**（ロールバックは pending 削除のみで確定側を触らず戻すべき値が存在しない。2 回目以降の書き出しでは昇格が既存確定値を新しい値で上書きする操作になる）。
-
-**設定ハッシュだけでは足りない**（再書き出しには処理用素材が要り、24 時間で消えていれば再接続する。別の写真を結び直せると設定が同じまま中身の違う写真が「変更なし」として無料処理される）。再接続は `ProjectSourceSnapshot.identity` との一致を必須とする（[画像処理](image-pipeline.md)）。
-
-**最初の正常書き出し記録が無いプロジェクトは対象外**（有料スタンプを含むプロジェクトが Free 環境で初めて現れる経路〈バックアップ復元等〉は存在しないため。7.4。実際には降格前に必ず 1 回は書き出している）。要素数は `grants` などと同じく有界であり、`Project` が消えた entry は起動時復旧が回収する（[書き出し Saga](export-saga.md)）。**降格の事実自体はクォータ判定に影響しない**（判定に使うのは素材の同一性と経過時間のみ）。
+**免除条件（確定記録の存在・設定の一致・対象・適用範囲）の正本は [書き出し Saga](export-saga.md) の 1.3。** ADR 0006 により、素材の同一性は判定条件に含めない（対象は「同一 `Project`」であることのみ）。要素数は `Project` 数と同じく有界であり、`Project` が消えた entry は削除 Saga が回収する。**降格の事実自体はクォータ判定に影響しない。**
 
 ##### 広告表示頻度
 
@@ -769,11 +755,11 @@ Free 範囲のプロジェクトとは、モザイク・ぼかし・黒塗り・
 - 同一セッションで連続表示しない
 - 広告取得失敗でアプリ処理を止めない
 
-### 6.3 クォータ・grant・トライアル
+### 6.3 クォータとトライアル
 
 ##### 台帳は 1 つ
 
-**通常クォータ、`ExportGrant`、トライアル台帳を別々の値として持たず、1 つの `app.db` テーブル行として原子的に置き換える**（ADR 0005。署名は持たない。別々に更新すると片方だけ書けた状態が生じる）。
+**通常クォータとトライアル消費を、1 つの `app.db` テーブル行として原子的に置き換える**（ADR 0005。署名は持たない）。**勘定の単位は「受け渡した成果物」であり、素材の同一性は使わない**（ADR 0006）。`ExportGrant`（24 時間の再書き出し窓）・素材の正規 ID と alias・素材単位の消費済み判定は持たない。
 
 ```swift
 struct YearMonth: Sendable, Hashable, Comparable {
@@ -782,40 +768,15 @@ struct YearMonth: Sendable, Hashable, Comparable {
 }
 
 struct UsageLedger: Sendable, Equatable {
-    let period: YearMonth                        // 消費を計上している年月
-    let consumedExportIDs: Set<ExportID>         // 計上済みの書き出し（6.6）
-    let sourceRecords: [SourceRecord]            // 素材の正規 ID と alias（6.4）
-    let grants: [GrantEntry]
-    let trialEntries: [TrialEntry]               // トライアル消費
-    let trialReservations: [TrialReservation]    // 認可時の予約
-    let pendingExportedSettingsEntries: [ExportedSettingsEntry]  // 認可時の暫定適用（6.2）
-    let exportedSettingsEntries: [ExportedSettingsEntry]   // 変更せず再書き出しの比較対象（6.2）
-    let workingSourceBindings: [WorkingSourceBinding]      // 処理用実体との結び付き（画像処理）
-    let projectSourceSnapshots: [ProjectSourceSnapshot]    // 編集中素材の identity（画像処理）
+    let period: YearMonth                          // 消費を計上している年月
+    let consumedExportIDs: Set<ExportID>            // 月間枠の消費（6.6）
+    let trialConsumedExportIDs: Set<ExportID>       // トライアルクレジットの消費
+    let exportedSettingsEntries: [ExportedSettingsEntry]   // 「変更せず再書き出し」の比較対象（6.2）
 }
 
 extension UsageLedger {
     var consumed: Int { consumedExportIDs.count }
-
-    func grant(forSourceID id: SourceID) -> GrantEntry? {
-        grants.first { $0.sourceID == id }
-    }
-}
-
-struct GrantEntry: Sendable, Equatable {
-    let sourceID: SourceID
-    let firstSuccessAt: Date
-    let ownerExportID: ExportID
-}
-
-struct TrialEntry: Sendable, Equatable {
-    let sourceID: SourceID
-    let ownerExportID: ExportID
-}
-
-struct TrialReservation: Sendable, Equatable {
-    let sourceID: SourceID
-    let exportID: ExportID
+    var trialConsumed: Int { trialConsumedExportIDs.count }
 }
 
 /// 正常書き出しで確定した設定。「変更せず再書き出し」の比較対象（6.2）
@@ -823,106 +784,50 @@ struct ExportedSettingsEntry: Sendable, Equatable {
     let projectID: ProjectID
     let settingsHash: ProjectSettingsHash
     let exportedAt: Date
-    let ownerExportID: ExportID      // ロールバックの根拠
-}
-
-/// プロジェクトの素材 identity。Project の寿命まで保持する
-struct ProjectSourceSnapshot: Sendable, Equatable {
-    let projectID: ProjectID
-    let identity: SourceIdentity
-    let representation: SourceRepresentation
-    let capture: OriginalCaptureMetadata     // EXIF 由来（正準スキーマ 5.1.1）
-    let libraryCreationDate: Date?           // PHAsset 由来。権限がある場合のみ
-    let registeredAt: Date                   // 素材を結び付けた時刻
 }
 ```
 
-**`SourceLease` は持たない**（ADR 0005）。書き出しは直列キュー 1 本（v1 は並列数 1）で処理されるため同一素材の並行実行が構造的に起きず、`SourceRecord` の GC 判定は非終端の書き出し（`ExportCommit` / キュー項目）の有無を直接見ることで足りる（4.2、4.3）。
+**消費は件数ではなく書き出し ID の集合で持つ**（`Int` では同一 `exportID` の再適用の拒否も特定書き出しの消費取消も実装できない）。各集合の要素数には上限があるため線形探索で構わない。
 
 | 集合 | 一意条件 | 上限 |
 | --- | --- | --- |
-| `pendingExportedSettingsEntries` | `projectID` ごとに 1 件 | 同時に進行できる書き出しの数（v1 は 1） |
 | `exportedSettingsEntries` | `projectID` ごとに 1 件 | 履歴の保存期間内の `Project` 数 |
-| `projectSourceSnapshots` | `projectID` ごとに 1 件 | 履歴の保存期間内の `Project` 数 |
-| `workingSourceBindings` | `projectID` ごとに 0 件または 1 件 | 処理用ファイルを持つ `Project` 数 |
-
-##### 素材の実体と identity を分ける
-
-処理用ファイルの寿命と、素材が何であったかの記録の寿命は別。
-
-| 対象 | 内容 | 寿命 |
-| --- | --- | --- |
-| `WorkingSourceRecord`（DB） | 未加工の原寸ファイルへの参照 | **作成から 24 時間**。期限で削除し、キューを `paused(.sourceReselectionRequired)` へ |
-| `WorkingSourceBinding`（台帳） | いま処理してよい実体のハッシュとサイズ（画像処理） | **`WorkingSourceRecord` と対応する。** 更新は台帳先行、削除は DB 先行で行い、片側だけ進んだ区間は起動時に解決する |
-| `ProjectSourceSnapshot`（台帳） | `SourceIdentity`・撮影日時・登録時刻 | **`Project` の寿命まで**。削除は `Project` 削除時のみ |
-
-**identity と実体は別の集合に分ける**（identity は `Project` の寿命まで要るが実体との結び付きは処理用ファイルが存在する間しか意味を持たず、1 つにまとめると 24 時間で消える値のために snapshot 全体を書き換えることになる）。**snapshot は実体と一緒に消さない**（再選択は候補の `SourceIdentity` を snapshot と比較して同一性判定するため、照合元が消えると判定不能になる。履歴の再編集と「変更せず再書き出し」は署名済みの素材 identity を必要とする）。**`ProjectSourceLocator` では代用できない**（未署名の DB 行にある平文参照でありファイル取り込みでは `nil`。これだけを根拠にすると別の写真を同じ `Project` へ結び直しても設定ハッシュだけが一致し「変更せず再書き出し」が通ってしまう）。
-
-**書き出しが追加する要素（`grants` / `trialEntries` / `exportedSettingsEntries`）には `ownerExportID` を持たせる**（ロールバックで「この書き出しが追加したもの」を台帳そのものから判別するため。DB 側の記録だけでは台帳を書いた直後に落ちた場合に判別できない）。`projectSourceSnapshots` と `workingSourceBindings` は書き出しが追加・削除しないため所有者概念を持たない。`trialReservations` は `exportID` を持つため別途不要。
-
-**消費は件数ではなく書き出し ID の集合で持つ**（`Int` では同一 `exportID` の再適用の拒否も特定書き出しの消費取消も実装できない）。各集合の要素数には上限があるため線形探索で構わない。
-
-| 集合 | 上限 |
-| --- | --- |
-| `sourceRecords` | 参照元がある素材のみ。削除規則により有界（6.4） |
-| `trialReservations` | 同時実行数。v1 は 1 |
-| `grants` | 24 時間以内に成功した書き出しの素材数 |
-| `trialEntries` | `BatchPolicySnapshot.trialCreditCount`（既定 5・hard max 5。[運用](operations.md) の 2.1） |
-| `consumedExportIDs` | 月間上限（既定 5） |
-| `exportedSettingsEntries` / `projectSourceSnapshots` | 履歴の保存期間内の `Project` 数。`Project` 削除で回収する（7.5） |
+| `consumedExportIDs` | — | 月間上限（既定 5） |
+| `trialConsumedExportIDs` | — | トライアルクレジット数（既定 5。[運用](operations.md) の 2.1） |
 
 ##### 判定
 
 ```swift
-enum QuotaBlockReason: Sendable, Equatable {
-    case monthlyLimitReached      // 通常の月間上限
+enum MonthlyQuotaDecision: Sendable, Equatable {
+    case unlimited          // Standard / Pro
+    case consume            // 1 消費する
+    case blocked(limit: Int)
 }
 
-enum QuotaDecision: Sendable, Equatable {
-    case unlimited                                        // Standard / Pro
-    case freeReexport                                     // 24 時間以内の再書き出し。消費しない
-    case consume                                          // 1 消費する
-    case blocked(reason: QuotaBlockReason, limit: Int?)
+struct MonthlyQuotaEvaluation: Sendable {
+    let decision: MonthlyQuotaDecision
+    let updatedLedger: UsageLedger   // 月次更新を含む
 }
 
-struct QuotaEvaluation: Sendable {
-    let decision: QuotaDecision
-    let updatedLedger: UsageLedger   // 月次更新・期限切れ grant の整理を含む
-}
-
-func evaluate(
+func evaluateMonthlyQuota(
     ledger: UsageLedger,
     access: SingleExportAccess,      // Plan ではない。6.2 が解決した能力
-    sourceID: SourceID,              // 6.4 で解決済み
     monthlyLimit: Int,               // 設定定数の freeMonthlyExportLimit（10 章）
     usageNow: Date,                  // 端末の現在時刻
     deviceTimeZone: TimeZone
-) -> QuotaEvaluation
+) -> MonthlyQuotaEvaluation
 ```
 
-**時刻は端末の現在時刻・現在タイムゾーンをそのまま使う**（ADR 0005。信頼時刻・巻き戻し防止・タイムゾーン前進対策は持たない。月をまたいだかは端末の現在の年月と `period` の比較だけで決める）。`evaluate` は内部で `rollPeriod` を呼ぶ。**判定結果だけでなく更新後の台帳も返す**（判定だけでは月次更新・期限切れ grant の削除を永続化できない）。**`monthlyLimit` を引数で受け取る**（上限は設定定数で変わるため `Domain` の定数にできない。10 章）。
+**時刻は端末の現在時刻・現在タイムゾーンをそのまま使う**（ADR 0005。信頼時刻・巻き戻し防止・タイムゾーン前進対策は持たない。月をまたいだかは端末の現在の年月と `period` の比較だけで決める）。`evaluateMonthlyQuota` は内部で `rollPeriod` を呼ぶ。**判定結果だけでなく更新後の台帳も返す**（判定だけでは月次更新を永続化できない）。**`monthlyLimit` を引数で受け取る**（上限は設定定数で変わるため `Domain` の定数にできない。10 章）。
 
 判定順序。
 
-1. 期間更新（`rollPeriod`）と期限切れ `grant` の整理を適用する
+1. 期間更新（`rollPeriod`）を適用する
 2. `access == .unlimited` なら `unlimited`
-3. `ledger.grant(forSourceID:)` があり `usageNow - firstSuccessAt < 24h` なら `freeReexport`
-4. `consumed >= limit` なら `blocked(.monthlyLimitReached, limit)`
-5. それ以外は `consume`
+3. `consumed >= limit` なら `blocked(limit: limit)`
+4. それ以外は `consume`
 
-**有料プランで `unlimited` を返す場合も手順 1 は必ず実施する**（月次更新を止めると、降格した瞬間に古い状態から判定が始まる）。
-
-##### `ExportGrant` の作成規則
-
-**`ExportGrant` は書き出し時のプランにかかわらず作成する。**
-
-| 動作 | 条件 |
-| --- | --- |
-| `grants` へ素材を追加する | 利用可能な出力の生成が正常に完了した時点（[書き出し Saga](export-saga.md) が正本）。プランを問わない |
-| `consumedExportIDs` へ `exportID` を追加する | `QuotaDecision` が `consume` のときだけ |
-| `firstSuccessAt` を更新する | しない。同一素材の有効な grant があれば維持する |
-
-有料プランで grant を作らないと、Standard で書き出した 1 時間後に Free へ降格して再書き出しした場合に `freeReexport` にならず枠を消費してしまう。`firstSuccessAt` を更新しないのは、再書き出しのたびに窓が延びると 24 時間の上限が意味を失うため（「会計時に有効な grant があるか」で判断すると破れるため、認可時の `firstSuccessAt` を保存して維持する。[書き出し Saga](export-saga.md) の preserve）。
+**有料プランで `unlimited` を返す場合も手順 1 は必ず実施する**（月次更新を止めると、降格した瞬間に古い状態から判定が始まる）。**実際に採用する会計モード（`ExportAccountingMode`。`reissue` 判定を含む）の組み立ては [書き出し Saga](export-saga.md) の 1.4／1.5 が正本。** ここで定義するのは月間枠だけを見る `Domain` の純粋関数に限る。
 
 ##### 時間の扱い
 
@@ -931,18 +836,15 @@ func evaluate(
 ```swift
 func rollPeriod(_ ledger: UsageLedger, now: Date, deviceTimeZone: TimeZone) -> UsageLedger {
     let current = YearMonth(from: now, in: deviceTimeZone)
-    let activeGrants = ledger.grants.filter {
-        now.timeIntervalSince($0.firstSuccessAt) < 24 * 3600
-    }
     if current > ledger.period {
-        return ledger.with(period: current, consumedExportIDs: [], grants: activeGrants)
+        return ledger.with(period: current, consumedExportIDs: [])
     } else {
-        return ledger.with(grants: activeGrants)
+        return ledger
     }
 }
 ```
 
-**月初にリセットするのは `consumed` だけ。`grants` は月をまたいで保持する**（24 時間の grant 窓は月の境界と無関係。月初に空にすると月末の書き出しを翌月に再書き出しした場合に `freeReexport` にならない）。**`period` は後退させない**（`current > ledger.period` のときだけ更新する）。
+**月初にリセットするのは `consumedExportIDs` だけ**（`trialConsumedExportIDs` は月をまたいで保持する。トライアルクレジットに月次の期限は無い）。**`period` は後退させない**（`current > ledger.period` のときだけ更新する）。
 
 ##### 一括処理トライアル
 
@@ -950,244 +852,38 @@ Free および Standard の利用者が Pro の中核である一括処理を一
 
 **回数制ではなくクレジット制とする。**
 
-- **同じ元素材について、初回の正常生成時にだけ 1 クレジットを消費する**
-- 使い切るまで有効。失敗した写真では消費しない
-- **中止した場合、出力生成が未完了の写真は消費しない。既に出力生成まで完了した写真のクレジットは戻さない**
+- **確定した成果物ごとに 1 クレジットを消費する**（素材の同一性は問わない。ADR 0006）。**`reissue`（完了前のやり直し）は追加消費しない**（[書き出し Saga](export-saga.md) の 1.5）
+- 使い切るまで有効
 - Pro へ加入済みの場合は消費しない
-
-**クレジットの消費判定は `sourceID`（6.4）に従う**（加工内容が異なっても同じ元写真であれば追加消費しない）。
 
 **残クレジット数は保存せず、台帳から導出する。**
 
 ```swift
 // policy は BatchPolicySnapshot（6.5）。DB から読んだ直後に hard max へクランプ済み
-let remainingCredits = max(
-    0,
-    policy.trialCreditCount
-        - usageLedger.trialEntries.count
-        - usageLedger.trialReservations.count
-)
+let remainingCredits = max(0, policy.trialCreditCount - usageLedger.trialConsumedExportIDs.count)
 ```
 
-**クランプ後の値を使う**（`BatchPolicySnapshot` は `app.db` の平文行であり、読み出し直後に hard max〈5〉と最小値〈0〉へ丸める。6.5）。残数と台帳の両方を保存すると異常終了時に不整合な状態が生じるため導出とし、正を 1 つにする。
+**クランプ後の値を使う**（`BatchPolicySnapshot` は `app.db` の平文行であり、読み出し直後に hard max〈5〉と最小値〈0〉へ丸める。6.5）。残数と台帳の両方を保存すると異常終了時に不整合な状態が生じるため導出とし、正を 1 つにする。**予約は持たない**（消費は書き出しの確定〈export-saga 手順 4。単一トランザクション〉で計上され、v1 は直列キュー 1 本〈並列数 1〉のため認可の競合が構造的に起きない。ADR 0005、ADR 0006）。
 
-##### クレジットの予約
-
-**認可だけではクレジットを占有できない**（認可結果を台帳へ残さないと、残り 1 枚の状態で異なる素材の 2 件が並行認可されたとき両方とも同じ件数を見て `batchTrial(true)` になる）。v1 は直列キュー 1 本（4.2）により同時 1 件なのでこの経路は構造的に塞がれているが、**予約は並列数を引き上げた場合に備えて持つ。**
-
-| 契機 | 操作 |
-| --- | --- |
-| 認可時 | 該当素材の `TrialReservation` を**台帳トランザクションの中で**追加する |
-| 認可の保存に失敗 | **補償トランザクション**で予約を削除し、参照元を失った `SourceRecord` を GC する |
-| 台帳への適用 | **同じ台帳トランザクション内で**予約を削除し `trialEntries` へ移す |
-| 最終確定 | **台帳には触らない**（DB のみ） |
-| ロールバック | この `exportID` が所有する予約または `trialEntries` を削除する |
-| 起動時 | コミットの無い予約を孤児として削除する。**その完了後に新規認可を許可する** |
-
-**消費済み台帳に期限は設けない。これは意図した仕様**（最初に選んだ 5 枚は以後も何度でも試せる。理由: 6 枚目以降を処理できるわけではなく体験範囲は最大 5 枚のまま／端末内処理のため繰り返しても限界原価が発生しない／期限を設けるとその境界の説明が要り試用導線として複雑になる）。**トライアルで解放するのは「一括処理という操作方式」だけ**（エフェクト・スタンプの利用範囲は `ResolvedCapabilities` をそのまま参照し、一括処理へ入ったことで能力を書き換えない。追加スタンプまで一時解放すると Standard の価値が曖昧になる）。
+**トライアルクレジットに期限は設けない**（使い切るまで有効。端末内処理のため繰り返しても限界原価が発生せず、期限を設けるとその境界の説明が要り試用導線として複雑になる）。**トライアルで解放するのは「一括処理という操作方式」だけ**（エフェクト・スタンプの利用範囲は `ResolvedCapabilities` をそのまま参照し、一括処理へ入ったことで能力を書き換えない。追加スタンプまで一時解放すると Standard の価値が曖昧になる）。
 
 **台帳の改ざん対抗（HMAC 署名・整合性封鎖・破損修復）は持たない（ADR 0005）。** 台帳は `app.db` の平文行であり、利用者が直接書き換えれば無料枠・トライアルを回復できることを受容する（ADR 0005 Consequences。狙われる規模ではなく、被害上限は無料書き出し数枚）。DB 読み込み自体が失敗した場合の扱いは 7.2 の分類に従う。
 
-### 6.4 SourceRecord と素材同一性
+### 6.4 素材同一性
 
-仕様 14.3 は「新しいプロジェクトとして作り直しても、元素材識別子とローカルハッシュが一致すれば同一素材として扱う」と定めます。
-
-##### 複合 ID
-
-`contentFingerprint` 1 本にすると、OS が画像を変換した場合に同一素材と判定できない（PhotosPicker は要求形式や iCloud の状態によって HEIC を JPEG へ変換して返し、変換後はバイト列が別物になる）。
-
-```swift
-struct SourceIdentity: Sendable, Hashable {
-    /// 写真ライブラリの asset 識別値を端末内でハッシュ化したもの。
-    /// 取得できない場合（ファイル取り込み等）は nil
-    let providerAssetKeyHash: String?
-
-    /// ファイル全体の SHA-256（正準スキーマ 5.1）
-    let contentFingerprint: ContentFingerprint
-}
-```
-
-**この 2 つの OR を同一性判定へ直接使えない**（推移律が成立しないため。provider だけ一致する組と fingerprint だけ一致する組を橋渡しすると非等価な素材同士が繋がる）。同値関係でない述語を使うと、同じ素材の grant が複数作られトライアルを二重消費し、ゲートが同じ素材を別キーとして扱って同時実行を許してしまう。
-
-##### 正規 ID と alias
-
-**素材へ正規 ID（`sourceID`）を割り当て、識別情報を alias として管理します。**
-
-```swift
-enum SourceAlias: Sendable, Hashable {
-    case provider(String)               // providerAssetKeyHash（小文字 16 進 64 文字）
-    case content(ContentFingerprint)    // 32 バイト
-}
-
-// SourceID の定義は 6.6 が正本
-
-struct SourceRecord: Sendable, Equatable {
-    let sourceID: SourceID
-    var aliases: Set<SourceAlias>   // 空にしない（不変条件 7）
-}
-```
-
-素材を解決する手順。
-
-1. `provider` alias に一致する `SourceRecord` を探す
-2. `content` alias に一致する `SourceRecord` を探す
-3. 両方が見つかり、**別レコードを指していたら 1 件へ統合する**
-4. 片方だけ見つかれば、そのレコードへ不足している alias を追加する
-5. どちらも見つからなければ新しい `sourceID` を発行する
-
-以後、grant・トライアル台帳・予約・ゲートはすべて `sourceID` で管理する（等価性は通常の `==` であり推移律は自明に成立する）。`SourceRecord` の集合も `UsageLedger` に持つ（alias の追加と統合が台帳更新と同一トランザクションで必要なため。別の場所に置くと統合途中で落ちたとき alias と grant が食い違う）。
-
-##### 統合時の規則
-
-| 対象 | 統合結果 |
-| --- | --- |
-| `aliases` | 両者の和集合 |
-| grant | **最も古い `firstSuccessAt` を維持する**（窓を延長しない） |
-| トライアル台帳 | **どちらかが消費済みなら消費済み**（払い戻さない） |
-| 予約 | 両方を統合する。実行中の export が競合するなら新規開始を止める |
-| `ownerExportID` | 維持したほうの値を残す |
-
-**`sourceID` を持つ全集合（`grants` / `trialEntries` / `trialReservations`）を勝者へ書き換える**（書き換え漏れを型で防げないため一覧を規則として固定する）。書き換え結果、同じ `sourceID` の要素が同じ集合に 2 件できる場合は上の統合規則で 1 件へ畳む。
-
-##### `SourceRecord` の寿命
-
-**削除規則が無いと alias が永久に蓄積する**（有料利用者は grant の 24 時間が切れても書き出しを続ける）。一方、単純に「未参照なら削除」もできない（`paidUnlimited` の通常の単体書き出しには grant も予約もなく、認可から正常生成までの間その素材を参照するものが台帳に存在しない）。**`SourceRecord` を削除してよいのは、次のすべてから参照されなくなったときだけ。**
-
-| 参照元 | 参照の形 |
-| --- | --- |
-| `grants` / `trialEntries` / `trialReservations` | `sourceID` |
-| `projectSourceSnapshots` | `identity` の alias が、そのレコードの `aliases` と交わる |
-| 非終端の書き出し（`ExportCommit` / キュー項目） | 対象の `sourceID`（認可中〜確定前の一時的な参照。[書き出し Saga](export-saga.md) が正本） |
-
-削除は `rollPeriod` で期限切れ grant を落とすのと同じタイミングで行う（参照が最も減っている時点）。**snapshot を参照元に含めないと再接続の照合が成立しなくなる**（`SourceRecord` が消えると alias グラフの連結成分も消え「同じ写真を OS が別形式で返した」経路〈下記〉で一致を判定できない）。`Project` の削除で snapshot が消えたとき、他の参照が無ければ同じ台帳トランザクションで `SourceRecord` も削除する（7.5 の `Project` 削除 Saga）。
-
-##### 素材同一性の照合は alias グラフで行う
-
-**`SourceIdentity` 同士の直接比較（`providerAssetKeyHash` または `contentFingerprint` の一致）は使わない**（同じ写真でも取得経路によって片方しか得られないことがある。例: インポート時に `provider=P1, content=F1` で記録後、OS のトランスコードで同じ写真が `content=F2` になり `SourceRecord` へ追加登録、後日権限なしで `provider=nil, content=F2` として再選択される場合、直接比較では `F2` が元 snapshot の `F1` と一致せず拒否されてしまう）。
-
-| 規則 | 内容 |
-| --- | --- |
-| 照合 | 候補の `SourceIdentity` と `ProjectSourceSnapshot.identity` が、**同じ `SourceRecord`（alias グラフの同じ連結成分）へ解決されるか**で判定する |
-| 解決の場所 | `transact` の内側。台帳の統合規則と同じトランザクション |
-| **一致した場合** | **候補の alias を、その `SourceRecord` の `aliases` へ追加する**（再選択・再接続の両方） |
-| 不一致 | 別の写真として拒否する。alias は追加しない |
-
-一致時に alias を追加するのは次回の照合を成立させるため（追加しないと `P1 / F2` が台帳のどこにも現れず `F2` だけの再選択が毎回拒否される）。この規則は選択画面の分類（`BatchSelectionClassifier`）と同じであり、照合の実装を 2 つ持たない。
-
-##### 不変条件
-
-台帳を保存する前に検査します。
-
-| # | 条件 | 破れたときに起こること |
-| --- | --- | --- |
-| 1 | 同じ `SourceAlias` を 2 つの `SourceRecord` が持たない | 素材解決が 2 レコードを返し、統合が毎回走る |
-| 2 | 同じ `sourceID` の要素を、同じ集合内に 2 件持たない | grant の窓が二重になる |
-| 3 | `grants` / `trialEntries` / `trialReservations` の `sourceID` が `sourceRecords` に存在する | 参照先の無い権利が残る |
-| 4 | 同じ `sourceID` が `trialEntries` と `trialReservations` の両方に存在しない | 確定済みの素材を二重に予約し、クレジットを余分に数える |
-| 5 | `SourceRecord.aliases` が空でなく、全レコードを通じて一意 | alias を持たないレコードは二度と解決されず、永久に残る |
-| 6 | **`projectSourceSnapshots` の各 `identity` の alias が、いずれかの `SourceRecord` に存在する** | 再接続の照合元が消え、履歴を再編集できなくなる |
-| 7 | **`pendingExportedSettingsEntries` / `exportedSettingsEntries` / `projectSourceSnapshots` / `workingSourceBindings` の各集合に、同じ `projectID` が 2 件以上存在しない** | どちらを認可の根拠にするか決まらない |
-| 8 | **`workingSourceBindings` の各 `projectID` が `projectSourceSnapshots` にも存在する** | 実体だけがあり identity が無い `Project` ができる |
-
-##### `providerAssetKeyHash`
-
-**平文で保存しない**（端末内で塩付き SHA-256 へ変換し元の値を復元できない形で持つ。ADR 0005 により鍵導出は行わない）。アルゴリズムと出力形式は [正準スキーマ](canonical-schema.md) §5 が正本。
-
-##### `contentFingerprint`
-
-**ファイル全体の SHA-256 だけを入力にする**（バイト表現の正本は [正準スキーマ](canonical-schema.md)）。**部分ハッシュ（先頭・末尾 64KB）は採らない**（中央部分だけが異なる 2 枚が同一素材と判定され、同じカメラの連写では先頭 EXIF・末尾パディング・ファイルサイズ・撮影日時が揃いやすく無料枠回避が現実的な難易度になる）。全体を読む費用はストリーム投入で吸収する（メモリ一定）。計算は選択直後のインポート Saga で 1 回だけ行う（[画像処理](image-pipeline.md)）。**`PHAsset.creationDate` とファイル更新日時は入力にしない**（権限の有無で取得元が変わる／コピーや同期で容易に変わるため、同じ写真が別ハッシュになり無料枠を二重消費しうる）。理論上の衝突時は「別素材なのに無料で再書き出しできる」方向へ倒れるが、SHA-256 の全体ハッシュであるため意図的に作れる衝突ではない。
-
-##### 入力の取得契約
-
-```swift
-enum SourceRepresentation: Sendable, Equatable {
-    case original      // プロバイダーが返した原データ
-    case transcoded    // OS が変換した派生データしか取得できなかった
-}
-
-/// EXIF の撮影日時。ローカル表記とオフセットを分けて保持する（正準スキーマ 5.1.1）
-struct OriginalCaptureMetadata: Sendable, Equatable {
-    let dateTimeOriginal: String?      // "YYYY:MM:DD HH:MM:SS"
-    let subSecTimeOriginal: String?
-    let offsetTimeOriginal: String?    // "+09:00" など
-    let utcMillis: Int64?              // offset がある場合のみ算出する
-}
-```
-
-**`utcMillis` は `offsetTimeOriginal` がある場合にだけ入り、無い場合は `nil`（端末のタイムゾーンで補完しない。正準スキーマ 5.1.1）。** ローカル表記をそのまま持つのは出力 EXIF へ書き戻すため（UTC 変換後の再構築は往復誤差が出る）。この型を `ProjectSourceSnapshot` と `OutputMetadata` の両方が使う。
-
-| 状況 | 扱い |
-| --- | --- |
-| 原データを取得できる | `original` としてハッシュを計算する |
-| 原データを取得できない | **`transcoded` として、取得できた表現から計算する。処理は拒否しない** |
-
-**処理自体は拒否しない**（`transcoded` では同一素材の保証が弱まるが、これは利用者に不利な方向〈余分に消費する〉であり枠を水増しする方向ではない）。**`representation` は `contentFingerprint` の入力に含めない**（含めると取得経路により同じ写真が別ハッシュになる。診断用の区分値としてのみ記録する。9.2）。
-
-##### プロジェクト設定ハッシュ
-
-6.2 の「変更せず再書き出し」の判定にも正準化が必要（含めるフィールド・符号化規則・最終式はいずれも [正準スキーマ](canonical-schema.md) の 5.2 が正本）。意味の面で決めているのは 2 点。
-
-| 決定 | 内容 |
-| --- | --- |
-| 用途を 2 つに分ける | 認可用の `ProjectSettingsHash` と確認用の `PreviewRenderHash`。1 つにすると、匿名化結果に影響しない設定を変えただけで書き出せなくなる |
-| スタンプの参照 | DB の採番 ID ではなく **`StampAsset` の内容ハッシュ**（7.5）。ID はアプリ更新やデータ移行で変わる |
-
-`contentFingerprint` と同じ式ではない（あちらの入力はファイルの全バイトのみで構造化された符号化を持たない。混同すると片方の規則がもう一方へ持ち込まれる）。
-
-##### バッチ選択時の分類
-
-**選択画面で `SourceIdentity` を素朴に比較できない**（正規 `sourceID` の解決と alias の統合は書き出し開始時の `transact` の中でしか行われず、その外で生の OR 述語を使うと重複数え違い・トランスコード写真の誤新規扱い・選択中重複の見逃しが起こる）。
-
-```swift
-struct BatchSelectionClassification: Sendable {
-    let canonicalCount: Int      // 正規素材としての枚数（選択中の重複を畳んだ数）
-    let newSourceCount: Int      // 消費済み台帳に無い正規素材の数
-}
-
-protocol BatchSelectionClassifier: Sendable {
-    func classify(
-        selection: [SourceIdentity],
-        ledger: UsageLedger
-    ) -> BatchSelectionClassification
-}
-```
-
-判定は**連結成分**として行う。
-
-1. 台帳の `SourceRecord` が持つ alias 集合と、選択中の各写真の alias 集合を、同じグラフの頂点として扱う
-2. 同じ alias を共有する頂点を辺で結ぶ
-3. 連結成分ごとに 1 つの正規素材とみなす
-4. **その成分に対応する `sourceID` が `trialEntries` に存在するかで分類する**
-
-alias の共有関係を推移的に閉じることで `sourceID` 解決と同じ結果になる。**`SourceRecord` の有無で判定してはいけない**（`SourceRecord` は単体書き出しの `grant` / トライアル予約 / 進行中の書き出しの参照のいずれでも作られるため、存在だけを見ると単体処理をしただけの写真が一括トライアルで「消費済み」と誤判定されクレジットなしで処理できてしまう）。
-
-| 台帳の状態 | トライアルでの分類 |
-| --- | --- |
-| `SourceRecord` あり・`TrialEntry` なし | **新規**（クレジットを要する） |
-| `TrialEntry` あり | **消費済み**（クレジットを要しない） |
-| `TrialReservation` のみ | **新規枠を占有中**（別の書き出しが認可済み。残数計算では消費側に数える） |
-
-`TrialReservation` を「消費済み」に含めないのは、ロールバックされれば新規枠へ戻るため（残クレジットの導出は `trialEntries.count + trialReservations.count` を引くため占有分は残数側で既に減っており、分類側でも消費済みにすると二重に数える）。
-
-**この分類は表示と入力制限のためのものであり、選択時の判定だけで消費を認可しない。** 実行開始の直前に最新の台帳で全件を原子的に再検証する（開始ゲート〈[書き出し Saga](export-saga.md)〉の内側、上と同じ `trialEntries` 判定条件）。分類結果が変わっていれば実行を開始せず選択画面へ戻して差分を提示する。
+**ADR 0006 により廃止。** 勘定の単位は「受け渡した成果物」であり、素材の同一性照合（`providerAssetKeyHash` / `contentFingerprint` / `SourceRecord` の alias 統合）は勘定に使わない。素材の記録は [画像処理](image-pipeline.md) の `WorkingSourceRecord` に一本化し、同一性照合は行わない。確認用の設定ハッシュ（`ProjectSettingsHash` / `PreviewRenderHash`）と `StampAssetHash` は安全性・参照の基盤として維持し、正本は [正準スキーマ](canonical-schema.md) §5（7.5）。
 
 ### 6.5 バッチ処理
 
-**一括処理の制限なし利用は `canUseProBatch` が必要。** `canUseBatchTrial` だけを持つ利用者は、未使用クレジットの範囲で新しい写真を処理するか、消費済み台帳に登録されている写真を再度処理できる。
+**一括処理の制限なし利用は `canUseProBatch` が必要。** `canUseBatchTrial` だけを持つ利用者は、残クレジットの範囲で一括処理を実行できる。
 
 ```swift
 let canEnterBatch =
     capabilities.canUseProBatch ||
-    (
-        capabilities.canUseBatchTrial &&
-        (
-            remainingCredits > 0 ||
-            !usageLedger.trialEntries.isEmpty
-        )
-    )
+    (capabilities.canUseBatchTrial && remainingCredits > 0)
 ```
 
-**残クレジットが 0 でも消費済み台帳に写真があれば一括処理画面を閉じない**（「同じ 5 枚は期限なく何度でも試せる」を成立させるため）。**判定に `Plan` を使わない**（料金表や説明文でのプラン名使用は構わないが、実装上の条件式はすべて能力で書く）。
+**残クレジットが 0 になれば一括処理画面を閉じる**（勘定の単位は「受け渡した成果物」であり素材の同一性を問わないため、消費済みの写真を無料で再処理できる経路は無い。ADR 0006）。**判定に `Plan` を使わない**（料金表や説明文でのプラン名使用は構わないが、実装上の条件式はすべて能力で書く）。
 
 ##### 中核となる価値
 
@@ -1264,15 +960,15 @@ let canEnterBatch =
 | 条件 | 上限 |
 | --- | --- |
 | 1 バッチの総枚数 | Pro は 50 枚、トライアルは 5 枚 |
-| **選択中のうち、消費済み台帳にない写真の枚数**（6.4 の分類） | 残クレジット数 |
+| **トライアルの選択枚数** | 残クレジット数 |
 
 | 分類 | 発火条件 | 誘導 |
 | --- | --- | --- |
-| `batch-credit` | Free / Standard が、残クレジットを超える**新しい写真**を選ぼうとした | Pro |
+| `batch-credit` | Free / Standard が、**残クレジットを超える枚数**を選ぼうとした | Pro |
 | `batch-size` | Free / Standard が**総数 5 枚**を超えて選ぼうとした | Pro |
 | `batch-limit` | Pro が**総数 50 枚**を超えて選ぼうとした | 誘導なし。上限の通知のみ |
 
-`batch-size` と `batch-limit` を分けるのは、前者がアップグレードで解消できる制限、後者が仕様上の上限のため。`batch-credit` だけでは、既に試した写真だけを 6 枚選ぶ場合（新しい写真 0 枚）を捕まえられず、この経路は `batch-size` が受ける。
+**「新しい写真かどうか」の判定は存在しない**（ADR 0006。素材の同一性は問わない）。`batch-size` と `batch-limit` を分けるのは、前者がアップグレードで解消できる制限、後者が仕様上の上限のため。`batch-credit` は `batch-size` と独立した条件であり、残クレジットが総枚数上限（5 枚）より少ない場合に `batch-size` より先に発火する。
 
 ##### キューと付随機能
 
@@ -1385,9 +1081,9 @@ enum BatchKind: Sendable, Hashable {
 | 読み出し | **`app.db` から読んだ直後にクランプする** |
 | クランプの向き | **hard max を超える値は hard max へ、最小値を下回る値は最小値へ** |
 | 適用箇所 | `remainingCredits` の導出、`canEnterBatch`、選択枚数条件、キューの並列数のすべて |
-| `kind` の改変 | **`.trial` → `.proBatch` の書き換えは `batchSizeLimit` の上限を 5 → 50 へ緩めるが、新規写真は `remainingCredits`（≤5）に縛られる**（下記） |
+| `kind` の改変 | **`.trial` → `.proBatch` の書き換えは `batchSizeLimit` の上限を 5 → 50 へ緩めるが、選択枚数は `remainingCredits`（≤5）に縛られる**（下記） |
 
-**`kind` を持たせるのは `batchSizeLimit` のクランプ先が 2 つあるため**（`BatchPolicySnapshot` だけでは Pro の 50 とトライアルの 5 のどちらへ丸めるか決まらない）。**`kind` の改変では枚数は増えない**（選択枚数の条件は 2 本独立し、新規写真は `remainingCredits`〈最大 5〉、消費済みは `trialEntries` 件数〈最大 5〉に縛られ、処理できる相異なる素材は 5 枚のまま。重複は `canonicalCount` が畳む。6.4）。**下限もクランプする**（`batchSizeLimit` を 0 にして「上限 0 だから何枚でも通る」という実装ミスを誘発させないため）。
+**`kind` を持たせるのは `batchSizeLimit` のクランプ先が 2 つあるため**（`BatchPolicySnapshot` だけでは Pro の 50 とトライアルの 5 のどちらへ丸めるか決まらない）。**`kind` の改変では処理できる枚数は増えない**（トライアルの消費は `trialConsumedExportIDs`〈上限 5。6.3〉が独立して縛るため、`batchSizeLimit` を緩めても選択枚数の実質的な上限は変わらない）。**下限もクランプする**（`batchSizeLimit` を 0 にして「上限 0 だから何枚でも通る」という実装ミスを誘発させないため）。
 
 その他の規則は仕様 16.5 / 16.7 / 16.8 に従う。
 
@@ -1423,7 +1119,7 @@ struct ProjectID:   Sendable, Hashable { let rawValue: UUID }
 struct BatchID:     Sendable, Hashable { let rawValue: UUID }
 struct ExportID:    Sendable, Hashable { let rawValue: UUID }
 struct RegionID:    Sendable, Hashable { let rawValue: UUID }
-struct SourceID:    Sendable, Hashable { let rawValue: UUID }   // 素材の正規 ID（6.4）
+struct SourceID:    Sendable, Hashable { let rawValue: UUID }   // WorkingSourceRecord の識別子（画像処理）
 struct FaceTrackID: Sendable, Hashable { let rawValue: UUID }
 
 /// 認可用。出力へ影響する全設定の正準ハッシュ（正準スキーマ 5.2）
@@ -1432,8 +1128,6 @@ struct ProjectSettingsHash: Sendable, Hashable { let bytes: Data }   // 32 バ�
 /// プレビュー確認用。見た目に影響する値だけ（正準スキーマ 5.2）
 struct PreviewRenderHash: Sendable, Hashable { let bytes: Data }     // 32 バイト
 
-/// 素材の内容ハッシュ（正準スキーマ 5.1）
-struct ContentFingerprint: Sendable, Hashable { let bytes: Data }    // 32 バイト
 struct StampAssetHash: Sendable, Hashable { let bytes: Data }        // 32 バイト
 ```
 
@@ -1500,8 +1194,8 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `BatchPreset` | 一括設定プリセット |
 | `DeliveryAttempt` | 写真ライブラリ保存の試行中を表す。`previousState` を持つ（[書き出し Saga](export-saga.md) が正本） |
 | `UnknownLibrarySave` | 保存結果が不明のまま `delivered` を維持したことの記録 |
-| `ExportCommit` | 書き出しのコミットジャーナル（[書き出し Saga](export-saga.md)） |
-| `OutputRecord` | 写真ごとの出力状態。`exportID` でコミットと対応づける |
+| `ExportJob` | 書き出しの実行中状態（`running` / `completed`。[書き出し Saga](export-saga.md) が正本） |
+| `OutputRecord` | 写真ごとの出力状態。`exportID` で `ExportJob` と対応づける |
 | `ExportQueueItem` | 一括処理のキュー状態（6.5） |
 | `WorkingSourceRecord` | 処理用にアプリ領域へ複製した元素材（[画像処理](image-pipeline.md)） |
 | `PendingFileDeletion` | 参照 0 になった実体の削除候補（7.5） |
@@ -1510,8 +1204,8 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 
 **`app.db` 全体がバックアップ対象外**（7.4）。復元してはいけない理由（DB を分けても解消しない）:
 
-- `ExportCommit` を別端末へ復元しても対応する一時ファイルは存在せず、`UsageLedger`（同じくバックアップ対象外）との整合も失われる
-- 写真ライブラリ参照（`ProjectSourceLocator` / `providerAssetKeyHash`）は別端末で意味を持たず、履歴を復元しても再編集できない
+- `ExportJob` を別端末へ復元しても対応する一時ファイルは存在せず、`UsageLedger`（同じくバックアップ対象外）との整合も失われる
+- 写真ライブラリ参照（`ProjectSourceLocator`）は別端末で意味を持たず、履歴を復元しても再編集できない
 
 ##### DB を分けない
 
@@ -1546,9 +1240,9 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 
 | 対象 | 制約 |
 | --- | --- |
-| `ExportCommit.exportID` | **PRIMARY KEY** |
+| `ExportJob.exportID` | **PRIMARY KEY** |
 | `OutputRecord.exportID` | **PRIMARY KEY** |
-| `OutputRecord.projectID` | **UNIQUE**（1 プロジェクト 1 出力） |
+| `OutputRecord.projectID` | **部分 UNIQUE**（`state != discarded` の行のみ。非終端の出力は 1 プロジェクトにつき 1 件。7.5） |
 | `WorkingSourceRecord.projectID` | **PRIMARY KEY** |
 | `PendingFileDeletion(kind, fileID)` | **UNIQUE** |
 | `ProjectStampAsset(projectID, assetHash)` | **UNIQUE** |
@@ -1563,8 +1257,8 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | --- | --- | --- |
 | `OutputRecord.projectID` | `Project` | **RESTRICT**（未受け渡し出力があるプロジェクトを消さない。7.5） |
 | `OutputRecord.batchID` | `Batch` | SET NULL |
-| `ExportCommit.projectID` | `Project` | **RESTRICT** |
-| `ExportCommit.batchID` | `Batch` | SET NULL |
+| `ExportJob.projectID` | `Project` | **RESTRICT** |
+| `ExportJob.batchID` | `Batch` | SET NULL |
 | `WorkingSourceRecord.projectID` | `Project` | CASCADE |
 | `FaceTrack.projectID` | `Project` | CASCADE |
 | `EffectSetting.projectID` | `Project` | CASCADE |
@@ -1580,7 +1274,7 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `UnknownLibrarySave.exportID` | `OutputRecord` | CASCADE |
 | `DeliveryAttempt.exportID` | `OutputRecord` | CASCADE |
 
-**`batchID` を `SET NULL` にするのはバッチ履歴を消しても出力と書き出し記録を残すため**（バッチは集約単位であり個々の出力の存在条件ではない）。宣言していない参照は `PRAGMA foreign_key_check` で検出できないため、上の表が外部キーの全体であり新しい参照は必ずこの表へ加える。**`RESTRICT` は削除可否の判定（7.5）を DB 側でも二重に担保する**（アプリ側判定を通り抜けた削除は制約違反として失敗する）。**「同一 `sourceID` の非終端コミットは 1 件」は DB 制約にできない**（部分インデックスで状態を条件にする表現力が SQLite の制約だけでは足りないため。開始ゲートと台帳の不変条件で担保する。[書き出し Saga](export-saga.md)、6.4）。再試行は同じ `exportID` で冪等（`PRIMARY KEY` 制約により二重 insert は失敗し、再試行時は既存行の状態を読んで続きから進める）。
+**`batchID` を `SET NULL` にするのはバッチ履歴を消しても出力と書き出し記録を残すため**（バッチは集約単位であり個々の出力の存在条件ではない）。宣言していない参照は `PRAGMA foreign_key_check` で検出できないため、上の表が外部キーの全体であり新しい参照は必ずこの表へ加える。**`RESTRICT` は削除可否の判定（7.5）を DB 側でも二重に担保する**（アプリ側判定を通り抜けた削除は制約違反として失敗する）。**「1 プロジェクトにつき非終端の出力は 1 件」は `OutputRecord.projectID` の部分 UNIQUE インデックス（`WHERE state != 'discarded'`）で表現できる**（SQLite の部分インデックスを使う。開始ゲートを別途持たない。[書き出し Saga](export-saga.md) の 3 章）。中断・失敗は `ExportJob` 行を削除して終わるため再試行という概念は無く、次の開始は常に新しい `exportID` を発行する（同 4 章）。
 
 ##### 接続と journal
 
@@ -1608,11 +1302,11 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 
 | 障害 | 保証の水準 | 根拠 |
 | --- | --- | --- |
-| **プロセス強制終了**（`_exit` / SIGKILL / jetsam） | **保証する** | コミット Saga と単一トランザクション |
+| **プロセス強制終了**（`_exit` / SIGKILL / jetsam） | **保証する** | 単一トランザクションの確定境界（手順 4）と起動時復旧 |
 | **OS クラッシュ・電源断** | **best effort の耐久性** | `synchronous = EXTRA`、ファイルと親ディレクトリの同期 |
-| 復帰後の整合 | **回復する** | コミットジャーナルと起動時復旧 |
+| 復帰後の整合 | **回復する** | 起動時復旧（`running` の一律削除・孤児ファイル GC。[書き出し Saga](export-saga.md) の 5 章） |
 
-要点は「書き込みが必ず届く」ことではなく「どこで切れても整合を回復できる」こと（電源断で最後の書き込みが失われた場合、その書き出しは 1 つ前の状態から再開する）。v1 では出力ファイルについてもファイルと親ディレクトリを同期する（台帳と出力の整合が崩れると不変条件が壊れるため DB と同じ水準に揃える）。**同期方式（`F_FULLFSYNC` か通常の `fsync` か）は実機計測後に決める**（12.2）。
+要点は「書き込みが必ず届く」ことではなく「どこで切れても整合を回復できる」こと（会計は手順 4 でしか確定しないため、それより前で失われた書き出しは会計への影響なくやり直せる）。v1 では出力ファイルについてもファイルと親ディレクトリを同期する（台帳と出力の整合が崩れると不変条件が壊れるため DB と同じ水準に揃える）。**同期方式（`F_FULLFSYNC` か通常の `fsync` か）は実機計測後に決める**（12.2）。
 
 ### 7.2 台帳・購入状態の保存
 
@@ -1836,7 +1530,7 @@ protocol ProtectedDataAvailability: Sendable {
 - **履歴のサムネイルには加工後の画像のみを使用する**（隠す前の顔が一覧に並ばないように）
 - **アプリ専用領域へ元画像の完全コピーを永続保存しない**（保持するのは写真ライブラリへの参照と編集設定のみ。処理用コピーは書き出し完了後に削除する）
 
-元素材が削除・権限喪失した場合、過去の設定情報は表示できるが再編集はできない（仕様 18.3）。**再編集には素材の再接続が要る**（処理用ファイルは 24 時間で消えるため履歴から開いた `Project` はほぼ常に素材を持たず、利用者が写真を選び直し `ProjectSourceSnapshot.identity` と一致した場合にのみ再接続する。[画像処理](image-pipeline.md)。一致しない写真を結び直せると設定はそのままで中身の違う写真が「同じプロジェクト」になってしまう）。
+元素材が削除・権限喪失した場合、過去の設定情報は表示できるが再編集はできない（仕様 18.3）。**再編集には素材の再接続が要る**（処理用ファイルは 24 時間で消えるため履歴から開いた `Project` はほぼ常に素材を持たず、利用者が写真を選び直すことで再接続する。再接続の判定は [画像処理](image-pipeline.md) の `WorkingSourceRecord` が正本であり、勘定には使わない。ADR 0006）。
 
 ##### 保存期間と容量
 
@@ -1856,15 +1550,12 @@ protocol ProtectedDataAvailability: Sendable {
 - `WorkingSourceRecord` と処理用ファイル
 - `ExportRecord`、完了済みの `ExportQueueItem`
 
-例外は 5 つです。
+例外は 4 つです。
 
 - **未受け渡しの出力ファイル。** 利用者がまだ受け取っていない成果物であり、履歴とは性質が異なる。保存・共有・破棄のいずれかで解消する
 - **保存結果不明の注記（`UnknownLibrarySave`）が付いた `delivered` 出力。** 利用者の確認・再試行・破棄、または 24 時間で解消する（下記）
-- **`UsageLedger` の `SourceRecord` と初回成功時刻。** 無料枠の判定に必要な最小限であり、画像の内容を復元できる情報を含まない
-- **一括処理トライアルの消費済み素材識別値。** 5 枚分のトライアル対象を判定するために `SourceRecord` を**期限なく**保持する
-- **未完了の `ExportCommit` と、それが参照する検証済み出力ファイル。** 中断した処理の後始末であり、履歴ではない
-
-3 つ目は保持期間が無期限である点が他と異なる（プライバシーポリシーの記載と整合させる必要がある。12.2）。この設定ではやり直しができない（24 時間以内なら grant により無料枠は追加消費されないが編集内容は復元されない。設定画面に明記する）。
+- **`UsageLedger` の消費記録（月間枠・トライアルクレジット）。** 無料枠・トライアルクレジットの判定に必要な最小限であり、画像の内容を復元できる情報を含まない
+- **未完了の `ExportJob` と、それが参照する検証済み出力ファイル。** 中断した処理の後始末であり、履歴ではない
 
 ##### やり直しのための保持保証
 
@@ -1897,7 +1588,9 @@ extension OutputRecord {
 | `generated` | 1 | 生成済み。受け渡しは未成功 | 明示的に破棄するまで、または 24 時間経過するまで |
 | `deliveryUnknown` | 2 | 写真ライブラリ保存の結果が不明（[書き出し Saga](export-saga.md) の 8.0） | 同上 |
 | `delivered` | 3 | 保存または共有が 1 回以上成功した | **完了画面を離れるまで** |
-| `discarded` | 4 | 利用者が明示的に破棄した | 直ちに削除する |
+| `discarded` | 4 | 生成後の破棄、または実体喪失（下記） | **実体ファイルは直ちに削除する。行は保持し、次回 finalize での置換削除または履歴削除の通常サイクルで消える**（[書き出し Saga](export-saga.md) の 1.5・7 章。ADR 0006） |
+
+**`OutputRecord` は `settledAt: Date?` を持つ**（生成直後は `nil`。出力確認画面での明示的な完了操作で確定する。[書き出し Saga](export-saga.md) の 8 章が正本）。**`discarded` は物理削除ではなく状態遷移とする**（`settledAt == nil` の `discarded` 行は、同一 `Project` の次回書き出しが追加消費なしの `reissue` になるかどうかの判定根拠になる。行を消すと判定できない。ADR 0006）。**`OutputRecord.projectID` の一意性は非終端（`discarded` 以外）の行に限る**（部分 UNIQUE。7.1）。
 
 **列値を固定するのは `case` の宣言順に依存させないため**（`OutputState` は署名対象外だが DB 列としてスキーマ移行をまたぐ）。**`delivered` は後退させない**（受け渡しは複数回・任意順序で行え、一度成立した事実を `deliveryUnknown` で打ち消すと共有成功済みの出力が未受け渡しへ戻ってしまう。[書き出し Saga](export-saga.md) の 8.0）。**`isUndelivered` を次のすべてで使う**（個別に `state == .generated` と書くと `deliveryUnknown` だけが残った状態で判定を素通りする）。
 
@@ -1988,8 +1681,8 @@ struct DeletionContext: Sendable {
     let isFavorite: Bool
     let isBeingEdited: Bool
     let hasNonTerminalQueueItem: Bool
-    let hasUndeliveredOutputRecord: Bool   // isUndelivered のみ。delivered は保護しない
-    let hasExportCommit: Bool          // published を含む
+    let hasUndeliveredOutputRecord: Bool   // isUndelivered のみ。delivered / discarded は保護しない
+    let hasRunningExportJob: Bool
     let hasWorkingSourceRecord: Bool
     let isWithinReexportWindow: Bool   // 24 時間のやり直し保証
 }
@@ -2005,7 +1698,7 @@ func canDeleteHistoryUnit(
 | 分類 | 参照元 | 巻き込んだ場合に起こること |
 | --- | --- | --- |
 | **絶対保護**（どの契機でも削除しない） | **非終端のキュー項目**（`isTerminal == false`。6.5） | 処理中のバッチが消える |
-| 同上 | **`ExportCommit` の行**（`published` を含む。[書き出し Saga](export-saga.md) の 2） | 復旧の手がかりを失い、会計を戻せない／設定エントリを昇格できない |
+| 同上 | **`running` の `ExportJob`**（[書き出し Saga](export-saga.md) の 2 章） | 処理中の書き出しが宙に浮く |
 | 同上 | **`isUndelivered` の `OutputRecord`**（`hasUndeliveredOutputRecord`） | 利用者が受け取っていない成果物が消える |
 | **利用者が上書きできる** | お気に入り | 利用者が明示的に保護した履歴が消える |
 | 同上 | 編集中のプロジェクト | 編集画面が参照先を失う |
@@ -2038,7 +1731,7 @@ func canDeleteHistoryUnit(
 | 順 | 操作 |
 | --- | --- |
 | 1 | `canDeleteHistoryUnit` が真であることを確認する |
-| 2 | **同一 DB トランザクション**で `Project` と関連行（`ExportRecord` / `OutputRecord` / キュー項目 / `WorkingSourceRecord` / 検出・レビュー結果 / `ProjectStampAsset` / 履歴サムネイル / `ExportedSettingsEntry`〈pending と確定の両方〉/ `ProjectSourceSnapshot` / `WorkingSourceBinding`）を削除し、実体を `PendingFileDeletion` へ積む。他から参照されなくなった `SourceRecord` も同じトランザクションで削除する |
+| 2 | **同一 DB トランザクション**で `Project` と関連行（`ExportRecord` / `OutputRecord`〈`discarded` を含む全状態〉/ キュー項目 / `WorkingSourceRecord` / 検出・レビュー結果 / `ProjectStampAsset` / 履歴サムネイル / `ExportedSettingsEntry`）を削除し、実体を `PendingFileDeletion` へ積む |
 | 3 | `PendingFileDeletion` に従って実体を削除する |
 
 中断すればトランザクションはロールバックされ削除は成立しない（他の `app.db` 更新と同じ）。手順 2 と 3 の間で中断した場合は、`PendingFileDeletion` の起動時 GC が実体を回収する。
@@ -2086,26 +1779,33 @@ struct DeletionInspection: Sendable {
 
 enum AbsoluteProtection: Sendable, Hashable {
     case nonTerminalQueueItem
-    case exportCommitPresent
+    case exportJobRunning
     case undeliveredOutput
 }
 ```
 
-**`DeletionContext` を呼び出し側から渡さない**（渡せる形だと context 読み取り後に新しい `ExportCommit`/キュー項目が作られ古い context で削除が通る競合が残る）。**`deleteHistoryUnit` は `trigger` だけを受け取り `DeletionContext` を DB トランザクションの内側で読み直す**（`inspectDeletion` の結果は確認文言のためだけに使い削除の根拠にしない。再評価で不可になった場合は throw し理由を提示する）。**`DeletionInspection` と `DeletionContext` は別の型**（同じ型だと表示用に読んだ値を削除へ渡す実装が書けてしまう）。
+**`DeletionContext` を呼び出し側から渡さない**（渡せる形だと context 読み取り後に新しい `ExportJob`/キュー項目が作られ古い context で削除が通る競合が残る）。**`deleteHistoryUnit` は `trigger` だけを受け取り `DeletionContext` を DB トランザクションの内側で読み直す**（`inspectDeletion` の結果は確認文言のためだけに使い削除の根拠にしない。再評価で不可になった場合は throw し理由を提示する）。**`DeletionInspection` と `DeletionContext` は別の型**（同じ型だと表示用に読んだ値を削除へ渡す実装が書けてしまう）。
 
 ##### 出力の削除経路
 
-**「ファイルを消す」だけでは `OutputRecord` が孤児になるため、すべての出力削除を単一の経路へ統一する。**
+**性質の異なる 2 つの経路がある**（discard 遷移は `settledAt` を根拠に残す必要があり、物理削除とは異なる。ADR 0006）。
+
+| 経路 | 対象 | `OutputRecord` への操作 |
+| --- | --- | --- |
+| **discard 遷移** | 利用者による破棄、`isUndelivered` の 24 時間経過、壊れた出力の復元不能（[書き出し Saga](export-saga.md) の 7 章・8 章） | `discarded` へ**更新する**（`settledAt` は変更せず保持する） |
+| **物理削除** | `delivered` での完了画面離脱、`Project` / `Batch` の削除、次回 finalize による置換（[書き出し Saga](export-saga.md) の 3 章） | 行を**削除する** |
+
+いずれの経路も「ファイルを消す」だけでは孤児が残るため、DB 操作とファイル削除を同じ手順に統一する。
 
 | 順 | 操作 |
 | --- | --- |
-| 1 | DB トランザクションで `OutputRecord` を削除する |
+| 1 | DB トランザクションで `OutputRecord` を更新（discard 遷移）または削除（物理削除）する |
 | 2 | **同じトランザクション内で** `PendingFileDeletion` を追加する |
 | 3 | DB のコミット後にファイルを削除する |
 | 4 | 成功したら `PendingFileDeletion` の行を削除する |
 | 5 | 失敗したら起動時 GC で再試行する |
 
-対象は `delivered` での完了画面離脱、利用者による破棄、`isUndelivered` の 24 時間経過、壊れた出力の復元不能（[書き出し Saga](export-saga.md)）のすべて（**入口ごとに別の順序を実装しない**）。**失っても復旧できないほうを避ける**（ファイルを先に消して DB が失敗するとレコードだけが残り実体を指せない。DB を先に更新すれば残るのは孤児ファイルだけで GC が回収する）。
+**入口ごとに別の順序を実装しない。** **失っても復旧できないほうを避ける**（ファイルを先に消して DB が失敗するとレコードだけが残り実体を指せない。DB を先に更新すれば残るのは孤児ファイルだけで GC が回収する）。**discard 遷移で行を消さない**（`settledAt == nil` の `discarded` 行は次回書き出しの `reissue` 判定根拠になる。行そのものは次回 finalize での置換削除、または `Project` / `Batch` 削除に伴う通常の履歴削除サイクルで消える）。
 
 ##### `ExportRecord` と履歴の削除
 
@@ -2252,14 +1952,29 @@ ProjectStampAsset(
 | 上記以外のすべて | **コピーしない** |
 
 ```swift
+enum SourceRepresentation: Sendable, Equatable {
+    case original      // プロバイダーが返した原データ
+    case transcoded    // OS が変換した派生データしか取得できなかった
+}
+
+/// EXIF の撮影日時。ローカル表記とオフセットを分けて保持する（正準スキーマ 5.1.1）
+struct OriginalCaptureMetadata: Sendable, Equatable {
+    let dateTimeOriginal: String?      // "YYYY:MM:DD HH:MM:SS"
+    let subSecTimeOriginal: String?
+    let offsetTimeOriginal: String?    // "+09:00" など
+    let utcMillis: Int64?              // offset がある場合のみ算出する
+}
+
 /// 出力メタデータ。許可フィールド以外を構造的に持てない
 struct OutputMetadata: Sendable, Equatable {
     let pixelSize: PixelSize
     let iccProfile: Data?                    // 色が変わる場合のみ埋める
-    let capture: OriginalCaptureMetadata?    // 設定で保持を選んだ場合のみ（6.4）
+    let capture: OriginalCaptureMetadata?    // 設定で保持を選んだ場合のみ
     // 向きは常に通常値（1）として書くため、フィールドを持たない
 }
 ```
+
+**`utcMillis` は `offsetTimeOriginal` がある場合にだけ入り、無い場合は `nil`（端末のタイムゾーンで補完しない。正準スキーマ 5.1.1）。** ローカル表記をそのまま持つのは出力 EXIF へ書き戻すため（UTC 変換後の再構築は往復誤差が出る）。**`representation` が `transcoded`（取得経路が元データを返さなかった）でも取得を拒否しない**（取得できた表現からそのまま処理する。9.2 の診断区分値としてのみ記録する）。
 
 **`ImageEncoder` はこの型だけを受け取る**（[画像処理](image-pipeline.md)。元のメタデータ辞書を渡せる形だとコピー削除実装が可能になってしまう）。**保存後に読み返し、許可されていない namespace とキーが 1 つも無いことを検査する**（失敗した出力は完成扱いにせず [書き出し Saga](export-saga.md) のファイル検証失敗として扱う）。**カスタムスタンプも同じ方針で再エンコードする**（取り込み時の縮小・変換で元のメタデータを捨てる。実体がアプリ内に残る以上、位置情報を保持する理由が無い）。
 
@@ -2271,7 +1986,7 @@ struct OutputMetadata: Sendable, Equatable {
 | 2 | EXIF の `DateTimeOriginal` | 常に試みる |
 | 3 | **`creationDate` を設定しない**（OS が保存日時を使う） | どちらも無い場合 |
 
-**3 の場合に現在時刻を明示指定しない**（設定しないのと同じ結果になるが、「日時を引き継いだ」と記録が残ると不具合調査時に誤解の元になる。取得できなかったことを区分値として記録する。9.2）。**この優先順位表は `contentFingerprint` に流用しない**（fingerprint の撮影日時は EXIF のみ。6.4。`PHAsset.creationDate` 優先は写真属性としての正確さのためであり同一性判定には使えない）。
+**3 の場合に現在時刻を明示指定しない**（設定しないのと同じ結果になるが、「日時を引き継いだ」と記録が残ると不具合調査時に誤解の元になる。取得できなかったことを区分値として記録する。9.2）。
 
 画像方向とピクセルサイズは常に保持する。
 
@@ -2281,21 +1996,20 @@ struct OutputMetadata: Sendable, Equatable {
 
 ## 8. 書き出し Saga
 
-**正本は [書き出し Saga](export-saga.md) です。** 状態遷移、ロールバック順序、起動時復旧順序をここへ複製しません。書き出しは直列キュー 1 本（v1 は並列数 1）で処理するため、同一素材の並行実行は構造的に起きません（4.2、4.3。`SourceLease` のような台帳側の参照保持は持ちません。ADR 0005）。
+**正本は [書き出し Saga](export-saga.md) です。** 状態遷移、認可、中断時の後始末、起動時復旧の手順をここへ複製しません。書き出しは直列キュー 1 本（v1 は並列数 1）で処理するため、同一素材の並行実行は構造的に起きません（4.2、4.3。`SourceLease` のような台帳側の参照保持は持ちません。ADR 0005）。
 
-書き出しの完了で確定する事柄は、ファイルシステムと DB の 2 か所に分かれており、**単一トランザクションで更新できません**（出力ファイルの書き込みと、`UsageLedger` を含む DB 更新は別の操作のため）。異常終了の位置によって「出力だけ残り枠が消費されない」「枠だけ消費され出力が残らない」が起こります。**永続的なコミットジャーナル（`ExportCommit`）を置きます。**
+**会計・出力の公開・ジョブの完了は単一の DB トランザクション（手順 4）で原子的に確定します**（ADR 0005 により台帳・`OutputRecord` とも `app.db` の平文行になったため。ファイルシステムと DB を跨ぐ補償や永続的なコミットジャーナルは持ちません）。それより前の中断は `ExportJob` 行の削除という一律の後始末で足ります（[書き出し Saga](export-saga.md) の 4 章）。
 
 本書の他の章が依存する不変条件だけを示します。
 
 | 不変条件 | 内容 |
 | --- | --- |
-| **確定点** | 会計の最終確定は成果物の公開ただ 1 点。それ以前は成果物を公開しない |
-| **公開の観測可能性** | `OutputRecord` の insert とコミットの確定更新は同一 DB トランザクション |
-| **所有者** | ロールバックの根拠は台帳側の情報のみとする |
+| **確定境界** | 会計の計上と成果物の公開は手順 4（単一トランザクション）ただ 1 点。それ以前は成果物を公開しない |
+| **枠の確定** | 計上とは別に、出力確認画面での明示的な完了操作（`settledAt`）で枠を確定する。完了前の破棄は追加消費なしの `reissue` として次の書き出しへ引き継がれる（ADR 0006） |
 | **未受け渡し出力の保護** | 保存前に消えない。更新誘導より受け渡しを優先する（ADR 0005） |
-| **復旧の開始条件** | 起動時復旧を終えるまで新しい書き出しを開始しない |
+| **復旧の開始条件** | 起動時復旧（`running` の一律削除・孤児ファイル GC）を終えるまで新しい書き出しを開始しない |
 
-`ExportAuthorization` / `ExportAccountingMode` / `ExportCommit` / `OutputRecord` の型定義も [書き出し Saga](export-saga.md) が正本です。
+`ExportJob` / `ExportAuthorization` / `ExportAccountingMode` / `OutputRecord` の型定義も [書き出し Saga](export-saga.md) が正本です。
 
 ---
 
@@ -2303,7 +2017,7 @@ struct OutputMetadata: Sendable, Equatable {
 
 ### 9.1 HMAC と正準化
 
-**ADR 0005 により廃止。** 台帳・購入状態の署名と鍵導出は持たない（7.2）。`providerAssetKeyHash` と `contentFingerprint` のハッシュ定義は [正準スキーマ](canonical-schema.md) §5 が正本（6.4）。
+**ADR 0005 により廃止。** 台帳・購入状態の署名と鍵導出は持たない（7.2）。素材同一性のハッシュ（`providerAssetKeyHash` / `contentFingerprint`）は ADR 0006 により廃止（6.4）。確認用の設定ハッシュ（`ProjectSettingsHash` / `PreviewRenderHash`）と `StampAssetHash` のハッシュ定義は [正準スキーマ](canonical-schema.md) §5 が正本（6.6）。
 
 ### 9.2 ログ・分析・診断
 
@@ -2410,9 +2124,8 @@ enum PurchasedPlan: Int32, Sendable, Hashable {
 }
 
 struct RecoveryFields: Sendable {
-    let commitState: ExportCommitState?
+    let jobState: ExportJobState?
     let outcome: RecoveryOutcome
-    let ledgerRepaired: Bool
 }
 
 enum RecoveryOutcome: Int32, Sendable, Hashable {
@@ -2515,7 +2228,7 @@ protocol CrashReporter: Sendable {
 
 /// クラッシュ報告に添える文脈。識別子と自由文字列を持たない
 struct CrashContext: Sendable, Equatable {
-    let commitState: ExportCommitState?
+    let jobState: ExportJobState?
     let queueDepth: Int
     let recoveryStep: Int?
 }
@@ -2636,10 +2349,10 @@ v1 のリリース範囲、動画の扱い、課金訴求の分類、利用者�
 | 4.1 | 対応 OS の下限を明示していない | **iOS 26 以降** | ADR 0001 |
 | 12.7 | カスタムスタンプ上限 Standard 30 / Pro 100 | 両プラン 100 | 差別化として機能せず、Pro の焦点をぼかす |
 | 13.8 | 撮影日時を削除対象に含む | EXIF 日時は既定で保持。ライブラリ登録日時は取得できる場合に引き継ぐ | 7.5。日時削除は写真アプリの並び順を壊す |
-| 14.2 | 消費条件の解釈 | 「利用可能な加工済み出力の生成が完了した時点」＝手順 7。写真ライブラリ保存時点ではない | [書き出し Saga](export-saga.md)。保存せず OS 共有だけで無料枠を回避できる経路を塞ぐ |
+| 14.2 | 消費条件の解釈 | 「利用可能な加工済み出力の生成が完了した時点」＝手順 4。写真ライブラリ保存時点ではない | [書き出し Saga](export-saga.md)。保存せず OS 共有だけで無料枠を回避できる経路を塞ぐ |
 | 16.3 | 一括処理モードは「全顔を同じ方法で隠す」「素材ごとに確認する」 | 「おまかせ一括」「1 枚ずつ確認」。どちらでも全写真に一度は目を通す | 6.5。トリアージは検出漏れを判定できない |
 | 18.4 | 保存上限は 100 プロジェクト | 件数上限を撤廃し、保存期間（既定 30 日）と使用容量上限（既定 200MB）で管理 | 7.5。1 バッチ 50 枚に対して 2 バッチで枯渇する |
-| 20.3 | 原子的書き出しの第 4 段階を「写真ライブラリへ保存する」とする | 生成と受け渡しの 2 段階に分離。生成の完了は手順 7 | [書き出し Saga](export-saga.md) |
+| 20.3 | 原子的書き出しの第 4 段階を「写真ライブラリへ保存する」とする | 生成と受け渡しの 2 段階に分離。生成の完了は手順 4 | [書き出し Saga](export-saga.md) |
 | 21.5 | `/v1/installations` と購入検証 API | 実装しない | ADR 0004 |
 | 32.1 | 初回リリース必須機能に動画を含む | v1 では動画を含めない | [商品面の決定](product-decisions.md)。段階リリース |
 
@@ -2651,11 +2364,11 @@ v1 のリリース範囲、動画の扱い、課金訴求の分類、利用者�
 | App Store ID | 更新誘導のリンク先に必要（[運用](operations.md)） | ストア登録時 |
 | `lowConfidence` の閾値 | `FaceObservation.confidence` の下限。実素材の分布を見て決定（[画像処理](image-pipeline.md) / 6.1） | v1 実機検証時 |
 | `extremePose` の角度閾値 | yaw / pitch の絶対値の上限。検出品質テストの結果から決定（6.1） | v1 実機検証時 |
-| プライバシーポリシーの記載 | トライアル台帳（`SourceRecord`）を期限なく端末内へ保持することを記載し、7.5 の例外と整合させる | ストア申請前 |
+| プライバシーポリシーの記載 | トライアル消費記録（`UsageLedger.trialConsumedExportIDs`）を期限なく端末内へ保持することを記載し、7.5 の例外と整合させる | ストア申請前 |
 | 基本スタンプの意匠 | ベクターで自作する 12〜20 種の具体的な図案 | v1 実装中 |
 | 履歴の使用容量上限 | 初期値 200MB は暫定。加工後サムネイルの実サイズを計測して確定 | v1 実装中 |
 | カスタムスタンプの保存解像度 | 長辺 1,024px は暫定。顔が大きく写る素材での見え方を実機で確認（7.5） | v1 実機検証時 |
 | トライアルのクレジット数 | 5 枚は暫定。転換率を見て調整可能な設定値とする | リリース後 |
 | 一括処理の同時並列数を 2 へ引き上げるか | v1 は 1 固定。引き上げには二段階ゲートの実装と実機計測が要る | v2 検討時 |
 | ファイル同期の方式 | `F_FULLFSYNC` と通常の `fsync` の所要時間差を実機計測し、耐久性とのつり合いで決定（7.1） | v1 実機検証時 |
-| 再確認しきい値 | `usageNow - finalizedAt` の許容差 5 分は暫定。書き出し完了までの実測時間から確定（[書き出し Saga](export-saga.md)） | v1 実機検証時 |
+| 再確認しきい値 | `usageNow - generatedAt` の許容差 5 分は暫定。書き出し完了までの実測時間から確定（[書き出し Saga](export-saga.md)） | v1 実機検証時 |
