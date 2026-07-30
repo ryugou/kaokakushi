@@ -491,11 +491,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [gridConfirmed, setGridConfirmed] = React.useState(false)
   const [reachedEnd, setReachedEnd] = React.useState(false)
   const [reviewedIds, setReviewedIds] = React.useState<string[]>([])
-  /** すでに枠を消費した元写真。同じ写真の再書き出しでは二重に消費しない */
-  const [chargedIds, setChargedIds] = React.useState<string[]>([])
-  const [trialChargedIds, setTrialChargedIds] = React.useState<string[]>([])
+  /**
+   * トライアルクレジットの消費数。成果物単位で加算するだけで、素材の同一性は
+   * 参照しない（ADR 0006）。同じ写真でも新しいバッチ実行での成功は新規消費になる。
+   */
+  const [trialCreditsConsumed, setTrialCreditsConsumed] = React.useState(0)
+  /**
+   * 同一バッチ実行内で既に課金した mediaId。redoBatchItem による同一実行内の
+   * 再生成を二重課金しないためだけに使うスコープ限定の記録で、バッチをまたいで
+   * 保持しない（startBatchDetection / completeBatch / resetBatch でクリアする）。
+   */
+  const [runChargedMediaIds, setRunChargedMediaIds] = React.useState<string[]>([])
   // 残クレジットは保存せず台帳から導出する。正を1つにして不一致を防ぐ
-  const trialCredits = Math.max(0, TRIAL_CREDITS - trialChargedIds.length)
+  const trialCredits = Math.max(0, TRIAL_CREDITS - trialCreditsConsumed)
 
   const media = mediaId ? findMedia(mediaId) : null
   const faces = React.useMemo(
@@ -516,8 +524,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const canUsePremiumStamps = effectivePlan === "standard" || effectivePlan === "pro"
   const canUseCustomStamps = effectivePlan === "standard" || effectivePlan === "pro"
   const canBatchFull = effectivePlan === "pro"
-  // クレジット0でも、消費済み台帳に写真があれば再処理できる
-  const canBatchTrial = trialCredits > 0 || trialChargedIds.length > 0
+  // 判定は残クレジットのみ。処理済み分類は作らない（ADR 0006）
+  const canBatchTrial = trialCredits > 0
   const hasAds = effectivePlan === "free"
   // トライアルは「総枚数5枚まで」「新規写真は残クレジットまで」の2条件。
   // 総枚数だけで絞ると、残0枚のとき消費済みの写真すら選べなくなる。
@@ -668,8 +676,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setRemainingFree((n) => Math.max(0, n - 1))
     }
     setReissueMediaId(null)
-    // chargedIds は一括処理側の突合にのみ使う台帳。単体の消費判定はもう参照しない
-    setChargedIds((prev) => (prev.includes(media.id) ? prev : [...prev, media.id]))
 
     const label =
       effect.type === "stamp"
@@ -820,19 +826,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const closeDiscard = React.useCallback(() => setDiscardPromptOpen(false), [])
   const closeRecovery = React.useCallback(() => setRecoveryOpen(false), [])
 
+  /** デモ用。トライアルクレジットの消費数を直接指定する */
+  const setTrialConsumed = React.useCallback((n: number) => {
+    setTrialCreditsConsumed(Math.max(0, n))
+  }, [])
+
   /**
    * 異常終了後の起動を再現する。
    * 受け渡し済みの出力は一時ファイルを消すだけで、復旧案内は出さない。
    * すでに保存できているのに「保存していない」と伝えるのは事実と異なるため。
    */
-  const setTrialConsumed = React.useCallback((n: number) => {
-    setTrialChargedIds((prev) => {
-      const next = prev.slice(0, n)
-      while (next.length < n) next.push(`demo-${next.length}`)
-      return next
-    })
-  }, [])
-
   const simulateCrash = React.useCallback(() => {
     setStack(["home"])
     setPendingOutput((current) => {
@@ -1052,20 +1055,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           setUpgrade({ reason: canBatchFull ? "batch-limit" : "batch-size" })
           return prev
         }
-        // 条件2: 消費済み台帳にない写真の枚数が残クレジットを超えないこと
-        if (!canBatchFull && !trialChargedIds.includes(id)) {
-          const freshSelected = prev.filter((x) => !trialChargedIds.includes(x)).length
-          if (freshSelected >= trialCredits) {
-            // 新しい写真が残クレジットを超えた。総枚数上限(batch-size)とは原因が異なる
-            setUpgrade({ reason: "batch-credit" })
-            return prev
-          }
+        // 条件2: 選択枚数が残クレジットを超えないこと（処理済み分類は作らない。ADR 0006）
+        if (!canBatchFull && prev.length >= trialCredits) {
+          // 総枚数上限(batch-size)とは原因が異なる
+          setUpgrade({ reason: "batch-credit" })
+          return prev
         }
         onSelectionAdded(id)
         return [...prev, id]
       })
     },
-    [batchMaxSelectable, canBatchFull, onSelectionAdded, onSelectionRemoved, trialChargedIds, trialCredits],
+    [batchMaxSelectable, canBatchFull, onSelectionAdded, onSelectionRemoved, trialCredits],
   )
 
   const clearBatchSelection = React.useCallback(() => {
@@ -1077,6 +1077,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const startBatchDetection = React.useCallback(() => {
     batchRunIdRef.current += 1
     batchHistoryIdRef.current = null
+    // 新しいバッチ実行。過去の実行の課金記録を持ち越さない（ADR 0006）
+    setRunChargedMediaIds([])
     setBatchItems(
       batchSelection.map((id) => ({
         mediaId: id,
@@ -1270,22 +1272,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (doneItems.length === 0) return
 
     const usedTrial = !canBatchFull
+    // 今回のバッチ実行で確定した成果物の数だけを課金する。過去の課金履歴は参照しない
+    // （ADR 0006）。同一実行内の redoBatchItem による再生成だけは runChargedMediaIds で
+    // 二重課金を防ぐ（バッチの完了・破棄・新規実行でこの記録はクリアされる）
+    const freshItems = doneItems.filter((i) => !runChargedMediaIds.includes(i.mediaId))
     if (usedTrial) {
-      // 同じ元写真を再書き出ししてもクレジットは二重に消費しない
-      const fresh = doneItems.filter((i) => !trialChargedIds.includes(i.mediaId))
-      if (fresh.length > 0) {
-        setTrialChargedIds((prev) => [...prev, ...fresh.map((i) => i.mediaId)])
+      if (freshItems.length > 0) {
+        setTrialCreditsConsumed((n) => n + freshItems.length)
       }
       setBatchTrialUsed(true)
     }
-
-    // ExportGrant はプランを問わず作る。Free の枠を減らすのは grant がない写真だけ
-    const withoutGrant = doneItems.filter((i) => !chargedIds.includes(i.mediaId))
-    if (withoutGrant.length > 0) {
+    if (freshItems.length > 0) {
       if (effectivePlan === "free") {
-        setRemainingFree((n) => Math.max(0, n - withoutGrant.length))
+        setRemainingFree((n) => Math.max(0, n - freshItems.length))
       }
-      setChargedIds((prev) => [...prev, ...withoutGrant.map((i) => i.mediaId)])
+      setRunChargedMediaIds((prev) => [...prev, ...freshItems.map((i) => i.mediaId)])
     }
 
     // batchHistoryIdRef に確定値があれば使い回す。retryBatchErrors 経由の再実行では
@@ -1325,7 +1326,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       settled: current?.kind === "batch" ? current.settled : false,
       records: doneItems.map((i) => ({ mediaId: i.mediaId, state: "generated" as OutputState })),
     }))
-  }, [batchItems, batchStage, canBatchFull, chargedIds, effect, plan, retention, trialChargedIds])
+  }, [batchItems, batchStage, canBatchFull, effect, effectivePlan, plan, retention, runChargedMediaIds])
 
   const pauseBatch = React.useCallback(() => setBatchRunning(false), [])
   const resumeBatch = React.useCallback(() => setBatchRunning(true), [])
@@ -1365,13 +1366,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setPendingOutput((current) =>
       current && current.kind === "batch" && !current.settled ? { ...current, settled: true } : current,
     )
+    // 完了後は redo できないため、同一実行内の課金記録はもう不要
+    setRunChargedMediaIds([])
   }, [])
 
   /**
    * 完了前だけ有効なやり直し。該当写真をキューへ戻し、書き出しキューの
-   * useEffect にもう一度処理させる。chargedIds / trialChargedIds は
-   * そのまま残す（すでに消費済み台帳にあるため、書き出し完了時の消費エフェクトは
-   * 自動的にこの写真を除外する。ADR 0006 の「完了前のやり直しは無料」）。
+   * useEffect にもう一度処理させる。runChargedMediaIds はそのまま残す
+   * （同一バッチ実行内の記録のため、summary の消費エフェクトが自動的に
+   * この写真を除外する。ADR 0006 の「完了前のやり直しは無料」）。
    */
   const redoBatchItem = React.useCallback(
     (mediaId: string) => {
@@ -1408,6 +1411,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setGridConfirmed(false)
     setReachedEnd(false)
     setReviewedIds([])
+    // バッチを離脱・破棄する。同一実行内の課金記録も持ち越さない
+    setRunChargedMediaIds([])
   }, [])
 
   const value: AppContextValue = {
