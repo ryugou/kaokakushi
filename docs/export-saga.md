@@ -28,13 +28,18 @@ protocol ExportSagaStore: Sendable {
     func recordGeneratedOutput(_ input: RecordOutputInput) async throws
     /// 完了（単体専用。ExportJob.batchID == nil でなければ throw）。単一トランザクションで、台帳の加算または
     /// トライアルクレジットの消費・settledAt の確定・ExportRecord の作成・confirmed 設定エントリの更新・
-    /// キュー項目の completed 更新・WorkingSourceRecord の削除・ExportJob の削除を行う（3 章）。ここが唯一の確定境界
+    /// キュー項目の completed 更新・WorkingSourceRecord の削除を行う（3 章）。ここが唯一の確定境界。
+    /// 削除する WorkingSourceRecord の WorkingSourceFileRef は同一トランザクションで PendingFileDeletion へ
+    /// 登録する（実削除はコミット後、失敗時は起動時再試行。削除経路の正本はアーキテクチャ設計 7.5）。最後に ExportJob を削除する
     func settleExport(_ exportID: ExportID) async throws
-    /// 完了（バッチ）。対象 batchID の未確定 OutputRecord をすべて対象に、settleExport と同じ内容を
-    /// 単一トランザクションで一括確定する。settledAt は呼び出し側が渡した時刻で全件に統一する（3 章）
+    /// 完了（バッチ）。対象 batchID の未確定 OutputRecord をすべて対象に、settleExport と同じ内容
+    /// （WorkingSourceRecord 削除に伴う PendingFileDeletion 登録を含む）を単一トランザクションで一括確定する。
+    /// settledAt は呼び出し側が渡した時刻で全件に統一する。事前条件は 3 章
     func settleBatch(_ batchID: BatchID, settledAt: Date) async throws
     /// 失敗・キャンセル・やり直し・中断。ExportJob 行を削除する。対応する OutputRecord が存在すれば
-    /// 同一トランザクションで削除する。WorkingSourceRecord は削除しない（4 章）。台帳は未確定のため触れない
+    /// 同一トランザクションで削除し、その出力ファイル（存在すれば）と手順 1〜3 の一時ファイルを
+    /// PendingFileDeletion へ登録する（実削除はコミット後。削除経路の正本はアーキテクチャ設計 7.5）。
+    /// WorkingSourceRecord は削除しない（4 章）。台帳は未確定のため触れない
     func discardExport(_ exportID: ExportID) async throws
     /// 起動時復旧の入力（5 章）
     func loadRunningJobs() async throws -> [ExportJob]
@@ -56,8 +61,10 @@ protocol OutputDeliveryStore: Sendable {
     func resolveOrphanedAttempts() async throws -> [OutputDeliverySnapshot]
     func loadUnknownLibrarySaves() async throws -> [UnknownLibrarySave]
     func clearUnknownLibrarySave(_ exportID: ExportID) async throws
-    /// 完了後の出力を利用者が明示的に破棄する。OutputRecord と実体ファイルを物理削除する（状態遷移ではない）。
-    /// UnknownLibrarySave があれば FK CASCADE で消える。事前条件: settledAt != nil（完了前のやり直しは discardExport を使う）、
+    /// 完了後の出力を利用者が明示的に破棄する（状態遷移ではない）。DB トランザクションで OutputRecord を
+    /// 削除し、同一トランザクションで実体ファイルを PendingFileDeletion へ登録する。実削除はコミット後、
+    /// 失敗時は起動時再試行する（削除経路の正本はアーキテクチャ設計 7.5）。UnknownLibrarySave があれば
+    /// FK CASCADE で消える。事前条件: settledAt != nil（完了前のやり直しは discardExport を使う）、
     /// かつ対象の DeliveryAttempt が存在しないこと（7.0。試行中の破棄は拒否する）
     func deleteOutput(_ exportID: ExportID) async throws
 }
@@ -295,6 +302,8 @@ ExportJob 作成 → レンダリング・移動・健全性確認（DB 上の�
 
 手順4と手順5の間、成果物は非公開の確認用出力である。検証済みファイルは、手順5が完了するまで UI・`MediaSaver`・`SharePresenter` へ公開しない（7 章）。
 
+手順5で削除する `WorkingSourceRecord` の実体ファイルは、同一トランザクション内で `PendingFileDeletion` へ登録する。実際のファイル削除はトランザクションのコミット後に行い、失敗すれば起動時の GC で再試行する（削除経路の正本は [アーキテクチャ設計](architecture.md) の 7.5。「出力の削除経路」と同じ単一経路を使う）。
+
 **手順3（健全性確認）**: 存在確認だけでは不足する（0 バイトのファイル、途中まで書かれたファイル、デコードできないファイルも「存在する」ため）。ファイルが存在し、サイズが 0 でなく、簡易デコードが成功することを確認する。いずれかが不成立なら手順 4 へ進まず、中断として扱う（4 章）。
 
 **手順4（生成）の内容**:
@@ -332,7 +341,7 @@ struct ExportRecord: Sendable {
 }
 ```
 
-`settleExport` は単体書き出し専用であり、実装はトランザクション内で次を確認する（不成立なら throw し、手順 5 を実行しない）。`ExportJob` が存在する（二重確定の防止）、`ExportJob.batchID == nil`（バッチの成果物は `settleBatch` でのみ確定する。個別に確定させると「結果一覧画面での完了操作 1 回」という単位が壊れる）、対応する `OutputRecord` が存在し `settledAt IS NULL` である、`queueItemID` が指定されていれば対応するキュー項目が存在し `projectID` / `batchID` が一致し `state == .exporting`（無関係なキュー項目を `completed` にしない）。`settleBatch` も同様に、対象 `batchID` に一致し `settledAt IS NULL` である全 `OutputRecord` それぞれについて同じキュー項目チェックを行う。
+`settleExport` は単体書き出し専用であり、実装はトランザクション内で次を確認する（不成立なら throw し、手順 5 を実行しない）。`ExportJob` が存在する（二重確定の防止）、`ExportJob.batchID == nil`（バッチの成果物は `settleBatch` でのみ確定する。個別に確定させると「結果一覧画面での完了操作 1 回」という単位が壊れる）、対応する `OutputRecord` が存在し `settledAt IS NULL` である、`queueItemID` が指定されていれば対応するキュー項目が存在し `projectID` / `batchID` が一致し `state == .exporting`（無関係なキュー項目を `completed` にしない）。`settleBatch` も同様に、対象 `batchID` に一致し `settledAt IS NULL` である全 `OutputRecord` それぞれについて同じキュー項目チェックを行う。加えて、確定対象の集合（`settledAt IS NULL` の `OutputRecord`）に含めない項目（生成前・処理中・`failed`・`paused` のいずれかで `OutputRecord` を持たない）が残っていてもバッチ全体を止めない（一枚の失敗でバッチ全体を停止しない。[アーキテクチャ設計](architecture.md) の 6.4）。ただし消費するクレジット・枠の枚数は、同一トランザクション内で実際に `settledAt` を設定する `OutputRecord` の件数と必ず一致することを検査する（数え間違いによる過不足消費を防ぐ）。
 
 確認を通ったら、`settledAt` に確定時刻（単体は現在時刻、バッチは呼び出し側が渡した時刻）を設定し、`expiresAt` を `settledAt + 24h` に設定する。`ExportJob` の値だけから `ExportRecord` を導出する。
 
@@ -352,9 +361,9 @@ struct ExportRecord: Sendable {
 
 | 契機 | 後始末 |
 | --- | --- |
-| 生成の失敗（手順 1〜3） | `discardExport` で `ExportJob` 行を削除する。`OutputRecord` はまだ存在しないため対象外。一時ファイルをベストエフォートで削除する |
+| 生成の失敗（手順 1〜3） | `discardExport` で `ExportJob` 行を削除する。`OutputRecord` はまだ存在しないため対象外。手順 1〜3 の一時ファイルは同一トランザクションで `PendingFileDeletion` へ登録する（実削除はコミット後。削除経路の正本は [アーキテクチャ設計](architecture.md) の 7.5） |
 | 手順 3 の健全性確認が不成立 | 同上 |
-| 出力確認画面での「やり直す」 | `discardExport` で `ExportJob` 行と `OutputRecord` 行を同一トランザクションで削除する。出力ファイルをベストエフォートで削除する |
+| 出力確認画面での「やり直す」 | `discardExport` で `ExportJob` 行と `OutputRecord` 行を同一トランザクションで削除する。出力ファイルも同一トランザクションで `PendingFileDeletion` へ登録する（実削除はコミット後。削除経路の正本は [アーキテクチャ設計](architecture.md) の 7.5） |
 | 利用者によるキャンセル | 上記のどちらか（キャンセルした時点に応じる） |
 | プロセスの異常終了 | 起動時復旧が `running` の `ExportJob` 行と対応する未確定 `OutputRecord` を削除する（5 章） |
 
@@ -431,7 +440,7 @@ struct DeliveryAttempt: Sendable {
 
 受け渡しは複数回・任意の順序で行える（[アーキテクチャ設計](architecture.md) の 7.5）。OS 共有成功後に写真ライブラリ保存を試みて中断しても、`previousState` により直前の共有成功の事実を失わない。一度成立した `delivered` は取り消さない。
 
-`actor` であることは排他保証にならない（`await` のたびに再入可能なため）。`exportID` ごとの明示的な待ち行列で直列化する（[アーキテクチャ設計](architecture.md) の 4.2 と同じ方式）。`DeliveryAttempt` が存在する間、その出力への共有・破棄・別の保存はすべて拒否する。
+`actor` であることは排他保証にならない（`await` のたびに再入可能なため）。個別の待ち行列は作らず、グローバル直列キュー1本（[アーキテクチャ設計](architecture.md) の 4.2。書き出しの手順 1〜3 と共通）で直列化する。`DeliveryAttempt` が存在する間、その出力への共有・破棄・別の保存はすべて拒否する。
 
 ```swift
 /// 写真ライブラリ保存の結果が不明であることの記録。runtime 側のテーブル
@@ -453,7 +462,7 @@ struct UnknownLibrarySave: Sendable {
 | `completeShare` | `generated` / `deliveryUnknown` → `delivered` | 共有の `.completed` |
 | `abandonDeliveryAttempt` | `previousState` へ戻す（現在が `delivered` なら維持） | 写真ライブラリ保存の失敗 |
 | `resolveOrphanedAttempts` | `previousState` が `generated` なら `deliveryUnknown`、`delivered` なら維持 | 起動時 |
-| `deleteOutput` | 状態遷移ではない。`OutputRecord` と実体ファイルを物理削除する | 完了後の出力を利用者が明示的に破棄したとき |
+| `deleteOutput` | 状態遷移ではない。`OutputRecord` 行を削除し、実体ファイルを同一トランザクションで `PendingFileDeletion` へ登録する（実削除はコミット後。0 章、削除経路の正本は [アーキテクチャ設計](architecture.md) の 7.5） | 完了後の出力を利用者が明示的に破棄したとき |
 
 共有には `DeliveryAttempt` を作らない（結果が同期的に返るため中断点が無い）。共有の開始時点で既に `settledAt` は確定済み（完了後にのみ共有へ進めるため）である。
 
@@ -475,3 +484,5 @@ enum ShareResult: Sendable, Equatable { case completed, canceled, unknown, faile
 | それ以外（`activityType` があるが未完了） | `.unknown`（共有先アプリが結果を返さなかった） |
 
 `UIViewControllerRepresentable` で包み、`CheckedContinuation` で `async` 関数として公開する。
+
+共有中（`completionWithItemsHandler` が呼ばれる前）にプロセスが終了した場合、共有先アプリへは既に渡っていても `app.db` 上は未受け渡しのまま残ることがある。これは受容する。共有は完了後にのみ行え、再共有しても追加消費は起きず、共有先での重複受信を除けば実害がないため（7 章冒頭）。
