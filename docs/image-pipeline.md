@@ -673,7 +673,7 @@ func makeCIRect(_ rect: PixelRect, canvasHeight: Int) -> CGRect {
 
 ##### 境界型
 
-**プロトコル署名に現れる型は、`ShareResult` を除きすべてここで定義します**（`ShareResult` は受け渡しの結果分類であり [書き出し Saga](export-saga.md) の 8 が正本）。特に `OutputFile` を「パス文字列を持つ型」として実装すると、`ManagedFileRef` の境界（[アーキテクチャ設計](architecture.md) の `ManagedFileStore`）を迂回します。
+**プロトコル署名に現れる型は、`ShareResult` を除きすべてここで定義します**（`ShareResult` は受け渡しの結果分類であり [書き出し Saga](export-saga.md) の 7 が正本）。特に `OutputFile` を「パス文字列を持つ型」として実装すると、`ManagedFileRef` の境界（[アーキテクチャ設計](architecture.md) の `ManagedFileStore`）を迂回します。
 
 ```swift
 // Domain — すべて Foundation のみ。CGImage / CIImage / URL を持たない
@@ -822,7 +822,7 @@ protocol AdPresenter: AnyObject {
 
 | プロトコル | 実装モジュール | 使用 API |
 | --- | --- | --- |
-| `SharePresenter` | `MediaKit` | `UIActivityViewController`（[書き出し Saga](export-saga.md) の 8。`ShareResult` の定義も同章） |
+| `SharePresenter` | `MediaKit` | `UIActivityViewController`（[書き出し Saga](export-saga.md) の 7。`ShareResult` の定義も同章） |
 | `AdPresenter` | `Ads` | Google Mobile Ads |
 
 `OutputDeliveryCoordinator`（`actor`）から `await` して呼びます。`@MainActor` の型はアクタによって状態が保護されるため `Sendable` として扱えます。

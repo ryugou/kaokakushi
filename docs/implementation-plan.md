@@ -85,5 +85,5 @@
 
 | 確定済みの項目 | 内容 | 正本 |
 | --- | --- | --- |
-| 共有結果 `.unknown` 後の利用者操作 | 現在の状態を維持する。手動で `delivered` にする操作は設けない | [書き出し Saga](export-saga.md) の 8.0 |
+| 共有結果 `.unknown` 後の利用者操作 | 現在の状態を維持する。手動で `delivered` にする操作は設けない | [書き出し Saga](export-saga.md) の 7.0 |
 | 勘定の単位 | 完了した成果物。完了前のやり直しは reissue（追加消費なし） | [ADR 0006](adr/0006-accounting-per-delivered-output.md) |
