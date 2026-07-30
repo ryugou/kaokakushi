@@ -215,7 +215,7 @@
 - **直列実行キュー1本（並列数1）が、同時に `running` になる `ExportJob` を 1 件までに保つこと**（ADR 0005）
 - `startExport` が `expectedProjectRevision` つきで `ExportJob(running)` を挿入し、revision が変わっていれば失敗すること
 
-### 3.3 確定後の実体喪失（[書き出し Saga](export-saga.md) の 7 章）
+### 3.3 確定後の実体喪失（[書き出し Saga](export-saga.md) の 6 章）
 
 - 実体が無い、または `outputByteSize` / `outputSHA256` と一致しないとき、`OutputRecord` を `discarded` へ遷移させること（物理削除しない）
 - **`UsageLedger` を変更しないこと**（月間枠・トライアルクレジットのいずれも戻さない）
