@@ -235,7 +235,6 @@ actor ExportCoordinator { }            // 手順 0〜4、中断時の後始末�
 actor StartupRecoveryCoordinator { }   // 起動時復旧（[書き出し Saga](export-saga.md)）
 actor OutputDeliveryCoordinator { }    // MediaSaver / SharePresenter の呼び出しと状態遷移
 actor SourceImportCoordinator { }      // インポート / 再選択 / 再接続 / 複製（[画像処理](image-pipeline.md)）
-actor WorkingSourceVerifier { }        // VerifiedWorkingSourceResolver の実装（同上）
 actor HistoryDeletionCoordinator { }   // Project / Batch 削除、編集中の破棄（7.5）
 ```
 
@@ -248,15 +247,12 @@ actor HistoryDeletionCoordinator { }   // Project / Batch 削除、編集中の�
 | `ExportCoordinator` | **アプリ全体で 1 件**（v1） | 直列実行キュー 1 本（[書き出し Saga](export-saga.md) の 1.7。専用ゲートは持たない） |
 | `OutputDeliveryCoordinator` | **`exportID` ごと** | 明示的な待機キュー（[書き出し Saga](export-saga.md) の 8.0） |
 | `SourceImportCoordinator` | **`projectID` ごと**（新規インポートは新しい `projectID` なので競合しない） | 明示的な待機キュー |
-| `WorkingSourceVerifier` | **`projectID` ごと**。`SourceImportCoordinator` と**同じ待機キューを共有する** | 明示的な待機キュー |
 | `HistoryDeletionCoordinator` | **アプリ全体で 1 件。** 加えて**削除対象の各 `projectID` の待機キューを取得する**（下記） | 明示的な待機キュー |
 | `StartupRecoveryCoordinator` | 起動時に 1 回のみ。**完了まで他のすべてを開始させない** | 起動シーケンス |
 
-**`SourceImportCoordinator` を `projectID` で直列化する**（同じ `Project` への再選択と再接続の並行は `WorkingSourceRecord` の主キー衝突または正規化ファイルの孤児化を招く）。検証失敗時の無効化と `withVerifiedSource` のスコープ（[画像処理](image-pipeline.md)）も同じ待機キューで直列化する。
+**`SourceImportCoordinator` を `projectID` で直列化する**（同じ `Project` への再選択と再接続の並行は `WorkingSourceRecord` の主キー衝突または正規化ファイルの孤児化を招く）。実体の存在確認と `WorkingSourceRecord` の破棄（[画像処理](image-pipeline.md)）も同じ待機キューで直列化する。プレビュー描画・再検出・書き出し手順 1 が実体を開いている間に `replaceWorkingSource` や破棄が走ると開いている実体が削除対象になるため、読み取りだけでも実体の寿命に対する排他としてこの待機キューを通す。
 
-**`WorkingSourceVerifier` が待機キューを共有するのは `withVerifiedSource` の `body` が長時間スコープだからである。** 書き出し手順 1 やプレビュー描画の全体を包む間に `replaceWorkingSource` や無効化が走ると、開いている実体が削除対象になる。読み取りだけでも実体の寿命に対する排他が必要。
-
-**`HistoryDeletionCoordinator` を全体で直列化する**（削除は複数の `Project` を跨ぐため `projectID` 単位の排他では `Batch` 削除を保護できない）。**加えて削除対象の各 `projectID` の待機キューも取得する。** 全体キューだけでは `withVerifiedSource` の `body` と排他されず、再検出が `body` 内側で `FaceTrack` を書き換える途中に同じ `Project` が削除されると外部キー違反になる（プレビュー描画中は `ExportJob` が存在せず 7.5 の絶対保護も効かない）。
+**`HistoryDeletionCoordinator` を全体で直列化する**（削除は複数の `Project` を跨ぐため `projectID` 単位の排他では `Batch` 削除を保護できない）。**加えて削除対象の各 `projectID` の待機キューも取得する。** 全体キューだけでは進行中の再検出・素材操作と排他されず、再検出が `FaceTrack` を書き換える途中に同じ `Project` が削除されると外部キー違反になる（プレビュー描画中は `ExportJob` が存在せず 7.5 の絶対保護も効かない）。
 
 | 規則 | 内容 |
 | --- | --- |
@@ -712,7 +708,7 @@ Free 範囲のプロジェクトとは、モザイク・ぼかし・黒塗り・
 | 順 | 操作 | 保存先 | 失敗時 |
 | --- | --- | --- | --- |
 | 1 | 新しい `ProjectID` を発行する | — | — |
-| 2 | 元素材の実体がある場合、**`VerifiedWorkingSourceResolver` を通してコピー元を取得し**（[画像処理](image-pipeline.md)）、新しい `projectID` を指す `WorkingSourceRecord` を作る | ファイルシステム / DB | 手順 3 へ |
+| 2 | 元素材の実体がある場合、**存在確認を通したうえでコピー元として取得し**（[画像処理](image-pipeline.md)）、新しい `projectID` を指す `WorkingSourceRecord` を作る | ファイルシステム / DB | 手順 3 へ |
 | 3 | DB トランザクションで `Project` と設定を複製し、有料スタンプの領域を選択された方式へ置換する | DB | 手順 4 へ |
 | 4 | 手順 3 が失敗したら、作成済みの `WorkingSourceRecord` と実体を補償削除する | DB / ファイルシステム | 起動時 GC へ委ねる |
 

@@ -5,9 +5,9 @@
 | 目的 | サブプロジェクトへの分解と、その依存関係を定める |
 | 読者 | 実装の着手順を決める者 |
 | 正本の範囲 | サブプロジェクトの粒度、依存、モジュール割り当て |
-| 関連 | [アーキテクチャ設計](architecture.md)、[テスト計画](test-plan.md) |
+| 関連 | [アーキテクチャ設計](architecture.md)、[テスト計画](test-plan.md)、[ADR 0005](adr/0005-drop-tamper-resistance-backend-and-heavy-fault-tolerance.md)（サーバレス化）、[ADR 0006](adr/0006-accounting-per-delivered-output.md)（勘定の単位） |
 
-各サブプロジェクトは個別に spec → plan → 実装のサイクルを回します。
+各サブプロジェクトは個別に spec → plan → 実装のサイクルを回します。バックエンドは存在しません（ADR 0005）。
 
 ---
 
@@ -16,17 +16,16 @@
 | # | 名称 | 主モジュール | 内容 |
 | --- | --- | --- | --- |
 | 1 | プロジェクト基盤 | — | Xcode プロジェクトと SwiftPM ローカルパッケージの骨格、CI、SwiftLint、`swift test` の実行基盤 |
-| 2 | ドメイン層 | `Domain` | クォータ判定（`evaluate` / `rollPeriod`）、権限解決（`resolve` / `resolveCapabilities`）、トリアージ（`triage`）、`compileRenderDraft`、`ExportQueue` の状態機械、正準エンコーダ |
-| 3 | 永続化アダプタ | `Persistence` | GRDB と `app.db`、`ManagedFileStore`、`ProtectedBlobStore`、`CryptoKeyStore`、`UsageLedgerStore`、`ExportSagaStore`、`WorkingSourceStore`、`OutputDeliveryStore`、`HistoryDeletionStore` |
-| 4 | **書き出し Saga** | **`Application`** | `ExportCoordinator` / `StartupRecoveryCoordinator` / `OutputDeliveryCoordinator`、`ExportStartGate`、障害注入テスト基盤 |
-| 5 | プラットフォーム層 | `MediaKit` / `Rendering` / `App` / **`Application`** | 画像処理プロトコルの実装と適合テスト、選択の境界サービス、**`SourceImportCoordinator`（インポート／再選択／再接続／複製の 4 Saga）と `WorkingSourceVerifier`**、`ProtectedDataAvailability` |
-| 6 | 編集フロー UI | `App` | detect / effect / export / processing / done |
-| 7 | 課金と権限 | `Billing` | RevenueCat、Paywall、復元、`SubscriptionState` の読み込み失敗経路 |
+| 2 | ドメイン層 | `Domain` | クォータ判定（`evaluateMonthlyQuota` / `rollPeriod`）、権限解決（`resolveCapabilities`）、トリアージ（`triage`）、`compileRenderDraft` / `bindRasterAssets`、`ExportQueue` の状態機械、設定ハッシュの正準エンコーダ |
+| 3 | 永続化アダプタ | `Persistence` | GRDB と `app.db`、`ManagedFileStore`、`ExportSagaStore`、`OutputDeliveryStore`、`WorkingSourceStore`、`HistoryDeletionStore` |
+| 4 | 書き出しフロー | `Application` | `ExportCoordinator` / `StartupRecoveryCoordinator` / `OutputDeliveryCoordinator`、直列実行キュー、`settledAt` と reissue の勘定規則 |
+| 5 | プラットフォーム層 | `MediaKit` / `Rendering` / `App` / `Application` | 画像処理プロトコルの実装と適合テスト、選択の境界サービス、`SourceImportCoordinator`（インポート／再選択／再接続／複製の 4 Saga）、`ProtectedDataAvailability` |
+| 6 | 編集フロー UI | `App` | detect / effect / export / processing / **出力確認（confirm）** / done |
+| 7 | 課金と権限 | `Billing` | RevenueCat、Paywall、購入復元、`SubscriptionState` の読み込み失敗経路 |
 | 8 | 広告 | `Ads` | `AdPresenter`、広告表示頻度の判定の適用 |
-| 9 | 一括処理とトリアージ | `Domain` / `App` | 選択分類、確認モード、キュー、一括設定プリセット |
-| 10 | 履歴・カスタムスタンプ・設定 | `Domain` / `Persistence` / `App` / **`Application`** | 寿命管理、**`HistoryDeletionCoordinator`（`Project` / `Batch` 削除、編集中の破棄）**、`ProjectStampAsset` の参照、容量表示 |
-| 11 | バックエンド | `server/` | Rust + Axum。リモート設定の検証規則を含む |
-| 12 | リリース準備 | — | アクセシビリティ、プライバシー受入テスト、実機マトリクス、ストア申請物 |
+| 9 | 一括処理とトリアージ | `Domain` / `App` | 選択枚数と残クレジットの判定、確認モード、キュー、一括設定プリセット、**バッチの完了操作**（結果一覧での一括確定） |
+| 10 | 履歴・カスタムスタンプ・設定・更新誘導 | `Domain` / `Persistence` / `App` / `Application` | 寿命管理、`HistoryDeletionCoordinator`（`Project` / `Batch` 削除、編集中の破棄）、`ProjectStampAsset` の参照、容量表示、更新誘導（iTunes Lookup） |
+| 11 | リリース準備 | — | アクセシビリティ、プライバシー受入テスト、実機マトリクス、ストア申請物 |
 
 ---
 
@@ -35,68 +34,46 @@
 ```
 1 基盤
   ↓
-2 Domain の契約を確定
-   値型（UsageLedger / ExportCommit / ManagedFileRef 系 / ID 型）
-   永続化ポート（UsageLedgerStore / ExportSagaStore / WorkingSourceStore /
-                 OutputDeliveryStore / ProtectedPayload / ProtectedBlobKey）
-   正準スキーマ
+2 Domain の契約を確定（前半）
+   値型（UsageLedger / ExportJob / ExportRecord / OutputRecord /
+         ManagedFileRef 系 / ID 型）
+   永続化ポート（ExportSagaStore / OutputDeliveryStore /
+                 WorkingSourceStore / HistoryDeletionStore / ManagedFileStore）
+   設定ハッシュの正準化（canonical-schema.md）
   ↓
 3 以降を並行
    ├─ 2' Domain の純粋関数と状態機械
    ├─ 3  Persistence アダプタ
    └─ 5  プラットフォーム層（3 の ManagedFileStore を待つ）
   ↓
-4 Application の書き出し Saga
+4 Application の書き出しフロー
   ↓
 6 編集フロー UI ─→ 9 一括処理
    └─→ 7 課金 ─→ 8 広告
-10 履歴・スタンプ・設定（3 の後）
-11 バックエンド（独立）
-12 リリース準備（全体の後）
+10 履歴・スタンプ・設定・更新誘導（3 の後）
+11 リリース準備（全体の後）
 ```
 
-**`Persistence` は `Domain` の完成を待ちませんが、`Domain` の契約は待ちます。** 次が確定しなければアダプタを書けません。
+- **`Persistence` は `Domain` の完成を待たず、契約（2 の前半）だけを待ちます。** 値型・ポート・設定ハッシュが確定しなければテーブル定義とデコードが決まりません
+- 2 の後半（純粋関数）と 3 は並行できます
+- 4 は 2 と 3 の両方を待ちます。ただし**偽ストアによる状態機械のテストは 3 を待ちません**（ポートが確定していれば偽実装で全経路を書けます）
+- 6 は 4 と 5 を待ちます（書き出しの開始と画像処理の両方を呼ぶため）
 
-| 確定が必要なもの | 理由 |
-| --- | --- |
-| 永続化する値型（`UsageLedger` / `ExportCommit` / `OutputRecord` ほか） | テーブル定義とデコードが決まらない |
-| `ManagedFileRef` と種別つき参照 | 列の型とパス解決が決まらない |
-| `ProtectedPayload` / `ProtectedBlobKey<Value>` | blob の読み書き契約が決まらない |
-| `UsageLedgerStore` / `ExportSagaStore` | トランザクション境界が決まらない |
-| `WorkingSourceStore`（[画像処理](image-pipeline.md)） | インポート・再選択・再接続・複製の DB トランザクション境界が決まらない |
-| `HistoryDeletionStore`（[アーキテクチャ設計](architecture.md) の 7.5） | 削除の判定と実行を同一トランザクションへ閉じられない |
-| `CryptoKeyStore` / `CrashReporter`（同 7.2 / 9.2） | 鍵の扱いと診断の閉じた集合が決まらない |
-| `OutputDeliveryStore`（[書き出し Saga](export-saga.md) の 0） | 受け渡し状態の遷移経路が決まらない |
-| 正準スキーマ | 署名バイト列が決まらない |
-
-**これらを「サブプロジェクト 2 の前半」として先に固める**のが要点です。`evaluate` や `triage` の実装は後半であり、`Persistence` はそれを待ちません。
-
-| 関係 | 理由 |
-| --- | --- |
-| 2 の後半と 3 は並行できる | 純粋関数の実装はアダプタに依存しない |
-| 4 は 2 と 3 の両方を待つ | Saga は `Domain` の型と `Persistence` の実装の両方を使う |
-| 4 の偽ストアテストは 3 を待たない | ポートが 2 で確定していれば偽実装で全中断点を書ける |
-| 5 は 3 を待つ | 境界サービスが `ManagedFileStore` を使う |
-| 6 は 4 と 5 を待つ | 書き出しの開始と画像処理の両方を呼ぶ |
-
-**サブプロジェクト 3 と 4 を分けます。** コミット Saga の実装主体は `Application` であり、`Persistence` は `ExportSagaStore` の実装を提供するだけです。1 つにまとめると、モジュール割り当て（3 章）と計画が食い違います。
-
-**4 を独立させる理由は変わりません。** 本設計で最も密度が高く、実機の障害注入テストを伴います。UI と並行して進めると、どちらの不具合か切り分けられません。
+**4 を独立させるのは、勘定の確定（単一トランザクション・settledAt・reissue）が本設計で最も密度が高いためです。** UI と並行で進めると不具合の切り分けができません。
 
 ---
 
 ## 3. モジュールの割り当て
 
-**すべてを `MediaKit` へ実装しません。** プロトコルの一覧は [アーキテクチャ設計](architecture.md) と [画像処理アーキテクチャ](image-pipeline.md) が正本です。
+プロトコルの一覧と定義は [アーキテクチャ設計](architecture.md) と [画像処理](image-pipeline.md) が正本です。
 
-| モジュール | プロトコル |
+| モジュール | 主な内容 |
 | --- | --- |
 | `MediaKit` | `PickedPhotoLoader` / `FaceDetector` / `ImageEffectRenderer` / `ImageEncoder` / `MediaSaver` / `SharePresenter`（MainActor） |
 | `Rendering` | `StampRasterizer` |
-| `Persistence` | `ProtectedBlobStore`、`ManagedFileStore`、`UsageLedgerStore`、**`ExportSagaStore`**、`WorkingSourceStore`、`OutputDeliveryStore`、`HistoryDeletionStore`、GRDB、ファイル管理 |
-| `Persistence/Security` | `CryptoKeyStore` |
-| `Application` | `ExportStartGate` の実装、`ExportCoordinator` / `StartupRecoveryCoordinator` / `OutputDeliveryCoordinator`（サブプロジェクト 4）、`SourceImportCoordinator` / **`WorkingSourceVerifier`**（サブプロジェクト 5）、`HistoryDeletionCoordinator`（サブプロジェクト 10）。**コミット Saga・素材 Saga・削除 Saga の主体はここ** |
-| `Analytics` | `CrashReporter`、`AnalyticsEvent` の送信 |
+| `Persistence` | `ManagedFileStore`、`ExportSagaStore`、`OutputDeliveryStore`、`WorkingSourceStore`、`HistoryDeletionStore`、GRDB、ファイル管理 |
+| `Application` | `ExportCoordinator` / `StartupRecoveryCoordinator` / `OutputDeliveryCoordinator`（サブプロジェクト 4）、`SourceImportCoordinator`（サブプロジェクト 5）、`HistoryDeletionCoordinator`（サブプロジェクト 10） |
+| `Analytics` | `CrashReporter`（Sentry） |
 | `Ads` | `AdPresenter` |
 | `App` | `PrivacyShield`、`PhotosPicker` / `fileImporter` の提示、`PhotoSelectionBridge` / `FileSelectionBridge`、`ProtectedDataAvailability` |
 
@@ -104,13 +81,9 @@
 
 ## 4. 着手前に確定が必要な未決事項
 
-[アーキテクチャ設計](architecture.md) の未決事項のうち、実装計画の段階で決めるものです。
+**ありません。** 実機計測で決まる項目（`lowConfidenceThreshold`、`extremePose` の角度）は、該当サブプロジェクトの実装後に計測して確定します（[アーキテクチャ設計](architecture.md) の 12.2）。
 
-**着手前に確定が必要な未決事項はありません。** 以前あった 2 件はいずれも確定済みです。
-
-| 項目 | 確定内容 | 正本 |
+| 確定済みの項目 | 内容 | 正本 |
 | --- | --- | --- |
-| 共有結果 `.unknown` 後の利用者操作 | **現在の状態を維持する。** 利用者が手動で `delivered` にする操作は設けない | [書き出し Saga](export-saga.md) の 8.0 |
-| 信頼できる時刻の取得元 | **`/v1/config` の HTTPS レスポンスを主取得元とする** | [アーキテクチャ設計](architecture.md) の 6.3 |
-
-実機計測で決まる項目（`lowConfidence` の閾値、`extremePose` の角度、同期方式、手順 7-b のしきい値、並列数）は、該当サブプロジェクトの実装後に計測して確定します。
+| 共有結果 `.unknown` 後の利用者操作 | 現在の状態を維持する。手動で `delivered` にする操作は設けない | [書き出し Saga](export-saga.md) の 8.0 |
+| 勘定の単位 | 完了した成果物。完了前のやり直しは reissue（追加消費なし） | [ADR 0006](adr/0006-accounting-per-delivered-output.md) |
