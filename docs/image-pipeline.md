@@ -933,7 +933,7 @@ struct WorkingSourceRecord: Sendable {
 
 **手順 3 が失敗した場合、作成済みのファイル（取り込み・正規化の両方）を `PendingFileDeletion` へ積み、起動時の孤児 GC に委ねます。**
 
-##### 素材スナップショットを署名して保存する
+##### 素材スナップショットを保存する
 
 **ADR 0005 により署名を廃止し、`ProjectSourceSnapshot` は `app.db` へ平文で保存します。** **ADR 0006 により素材同一性の識別は持たず**、再編集用の参照（`ProjectSourceLocator`）と撮影メタデータ（`OriginalCaptureMetadata`）だけを持ちます。インポート Saga の手順 3 で `Project` 作成と同じトランザクションで保存し、`Project` の削除でのみ削除します。
 
@@ -1023,7 +1023,7 @@ struct AttachWorkingSourceInput: Sendable {
 }
 ```
 
-##### 実体と署名済み identity を結び付ける
+##### 実体の存在確認
 
 **ADR 0005 により、実体の署名照合機構（`WorkingSourceBinding` と台帳との結び付け）を廃止します。** `WorkingSourceRecord`（`app.db` の平文行）がファイル参照とメタデータを持ち、実体を開くときは**ファイルの存在確認のみ**行います。存在しなければ `WorkingSourceRecord` を破棄し `paused(.sourceReselectionRequired)` へ遷移させ、再選択の導線を出します（起動時と書き出し開始時の 2 回確認します）。`FaceDetector` / `ImageEffectRenderer` は検証済みラッパを介さず、通常の `ImageSource`（上記「境界型」）を受け取ります（プロトコル宣言は上記「プロトコルのシグネチャ」）。
 
@@ -1033,7 +1033,7 @@ struct AttachWorkingSourceInput: Sendable {
 
 ##### 検証済み境界を通してのみ実体を開く
 
-**ADR 0005 により廃止。** 実体を開く前の確認は、上記「実体と署名済み identity を結び付ける」のファイル存在確認のみに簡素化されました。
+**ADR 0005 により廃止。** 実体を開く前の確認は、上記「実体の存在確認」のみに簡素化されました。
 
 ##### 検証と無効化を分ける
 
