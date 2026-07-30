@@ -214,7 +214,7 @@ Swift 6 の strict concurrency を有効にします。
 
 ### 4.2 排他区間の実装規則
 
-**`actor` は再入可能であり、単独では「読み取りから保存完了まで」の論理的クリティカルセクションを保持できない**（`await` で中断すると同じ actor のメソッドへ別の呼び出しが入り、FIFO も保証されない）。**変更を伴うすべての操作（書き出し・受け渡し状態の更新・素材の選択替え・履歴削除）は、単一のグローバル直列キュー 1 本（v1 は並列数 1）で直列化する**（ADR 0005）。同時に処理する項目は常に 1 件とし、次の項目はキューの前が完了してから着手する。**読み取りとプレビュー描画はキューを経由しない**（変更を伴わないため直列化の対象外）。
+**`actor` は再入可能であり、単独では「読み取りから保存完了まで」の論理的クリティカルセクションを保持できない**（`await` で中断すると同じ actor のメソッドへ別の呼び出しが入り、FIFO も保証されない）。**変更を伴うすべての操作（書き出し・受け渡し状態の更新・素材の選択替え・履歴削除）は、単一のグローバル直列キュー 1 本（v1 は並列数 1）で直列化する**（ADR 0005）。同時に処理する項目は常に 1 件とし、次の項目はキューの前が完了してから着手する。**読み取りとプレビュー描画はキューを経由しない**（変更を伴わないため直列化の対象外）。**`OutputDeliveryCoordinator` の受け渡し操作（`beginDeliveryAttempt` / `completeLibrarySave` / `completeShare` / `abandonDeliveryAttempt` 等）もこの同じグローバルキューを使う**（専用の per-exportID キューは持たない。共有シート表示など利用者操作待ちの間も、他の変更系操作はキューで待機する。v1 は並列数 1 のため許容する）。
 
 **キャンセル**は「キュー投入前」と「キューから取り出して処理を開始する直前」の 2 箇所で `Task.checkCancellation()` を確認する。**生成（書き出し）は何も消費しないため、キャンセルはどの時点でも `ExportJob` 行の削除という一律の後始末で足りる**（ADR 0006）。生成後の出力確認画面での「やり直す」「完了」は明示的な操作であり `CancellationError` としては扱わない（[書き出し Saga](export-saga.md) が正本）。`CancellationError` は業務エラーとして扱わず、Sentry へは送らない（9.1）。
 
@@ -963,7 +963,7 @@ extension ExportQueueState {
 }
 ```
 
-**処理用ファイルが失われた場合も新しい状態を作らず `paused(.sourceReselectionRequired)` へ遷移させる**（`paused` は「利用者操作を待って再開できる」の意で再選択要求もこれに当てはまる。バッチ全体ではなく該当項目だけが `paused` になる）。**`isTerminal` を各所で書き下さない**（履歴削除可否判定〈7.5〉・バッチ完了判定・復旧対象選定がすべてこの 1 述語を使う。書き下すと状態追加時に一部だけ更新される事故が起こる）。
+**処理用ファイルが失われた場合も新しい状態を作らず `paused(.sourceReselectionRequired)` へ遷移させる**（`paused` は「利用者操作を待って再開できる」の意で再選択要求もこれに当てはまる。バッチ全体ではなく該当項目だけが `paused` になる）。**`WorkingSourceRecord` の削除と対象キュー項目の `paused(.sourceReselectionRequired)` への更新は単一 DB トランザクションで原子的に行う**（欠損したファイル参照の `PendingFileDeletion` への登録も同じトランザクション。正本は [画像処理](image-pipeline.md) の `WorkingSourceStore.invalidateWorkingSource`）。**`isTerminal` を各所で書き下さない**（履歴削除可否判定〈7.5〉・バッチ完了判定・復旧対象選定がすべてこの 1 述語を使う。書き下すと状態追加時に一部だけ更新される事故が起こる）。
 
 **キューの進行状態と 6.1 の 2 軸は別物。**
 
@@ -1070,6 +1070,7 @@ struct BatchID:     Sendable, Hashable { let rawValue: UUID }
 struct ExportID:    Sendable, Hashable { let rawValue: UUID }
 struct RegionID:    Sendable, Hashable { let rawValue: UUID }
 struct FaceTrackID: Sendable, Hashable { let rawValue: UUID }
+struct CustomStampID: Sendable, Hashable { let rawValue: UUID }   // CustomStamp（一覧の項目）の識別子。7.5
 
 /// 認可用。出力へ影響する全設定の正準ハッシュ（正準スキーマ 5.2）
 struct ProjectSettingsHash: Sendable, Hashable { let bytes: Data }   // 32 バイト
@@ -1207,6 +1208,7 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `PendingFileDeletion(kind, fileID)` | **UNIQUE** |
 | `ProjectStampAsset(projectID, assetHash)` | **UNIQUE** |
 | `StampAsset.contentHash` | **PRIMARY KEY** |
+| `CustomStamp.customStampID` | **PRIMARY KEY** |
 | `ExportQueueItem(batchID, projectID)` | **UNIQUE** |
 | `DeliveryAttempt.exportID` | **PRIMARY KEY** |
 | `UnknownLibrarySave.exportID` | **PRIMARY KEY** |
@@ -1672,7 +1674,7 @@ func canDeleteHistoryUnit(
 
 ##### `Project` 削除 Saga
 
-**`Project` の削除は関連する台帳行を含めて 1 つの DB トランザクションで行う**（`UsageLedger` も `app.db` の平文テーブルであり、DB とは別の保存先を持たない。ADR 0005）。
+**`Project` の削除は `ExportedSettingsEntry`（能力免除の記録。6.2）を含めて 1 つの DB トランザクションで行う**（`UsageLedger` も `app.db` の平文テーブルであり、DB とは別の保存先を持たない。ADR 0005）。**`UsageLedger` の消費カウンタ（`consumedExportIDs` / `trialConsumedExportIDs`）は履歴削除で一切変更しない。** 履歴・バッチを削除しても消費は戻らない（`ExportedSettingsEntry` は降格後の有料スタンプ能力免除の記録であり消費の記録ではないため、削除対象が異なる。6.3）。
 
 | 順 | 操作 |
 | --- | --- |
@@ -1689,7 +1691,7 @@ func canDeleteHistoryUnit(
 | Saga | 対象 | 手順 |
 | --- | --- | --- |
 | `Project` 削除 | 単体の `Project` | 上記 |
-| **`Batch` 削除** | `Batch` と所属する全 `Project` | 判定を**バッチ全体で 1 回**行い、同一 DB トランザクションで `Batch`・全 `Project`・全キュー項目・全 `ExportRecord`・**全 `projectID` 分の台帳行**を削除する |
+| **`Batch` 削除** | `Batch` と所属する全 `Project` | 判定を**バッチ全体で 1 回**行い、同一 DB トランザクションで `Batch`・全 `Project`・全キュー項目・全 `ExportRecord`・**全 `projectID` 分の `ExportedSettingsEntry`**を削除する（`UsageLedger` の消費カウンタは変更しない） |
 | **編集中 `Project` の破棄** | 書き出し前の `Project` | `Project` 削除 Saga と同じ。`beingEdited` の上書き確認を伴う |
 
 **`Batch` の判定は写真ごとに行わない**（一部だけ削除できると参照の切れた `Project`/`Batch` が残る。1 枚でも絶対保護に触れていればバッチ全体を削除しない）。
@@ -1822,6 +1824,52 @@ ProjectStampAsset(
 
 **同じプロジェクト内の重複は `UNIQUE` 制約が畳む**（1 枚の写真に同じスタンプを 10 個置いても参照は 1。最後の 1 個を外した時点で行が消える）。`StampAsset.referenceCount` を保存値としても持つ場合は同じ DB トランザクションで更新し起動時に導出値との一致を検査する（不一致は導出値を正とし保存値を書き直す）。**この構成なら一覧削除で過去プロジェクトの実体が消えない**（プロジェクト側参照が残る限り参照数は 0 にならない。削除確認では引き続き使用される旨を示す）。
 
+##### `StampStore`
+
+**`CustomStamp` / `StampAsset` / `ProjectStampAsset` を扱う永続化ポートを 1 つに集約する**（`Application` は `GRDB` を直接扱わないため。4.3）。以下の契約は、本節のこれまでの規則をこのポートの操作として整理したもの。
+
+```swift
+/// スタンプ一覧の項目（仕様 19.6）
+struct CustomStamp: Sendable, Equatable {
+    let customStampID: CustomStampID
+    let assetHash: StampAssetHash    // 画像実体への参照
+    let name: String
+    let sortOrder: Int32
+    let thumbnail: ManagedFileRef    // .stampThumbnail。実体から再生成できるキャッシュ
+}
+
+// Domain — 永続化ポート
+protocol StampStore: Sendable {
+    /// 取り込み。body が一時ファイルへ書いた内容の SHA-256 が既存の StampAsset と一致すれば
+    /// それを再利用し、新規に書いたファイルは破棄する。一致しなければ新規 StampAsset を作る
+    func importCustomStamp(_ body: @Sendable (URL) async throws -> Void) async throws -> (stamp: CustomStamp, assetHash: StampAssetHash)
+
+    /// スタンプ一覧
+    func loadCustomStamps() async throws -> [CustomStamp]
+
+    /// 一覧から削除する（CustomStamp 行のみ。StampAsset の参照カウントは変えない）
+    func removeCustomStamp(_ id: CustomStampID) async throws
+
+    /// Project のいずれかの領域が実体を使うようになった。UNIQUE(projectID, assetHash) により冪等
+    func attachStampReference(projectID: ProjectID, assetHash: StampAssetHash) async throws
+    /// Project からその実体を使う領域がすべて無くなった。同一トランザクションで参照数を導出し、
+    /// 0 になった実体は同じトランザクション内で PendingFileDeletion へ登録する
+    func releaseStampReference(projectID: ProjectID, assetHash: StampAssetHash) async throws
+
+    /// 使用容量の内訳（登録中のマイスタンプ / 過去の加工履歴で使用中 / 合計）
+    func loadStampStorageBreakdown() async throws -> StampStorageBreakdown
+}
+
+/// 使用容量の内訳（本節「使用容量の表示」が正本）
+struct StampStorageBreakdown: Sendable {
+    let registeredBytes: Int64     // 登録中のマイスタンプ（一覧に存在する CustomStamp が指す実体）
+    let historyOnlyBytes: Int64    // 一覧から削除済みだが過去の加工履歴で参照中の実体
+    let totalBytes: Int64
+}
+```
+
+**実体欠損時の処理**: `StampAsset` の実体が読み取れない場合、`CustomStamp` / `StampAsset` / `ProjectStampAsset` の DB 行はいずれも変更しない（履歴サムネイルと同じ扱い。本節「履歴サムネイル」）。一覧・プレビューではプレースホルダを表示する。内容ハッシュが主キーであるため、利用者が同じ画像を再度取り込めば同じハッシュへ解決し実体だけが復元される（行の再作成は不要）。
+
 **内容ハッシュの対象は最終保存バイト列の SHA-256 とする。**
 
 | 候補 | 問題 |
@@ -1857,6 +1905,40 @@ ProjectStampAsset(
 ##### 孤児ファイルの GC
 
 `PendingFileDeletion` だけでは作成手順 3 で失敗したファイルを回収できない（記録前に落ちるため）。起動時に専用ディレクトリの実体と DB 上の参照一覧を突き合わせ、どちらにも属さないファイルを削除する（対象: `StampAsset` の実体、ラスタスタンプ一時ファイル、書き出しの一時ファイル、処理用ファイル、履歴サムネイル）。**履歴削除・`CustomStamp` 削除・容量超過削除もすべてこの経路を通す**（入口ごとに別順序だと片方だけ孤児が残る）。
+
+##### `MaintenanceStore`
+
+**起動時 GC が使う永続化ポートを 1 つに集約する**（`Application` は `GRDB` を直接扱わないため。4.3）。このポートだけで起動時 GC を実装できる粒度にする。
+
+```swift
+// Domain — 永続化ポート。起動時の孤児ファイル GC が使う
+protocol MaintenanceStore: Sendable {
+    /// 未処理の PendingFileDeletion をすべて読む
+    func loadPendingFileDeletions() async throws -> [PendingFileDeletion]
+    /// 実体削除に成功した行を消す
+    func clearPendingFileDeletion(_ file: ManagedFileRef) async throws
+
+    /// 種別ごとに、管理ディレクトリ内に実在するファイル ID の一覧を返す
+    func listExistingFileIDs(kind: ManagedFileKind) async throws -> Set<ManagedFileID>
+    /// 種別ごとに、DB 上のテーブルが参照している ID の一覧を返す
+    func listReferencedFileIDs(kind: ManagedFileKind) async throws -> Set<ManagedFileID>
+
+    /// 孤児ファイル（listExistingFileIDs にあり listReferencedFileIDs に無いもの）を削除候補として登録する
+    func registerOrphan(_ file: ManagedFileRef) async throws
+}
+```
+
+`listReferencedFileIDs` の参照元は種別ごとに固定する。
+
+| `ManagedFileKind` | 参照元 |
+| --- | --- |
+| `.output` | `OutputRecord.outputFile` |
+| `.stampAsset` | `StampAsset` の行そのもの（内容ハッシュが主キー） |
+| `.historyThumbnail` | `Project` が保持する `ManagedFileRef` |
+| `.processingTemporary` | `WorkingSourceRecord.sourceFile` |
+| `.stampThumbnail` / `.rasterTemporary` | **常に空集合**（DB 参照を持たない一時ファイル・再生成可能なキャッシュ。存在するものはすべて孤児候補として扱う） |
+
+起動時復旧の手順は、(1) `loadPendingFileDeletions` で未処理分の実体削除を再試行し成功したものを `clearPendingFileDeletion` で消す、(2) 種別ごとに `listExistingFileIDs` と `listReferencedFileIDs` の差集合を求め `registerOrphan` で削除候補へ登録する、(3) 登録した候補を（1）と同じ経路で削除する。**`.stampThumbnail` / `.rasterTemporary` は参照元が無いため、次回起動をまたいで存在するものはすべて孤児として削除してよい**（前者は実体から再生成できるキャッシュ、後者は 1 回の `render` 呼び出し内でのみ有効なため）。
 
 ##### 使用容量の表示
 
@@ -2068,8 +2150,8 @@ struct CrashContext: Sendable, Equatable {
 | `trialBatchSizeLimit` | 5 |
 | `trialCreditCount` | 5 |
 | `batchConcurrencyLimit` | 1 |
-| `lowConfidenceThreshold` | 未定（12 章） |
-| `extremePoseYawDegrees` / `extremePosePitchDegrees` | 未定（12 章） |
+| `lowConfidenceThreshold` | 暫定: v1 初期リリースはトリアージ無効（閾値未設定）。実測後に確定（12 章） |
+| `extremePoseYawDegrees` / `extremePosePitchDegrees` | 暫定 45°（yaw / pitch とも）。実測後に確定（12 章） |
 | `historyStorageLimitBytes` | 200MB |
 | `customStampLimit` | 100 |
 | `customStampMaxEdgePixels` | 1,024 |
@@ -2124,8 +2206,8 @@ v1 のリリース範囲、動画の扱い、課金訴求の分類、利用者�
 | --- | --- | --- |
 | 商品 ID | 仕様 27.1 の商品 ID は暫定 | ストア登録時 |
 | App Store ID | 更新誘導のリンク先に必要（[運用](operations.md)） | ストア登録時 |
-| `lowConfidence` の閾値 | `FaceObservation.confidence` の下限。実素材の分布を見て決定（[画像処理](image-pipeline.md) / 6.1） | v1 実機検証時 |
-| `extremePose` の角度閾値 | yaw / pitch の絶対値の上限。検出品質テストの結果から決定（6.1） | v1 実機検証時 |
+| `lowConfidence` の閾値 | `FaceObservation.confidence` の下限。実素材の分布を見て決定（[画像処理](image-pipeline.md) / 6.1）。**暫定運用: v1 初期リリースでは `lowConfidence` のトリアージを無効（閾値未設定）で出し、実測後の更新で有効化する** | v1 実機検証時 |
+| `extremePose` の角度閾値 | yaw / pitch の絶対値の上限。検出品質テストの結果から決定（6.1）。**暫定運用: 暫定値 yaw / pitch 45° で実装し、実測後に確定する** | v1 実機検証時 |
 | プライバシーポリシーの記載 | トライアル消費記録（`UsageLedger.trialConsumedExportIDs`）を期限なく端末内へ保持することを記載し、7.5 の例外と整合させる | ストア申請前 |
 | 基本スタンプの意匠 | ベクターで自作する 12〜20 種の具体的な図案 | v1 実装中 |
 | 履歴の使用容量上限 | 初期値 200MB は暫定。加工後サムネイルの実サイズを計測して確定 | v1 実装中 |
