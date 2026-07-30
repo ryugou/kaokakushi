@@ -968,7 +968,7 @@ struct WorkingSourceRecord: Sendable {
 
 完了後に顔検出をやり直し、新しい確認が完了するまで書き出しできません。**`PreviewConfirmation` は DB に無くセッション内の値のため**（[正準スキーマ](canonical-schema.md) の 5.2）、`detectionRevision` が増えた時点で不一致になり、破棄操作自体が不要です。
 
-##### 台帳と DB は同時に更新できない
+##### 更新は単一トランザクションで完結する
 
 **ADR 0005 により署名台帳が `app.db` の平文行になり、この問題自体が消滅しました。** すべての更新は単一の DB トランザクションに閉じます（`createdAt` は保持期限の起点のため、置換・再接続のたびに更新します）。
 
@@ -1027,7 +1027,7 @@ struct AttachWorkingSourceInput: Sendable {
 
 **ADR 0005 により、実体の署名照合機構（`WorkingSourceBinding` と台帳との結び付け）を廃止します。** `WorkingSourceRecord`（`app.db` の平文行）がファイル参照とメタデータを持ち、実体を開くときは**ファイルの存在確認のみ**行います。存在しなければ `WorkingSourceRecord` を破棄し `paused(.sourceReselectionRequired)` へ遷移させ、再選択の導線を出します（起動時と書き出し開始時の 2 回確認します）。`FaceDetector` / `ImageEffectRenderer` は検証済みラッパを介さず、通常の `ImageSource`（上記「境界型」）を受け取ります（プロトコル宣言は上記「プロトコルのシグネチャ」）。
 
-##### binding は DB を先に消す
+##### 実体の削除
 
 **ADR 0005 により廃止。** `WorkingSourceBinding` を含む署名台帳が無くなり、`WorkingSourceRecord` は `app.db` の通常の行として単一トランザクションで削除します。
 
