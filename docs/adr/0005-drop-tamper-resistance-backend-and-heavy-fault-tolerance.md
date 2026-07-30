@@ -28,7 +28,7 @@
 | 署名不正コミットの解消手順 | 署名の廃止に伴い消滅 |
 | `UpgradeReason.ledgerBlocked` と `blocked(.ledgerIntegrityFailure)` | 発火条件が消滅するため削除 |
 
-`contentFingerprint`（素材の同一性判定）は改ざん対抗ではなく機能（同一素材の直列化・alias 統合）の基盤なので**残す**。
+`contentFingerprint`（素材の同一性判定）は改ざん対抗ではなく機能（同一素材の直列化・alias 統合）の基盤なので**残す**。※この決定は [ADR 0006](0006-accounting-per-delivered-output.md) により上書きされ、`contentFingerprint` を含む素材同一性の照合は全廃された。
 
 ### B. 自前バックエンドを持たない（v1 はサーバレス）
 
@@ -45,7 +45,7 @@
 
 | 廃止・縮小するもの | 置き換え |
 | --- | --- |
-| `ExportCommit` 7 状態 × 手順 12 段 × ロールバック 6 段 × 起動時復旧 14 段 | 状態 3〜4 個。非終端の中断は**すべてロールバックして枠を返還**する一律規則 |
+| `ExportCommit` 7 状態 × 手順 12 段 × ロールバック 6 段 × 起動時復旧 14 段 | 状態 3〜4 個。非終端の中断は**すべてロールバックして枠を返還**する一律規則 ※[ADR 0006](0006-accounting-per-delivered-output.md) により「生成は無消費・完了操作でのみ消費」へ変更され、返還という概念自体が消滅した |
 | 実機 process-death 障害注入テスト基盤 | 状態機械のユニットテストで代替 |
 | actor 再入・二重 resume・tombstone つき自前待機キュー | 単純な直列実行キュー 1 本（v1 は並列数 1） |
 
