@@ -630,7 +630,7 @@ func resolveCapabilities(
 /// 能力判定と Paywall 文言の入力。Project とその子行から組み立てる
 struct ProjectCapabilityRequirement: Sendable, Equatable {
     /// この Project の RenderSpec が使う全スタンプの必要能力。
-    /// StampRequirement の定義は [書き出し Saga](export-saga.md) の 1.3
+    /// StampRequirement の定義は [書き出し Saga](export-saga.md) の 1.2
     let stampRequirements: Set<StampRequirement>
 }
 
@@ -693,11 +693,11 @@ Free 範囲のプロジェクトとは、モザイク・ぼかし・黒塗り・
 
 ##### 比較対象を台帳へ持つ
 
-**現在の設定ハッシュと比べる対象「最後に正常書き出しした設定」は、台帳（`ExportedSettingsEntry`。6.3）へ持たせる**（完了操作と同じトランザクション境界で更新するため）。**台帳への反映は完了操作（単一トランザクション）で直接行う**（確定前の値を根拠にしてしまう経路が無い。ADR 0005、ADR 0006）。
+**現在の設定ハッシュと比べる対象「最後に正常書き出しした設定」は、独立テーブル `ExportedSettingsEntry`（6.3）へ持たせる**（完了操作と同じトランザクション境界で更新するため）。**台帳への反映は完了操作（単一トランザクション）で直接行う**（確定前の値を根拠にしてしまう経路が無い。ADR 0005、ADR 0006）。
 
 | 契機 | 操作 |
 | --- | --- |
-| 完了操作の確定 | **`exportedSettingsEntries` へ直接書き込む**（[書き出し Saga](export-saga.md)が正本） |
+| 完了操作の確定 | **`ExportedSettingsEntry` へ直接書き込む**（[書き出し Saga](export-saga.md)が正本） |
 | `Project` の削除 | **`Project` 削除 Saga**（DB 確定後）で削除する（7.5） |
 
 **免除条件（確定記録の存在・設定の一致・対象・適用範囲）の正本は [書き出し Saga](export-saga.md)。** 免除の対象は**降格後の有料スタンプ能力要件のみであり、月間枠は免除しない**（クォータは別途評価する。6.3）。ADR 0006 により、素材の同一性は判定条件に含めない（対象は「同一 `Project`」であることのみ）。要素数は `Project` 数と同じく有界であり、`Project` が消えた entry は削除 Saga が回収する。**降格の事実自体はクォータ判定に影響しない。**
@@ -728,7 +728,6 @@ struct UsageLedger: Sendable, Equatable {
     let period: YearMonth                          // 消費を計上している年月
     let consumedExportIDs: Set<ExportID>            // 月間枠の消費（6.5）
     let trialConsumedExportIDs: Set<ExportID>       // トライアルクレジットの消費
-    let exportedSettingsEntries: [ExportedSettingsEntry]   // 「変更せず再書き出し」の比較対象（6.2）
 }
 
 extension UsageLedger {
@@ -736,7 +735,9 @@ extension UsageLedger {
     var trialConsumed: Int { trialConsumedExportIDs.count }
 }
 
-/// 正常書き出しで確定した設定。「変更せず再書き出し」の比較対象（6.2）
+/// 正常書き出しで確定した設定。「変更せず再書き出し」の比較対象（6.2）。
+/// UsageLedger のフィールドではなく独立テーブル（projectID ごとに 1 行。外部キーは 7.1）で、
+/// 完了操作の単一トランザクションで upsert する
 struct ExportedSettingsEntry: Sendable, Equatable {
     let projectID: ProjectID
     let settingsHash: ProjectSettingsHash
@@ -748,7 +749,7 @@ struct ExportedSettingsEntry: Sendable, Equatable {
 
 | 集合 | 一意条件 | 上限 |
 | --- | --- | --- |
-| `exportedSettingsEntries` | `projectID` ごとに 1 件 | 履歴の保存期間内の `Project` 数 |
+| `ExportedSettingsEntry` | `projectID` ごとに 1 件 | 履歴の保存期間内の `Project` 数 |
 | `consumedExportIDs` | — | 月間上限（既定 5） |
 | `trialConsumedExportIDs` | — | トライアルクレジット数（既定 5。[運用](operations.md) の 2.1） |
 
@@ -1037,7 +1038,7 @@ enum BatchKind: Sendable, Hashable {
 その他の規則は仕様 16.5 / 16.7 / 16.8 に従う。
 
 - 1 バッチ最大 50 枚
-- 同時並列処理は **v1 では 1 固定**（初期値・hard max とも 1）。2 へ引き上げるには二段階ゲートの実装が要る（[書き出し Saga](export-saga.md) の 1.7）
+- 同時並列処理は **v1 では 1 固定**（初期値・hard max とも 1）。2 へ引き上げる場合は開始順序と勘定の再設計が要る（v2 検討時）
 - 一枚の失敗でバッチ全体を停止しない
 - **アプリ再起動後に未完了キューを復元する**（[画像処理](image-pipeline.md) の `WorkingSourceRecord`）
 - 元素材へのアクセス権限を失った場合は再選択を求める
@@ -1226,6 +1227,7 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `ExportQueueItem.projectID` | `Project` | CASCADE |
 | `ExportQueueItem.batchID` | `Batch` | CASCADE |
 | `ExportRecord.projectID` | `Project` | CASCADE |
+| `ExportedSettingsEntry.projectID` | `Project` | CASCADE |
 | `ExportRecord.batchID` | `Batch` | SET NULL |
 | `ProjectStampAsset.projectID` | `Project` | CASCADE |
 | `ProjectStampAsset.assetHash` | `StampAsset` | RESTRICT |
@@ -1628,7 +1630,7 @@ struct DeletionContext: Sendable {
     let isFavorite: Bool
     let isBeingEdited: Bool
     let hasNonTerminalQueueItem: Bool
-    let hasUndeliveredOutputRecord: Bool   // isUndelivered のみ。delivered は保護しない
+    let hasUndeliveredOutputRecord: Bool   // isUndelivered のみ（settledAt != nil の出力が対象）。delivered は保護しない
     let hasRunningExportJob: Bool
     let hasWorkingSourceRecord: Bool
 }
@@ -2017,7 +2019,7 @@ protocol CrashReporter: Sendable {
 
 /// クラッシュ報告に添える文脈。識別子と自由文字列を持たない
 struct CrashContext: Sendable, Equatable {
-    let jobState: ExportJobState?
+    let hasActiveExportJob: Bool
     let queueDepth: Int
     let recoveryStep: Int?
 }
@@ -2129,5 +2131,4 @@ v1 のリリース範囲、動画の扱い、課金訴求の分類、利用者�
 | 履歴の使用容量上限 | 初期値 200MB は暫定。加工後サムネイルの実サイズを計測して確定 | v1 実装中 |
 | カスタムスタンプの保存解像度 | 長辺 1,024px は暫定。顔が大きく写る素材での見え方を実機で確認（7.5） | v1 実機検証時 |
 | トライアルのクレジット数 | 5 枚は暫定。転換率を見て調整可能な設定値とする | リリース後 |
-| 一括処理の同時並列数を 2 へ引き上げるか | v1 は 1 固定。引き上げには二段階ゲートの実装と実機計測が要る | v2 検討時 |
-| 再確認しきい値 | `usageNow - generatedAt` の許容差 5 分は暫定。書き出し完了までの実測時間から確定（[書き出し Saga](export-saga.md)） | v1 実機検証時 |
+| 一括処理の同時並列数を 2 へ引き上げるか | v1 は 1 固定。引き上げには開始順序の再設計と実機計測が要る | v2 検討時 |
