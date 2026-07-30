@@ -156,7 +156,7 @@
 - **出力へ影響する子行（`FaceTrack` / `EffectSetting` / `ExportSetting` / `ProjectStampAsset`）の変更で、同一トランザクション内に `projectRevision` が増えること**
 - **各ハッシュ（`StampAssetHash` / `ProjectSettingsHash` / `PreviewRenderHash`）について、既知の入力から生成した固定 canonical bytes と出力値をテストへ埋め込むこと**（符号化ロジックの変更を検出する。[正準スキーマ](canonical-schema.md) の 6）
 
-### 2.6 更新誘導（[アーキテクチャ設計](architecture.md) の 6.7）
+### 2.6 更新誘導（[アーキテクチャ設計](architecture.md) の 6.6）
 
 - `AppVersion` の比較が数値の組で行われ、`1.10.0 > 1.9.0` になること
 - `CFBundleShortVersionString` のパース失敗で `.none` になること
@@ -255,7 +255,7 @@
 - **`PreviewConfirmation` が DB に存在せず、`detectionRevision` の増加だけで確認が無効になること**
 - **`isTerminal` が `completed` / `failed` / `canceled` のみ真であり、履歴削除の保護と完了判定が同じ述語を使うこと**
 
-### 3.5 更新誘導との順序（[アーキテクチャ設計](architecture.md) の 6.7）
+### 3.5 更新誘導との順序（[アーキテクチャ設計](architecture.md) の 6.6）
 
 - 更新判定が起動時復旧の完了後に実行されること
 - `.recommended` が編集中・書き出し中・未受け渡し出力があるときに表示されないこと

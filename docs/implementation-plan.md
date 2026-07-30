@@ -81,7 +81,7 @@
 
 ## 4. 着手前に確定が必要な未決事項
 
-**ありません。** 実機計測で決まる項目（`lowConfidenceThreshold`、`extremePose` の角度）は、該当サブプロジェクトの実装後に計測して確定します（[アーキテクチャ設計](architecture.md) の 12.2）。
+**ありません。** 実機計測で決まる項目（`lowConfidenceThreshold`、`extremePose` の角度）は、該当サブプロジェクトの実装後に計測して確定します（[アーキテクチャ設計](architecture.md) の 12 章）。
 
 | 確定済みの項目 | 内容 | 正本 |
 | --- | --- | --- |

@@ -835,7 +835,7 @@ protocol AdPresenter: AnyObject {
 | --- | --- | --- |
 | `PhotosPicker` の提示 | `App` | `PhotosPickerItem` は `App` の外へ出さない |
 | `fileImporter` の提示 | `App` | 外部 `URL` は `App` の外へ出さない |
-| `PrivacyShield` | `App` | `scenePhase` に紐づく（[アーキテクチャ設計](architecture.md) の 9.3） |
+| `PrivacyShield` | `App` | `scenePhase` に紐づく（[アーキテクチャ設計](architecture.md) の 9.2） |
 
 ```swift
 // App — 境界サービス。View から呼べるのはこの 2 つだけ（[アーキテクチャ設計](architecture.md) の 3.2）
@@ -1080,7 +1080,7 @@ struct ProjectSourceLocator: Sendable, Equatable {
 | --- | --- |
 | 保存先 | **`app.db` の `Project` のみ** |
 | バックアップ | 対象外（[アーキテクチャ設計](architecture.md) の 7.4） |
-| ログ・分析・診断 | **一切出さない。** 分析イベントのフィールド型にしない（[アーキテクチャ設計](architecture.md) の 9.2） |
+| ログ・分析・診断 | **一切出さない。** 分析イベントのフィールド型にしない（[アーキテクチャ設計](architecture.md) の 9.1） |
 | `nil` の場合 | 再編集で再選択を求める |
 | `Project` の削除 | 同じ行なので同時に消える |
 
