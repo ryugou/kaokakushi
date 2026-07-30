@@ -916,9 +916,10 @@ struct WorkingSourceRecord: Sendable {
 | --- | --- |
 | 保存先 | `app.db`。実体は `working/` |
 | 参照 | キュー項目・編集中プロジェクトの元素材 |
-| 削除 | **完了操作（settle）時**またはプロジェクト破棄時に `PendingFileDeletion` へ |
-| 起動時 | どのプロジェクトからも参照されない行を回収し、実体も削除する |
-| 実体が欠けている | そのキュー項目を **`paused(.sourceReselectionRequired)`** へ遷移させる。エラーで止めない |
+| 削除の経路 | **DB トランザクションで `WorkingSourceRecord` を削除し、同じトランザクションで `PendingFileDeletion` を追加する。コミット後に実体を削除する**（[アーキテクチャ設計](architecture.md) の 7.5「出力の削除経路」と同じ単一経路） |
+| 削除の契機 | **完了操作（settle）**（[書き出し Saga](export-saga.md) 側の契約）・**プロジェクト破棄**・**実体欠損による無効化**（`invalidateWorkingSource`。下記「実体の存在確認」） |
+| 起動時 | どのプロジェクトからも参照されない行を、同じ経路で回収・削除する |
+| 実体が欠けている | `invalidateWorkingSource` がそのキュー項目を **`paused(.sourceReselectionRequired)`** へ遷移させる。エラーで止めない |
 
 `tmp/` に置くと OS がいつでも削除でき、再起動のたびにキューの復元が失敗します。それでもディスク不足で消える可能性はゼロにならないため、`paused(.sourceReselectionRequired)` を逃げ道として残し、**該当項目だけを再選択対象としてバッチ全体を失いません。**
 
@@ -985,8 +986,16 @@ protocol WorkingSourceStore: Sendable {
     /// projectID の処理用素材を返す（無ければ nil）。再選択後の分岐と実体の存在確認に使う
     func loadWorkingSource(for projectID: ProjectID) async throws -> WorkingSourceRecord?
 
-    /// 破棄。呼び出し契機は 3 つ: 完了操作（settle）、プロジェクトの破棄、実体欠損による無効化（「実体の存在確認」）
+    /// 破棄。呼び出し契機は 2 つ: 完了操作（settle。[書き出し Saga](export-saga.md) 側の契約）、プロジェクトの破棄
     func deleteWorkingSource(_ projectID: ProjectID) async throws
+
+    /// 実体欠損時の無効化（下記「実体の存在確認」）。単一 DB トランザクションで
+    /// (a) `WorkingSourceRecord` を削除し、(b) 対象 `projectID` の非終端キュー項目を
+    /// `paused(.sourceReselectionRequired)` へ更新し、(c) 欠損したファイル参照を
+    /// `PendingFileDeletion` へ登録する。**実体が無くても (c) を行ってよい**（参照の掃除
+    /// であり、孤児 GC が空振りで行を消すだけで無害。[アーキテクチャ設計](architecture.md) の
+    /// 7.5「出力の削除経路」と同じ単一経路に揃える）
+    func invalidateWorkingSource(_ projectID: ProjectID) async throws
 }
 ```
 
@@ -1029,7 +1038,7 @@ struct AttachWorkingSourceInput: Sendable {
 
 ##### 実体の存在確認
 
-**`WorkingSourceRecord`（`app.db` の平文行）がファイル参照とメタデータを持ち、実体を開くときはファイルの存在確認のみ行います。** 存在しなければ `WorkingSourceRecord` を破棄し `paused(.sourceReselectionRequired)` へ遷移させ、再選択の導線を出します（起動時と書き出し開始時の 2 回確認します。破棄は `SourceImportCoordinator` が行います）。`FaceDetector` / `ImageEffectRenderer` は通常の `ImageSource`（上記「境界型」）を受け取ります（プロトコル宣言は上記「プロトコルのシグネチャ」）。
+**`WorkingSourceRecord`（`app.db` の平文行）がファイル参照とメタデータを持ち、実体を開くときはファイルの存在確認のみ行います。** 存在しなければ `WorkingSourceStore.invalidateWorkingSource(projectID)` を呼びます。**単一 DB トランザクション**で `WorkingSourceRecord` の削除・対象キュー項目の `paused(.sourceReselectionRequired)` への更新・欠損したファイル参照の `PendingFileDeletion` への登録を原子的に行い、再選択の導線を出します（起動時と書き出し開始時の 2 回確認します。呼び出し主体は `SourceImportCoordinator`）。`FaceDetector` / `ImageEffectRenderer` は通常の `ImageSource`（上記「境界型」）を受け取ります（プロトコル宣言は上記「プロトコルのシグネチャ」）。
 
 ##### 照合に使ってよいもの・使ってはいけないもの
 
@@ -1037,11 +1046,11 @@ struct AttachWorkingSourceInput: Sendable {
 
 ##### 未完了作業の保持期限
 
-**`WorkingSourceRecord` は時間経過では削除しません。** 完了操作（settle）またはプロジェクト破棄でのみ削除します。生成後・完了前のやり直しはこの `WorkingSourceRecord` を使って再レンダリングするため、削除せずに保持することが完了前やり直しの成立条件です。
+**`WorkingSourceRecord` は時間経過では削除しません。** 削除するのは完了操作（settle）・プロジェクト破棄・実体欠損による無効化のときだけです（上記「処理用ファイルの寿命を DB で管理する」）。生成後・完了前のやり直しはこの `WorkingSourceRecord` を使って再レンダリングするため、削除せずに保持することが完了前やり直しの成立条件です。
 
 | 項目 | 規約 |
 | --- | --- |
-| 削除の契機 | **完了操作（settle）** または **プロジェクト破棄** |
+| 削除の契機 | **完了操作（settle）**・**プロジェクト破棄**・**実体欠損による無効化**（上記参照） |
 | `Project` | **削除しない。** 設定と検出結果は履歴の保存期間に従う |
 | 判定の契機 | 起動時の孤児 GC で、どのプロジェクトからも参照されない行を回収する |
 
