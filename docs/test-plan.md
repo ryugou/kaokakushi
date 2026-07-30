@@ -166,10 +166,10 @@
 ### 2.7 その他
 
 - ストレージ必要量計算、`ExportQueueState` 状態機械
-- 履歴の保存期間と容量判定。24 時間のやり直し保証が容量超過時にも守られること
+- **履歴の保存期間と容量判定。容量超過時にも、完了前のやり直しは無制限のまま保たれ、完了済み未受け渡し出力（`isUndelivered`）の 24 時間保護は絶対保護として維持されること**
 - `canDeleteHistoryUnit` が列挙された全参照元を見ること（[アーキテクチャ設計](architecture.md) の 7.5。Saga 経由でも同一判定になることは 3.6 参照）
 - **絶対保護（非終端キュー項目 / 処理中の `ExportJob` / `isUndelivered` の `OutputRecord`）が、手動削除でも拒否されること**
-- **お気に入り・編集中・`WorkingSourceRecord`・24 時間保証が、自動削除では保護され、明示確認付きの手動削除では上書きできること**
+- **お気に入り・編集中・`WorkingSourceRecord`（`OverridableProtection` の 3 値）が、自動削除では保護され、明示確認付きの手動削除では上書きできること**
 - **上書き対象ごとに、失われるものを示す確認文言が選ばれること**
 - 未保存バッチが 1 件までに制限されること
 - 一括処理の開始が推定必要容量の 1.2 倍の空き容量を要求すること
@@ -191,8 +191,8 @@
 - `reviewRequired` かつ `unreviewed` の写真が残っていれば開始しないこと
 - `WorkingSourceRecord` の実体（ファイルの存在）だけを確認すること。無ければ無効化して再選択導線へ倒すこと
 - 権限とクォータの評価で `.blocked` なら `ExportJob` を作らず、生成も開始しないこと
-- 手順 0：`startExport` が `expectedProjectRevision` と不一致なら `throw` し、一致すれば `ExportJob(running)` を挿入すること
-- **生成の完了時点では `OutputRecord`（`settledAt: nil`）と出力ファイルだけが作られること。月間枠・トライアルクレジットのいずれも消費されないこと**（ADR 0006）
+- 手順 0：`startExport` が `expectedProjectRevision` と不一致なら `throw` し、一致すれば `ExportJob` を挿入すること
+- **生成の完了時点（`recordGeneratedOutput`）では `OutputRecord`（`settledAt: nil`）と出力ファイルだけが作られること。月間枠・トライアルクレジットのいずれも消費されないこと**（ADR 0006）
 - **生成の完了時点で `ExportRecord` が作成されないこと。確定記録（`ExportedSettingsEntry`）も更新されないこと**
 - **生成の完了時点でキュー項目が確定されないこと**
 - **生成の完了時点で `WorkingSourceRecord` が削除されず保持され、素材を再レンダリングできること**
@@ -200,7 +200,7 @@
 - 生成の失敗（レンダリング・移動・健全性確認の不成立）・利用者によるキャンセルが、`ExportJob` の削除と生成済みファイルのベストエフォート削除で後始末されること。**まだ何も消費していないため返還処理は不要であること**
 - 開始後に契約の失効・月間上限への到達が起きても、`running` の写真は開始時の権限のまま生成を完了すること。`waiting` の写真は開始しないこと
 - **直列実行キュー1本（並列数1）が、同時に処理中の `ExportJob` を 1 件までに保つこと**（ADR 0005）
-- `startExport` が `expectedProjectRevision` つきで `ExportJob(running)` を挿入し、revision が変わっていれば失敗すること
+- `startExport` が `expectedProjectRevision` つきで `ExportJob` 行を挿入し、revision が変わっていれば失敗すること
 
 ### 3.2 完了（`settleExport` / `settleBatch`）
 
@@ -213,7 +213,7 @@
 
 ### 3.3 完了前の破棄
 
-- **完了前の「やり直す」が確認用出力（`OutputRecord`）と出力ファイルを削除するだけであること。免除・返還・補償のいずれの処理も伴わないこと**（ADR 0006。まだ何も消費していないため、その概念自体が存在しない）
+- **完了前の「やり直す」（`discardExport`）が確認用出力（`OutputRecord`）と出力ファイルを削除するだけであること。免除・返還・補償のいずれの処理も伴わないこと**（ADR 0006。まだ何も消費していないため、その概念自体が存在しない）
 - 破棄後も月間枠・トライアルクレジットが変化しないこと
 - **破棄後も素材（`WorkingSourceRecord`）が保持され、同じ設定・別の設定のいずれでも再レンダリングできること**
 - 破棄の回数に制限が無いこと
@@ -222,7 +222,7 @@
 
 ### 3.4 確定後の実体喪失（[書き出し Saga](export-saga.md) の 6 章）
 
-- 実体が無い、または `outputByteSize` / `outputSHA256` と一致しないとき、`OutputRecord` を `discarded` へ遷移させること（物理削除しない。`settledAt` は保持したまま残す）
+- **実体が無い、または `outputByteSize` / `outputSHA256` と一致しないとき、`OutputRecord` を削除すること**（[書き出し Saga](export-saga.md) の 6 章。`OutputState` は `generated` / `deliveryUnknown` / `delivered` の3値であり、`discarded` という状態は存在しない。破棄は状態ではなく行の物理削除で表す）
 - **`UsageLedger` を変更しないこと**（月間枠・トライアルクレジットのいずれも戻さない）
 - 自動再生成を行わないこと。利用者へは新しい書き出しとして案内すること
 
@@ -255,10 +255,10 @@
 - 一括削除が `CustomStamp` のみを対象とし、参照中の `StampAsset` を消さないこと
 - 削除で DB が先に更新され、`PendingFileDeletion` が同じトランザクションへ記録されること
 - `WorkingSourceRecord` の実体が欠けたとき、そのキュー項目が `paused(.sourceReselectionRequired)` へ遷移すること。バッチ全体が止まらないこと
-- **`createdAt` から 24 時間で処理用ファイルと `WorkingSourceRecord` が削除され、キュー項目が `paused(.sourceReselectionRequired)` になること**
-- **`ProjectSourceSnapshot` が、書き出しの完了でも処理用ファイルの 24 時間期限でも削除されないこと**（`Project` の削除でのみ削除される）
+- **`WorkingSourceRecord` の削除契機が、完了操作（`settleExport` / `settleBatch`）・プロジェクト破棄・実体欠損の 3 つに限られ、時間経過では削除されないこと**（[画像処理](image-pipeline.md) が正本）
+- **`Project` の `capture` / `sourceRepresentation` / `libraryCreationDate` が、書き出しの完了や `WorkingSourceRecord` の削除では消えず、`Project` 自体の削除でのみ失われること**
 - `WorkingSourceRecord` の有無で `replaceWorkingSource` と `attachWorkingSourceToExistingProject` が選ばれること
-- **24 時間経過して `paused(.sourceReselectionRequired)` になったあとも、再選択（実体の存在確認）が成立すること**
+- **`paused(.sourceReselectionRequired)` になったあとも、再選択（実体の存在確認）が成立すること**
 - **履歴の既存 `Project` へ `attachWorkingSourceToExistingProject` で再接続できること。選び直された写真は常に新しい素材として扱われること**（ADR 0006）
 - **再接続が `detectionRevision` / `projectRevision` を増やし、検出結果を再利用しないこと**
 - **再選択が顔検出をやり直し、`detectionRevision` と `projectRevision` を増やし、旧 `FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` を破棄すること**
@@ -289,7 +289,7 @@
 - スキーマ移行が単一トランザクションで確定し、途中適用が観測されないこと
 - **外部キー制約が有効であり、`Project` の削除が `OutputRecord`（非終端）/ 処理中の `ExportJob` の存在で RESTRICT されること**
 - **`Batch` の削除で `OutputRecord.batchID` / `ExportRecord.batchID` / `ExportJob.batchID` が SET NULL になること**
-- **`OutputRecord.projectID` の部分 UNIQUE インデックス（`state != discarded`）が非終端出力を 1 プロジェクトにつき 1 件へ制限すること**
+- **`OutputRecord.projectID` の部分 UNIQUE インデックス（`settledAt IS NULL`）が未確定出力を 1 プロジェクトにつき 1 件へ制限すること**
 - **`journal_mode` が `DELETE` であり、`TRUNCATE` / `PERSIST` / `WAL` なら復旧エラーになること**
 - `PRAGMA foreign_key_check` が起動時に実行され、違反があれば復旧エラーになること
 
@@ -299,8 +299,8 @@
 - 属性の検証に失敗したファイルが完成扱いにならないこと
 - `StampAsset` の作成が atomic rename を経ること
 - **インポート Saga の手順 1〜3 の途中で終了した場合、作成済みファイルが孤児として起動時 GC で回収されること**
-- **`ProjectSourceSnapshot` が `Project` 作成と同一トランザクションで保存されること**
-- **DB 登録に失敗した場合、その `WorkingSourceRecord` と `ProjectSourceSnapshot` が補償削除されること**
+- **`Project` の `capture` / `sourceRepresentation` / `libraryCreationDate` が `Project` 作成（手順 3）と同一トランザクションで保存されること**
+- **DB 登録に失敗した場合、その `WorkingSourceRecord` と `Project`（`capture` / `sourceRepresentation` / `libraryCreationDate` を含む）が補償削除されること**
 - **インポート Saga が `PickedPhotoInput.importedFile` を作り直さず、所有権を受け取ること**
 - **DB 確定（手順 3）の後に取り込みファイルが削除され、削除失敗時は `PendingFileDeletion` へ積まれること**
 - **DB 確定より前に取り込みファイルを削除しないこと**
@@ -395,7 +395,7 @@
 
 - 履歴一覧とサムネイルに未加工の顔が現れないこと
 - タスクスイッチャのスナップショットに編集中の未加工画面が残らないこと
-- **書き出し完了・キャンセル・プロジェクト破棄・保持期限の終了のいずれかの後に、参照のない処理用元画像コピーが残らないこと**（処理中の `WorkingSourceRecord` は正当な保持であり、これに含めない）
+- **書き出し完了・キャンセル・プロジェクト破棄のいずれかの後に、参照のない処理用元画像コピーが残らないこと**（処理中の `WorkingSourceRecord` は正当な保持であり、これに含めない）
 - 出力ファイルから位置情報・機器情報・編集ソフト情報が除去されていること
 - **写真ライブラリの登録日時が、取得できる場合に引き継がれ、取得不能時は未設定になること**（現在時刻を明示指定しないこと）
 - `ProjectSourceLocator` の平文 `localIdentifier` がログ・分析・診断のいずれにも出ないこと
