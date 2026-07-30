@@ -7,7 +7,7 @@
 | 正本の範囲 | `ExportJob` の型と状態、手順、中断・キャンセル時の後始末、起動時復旧、受け渡し |
 | 関連 | [アーキテクチャ設計](architecture.md)、[ADR 0005](adr/0005-drop-tamper-resistance-backend-and-heavy-fault-tolerance.md)（改ざん対抗・耐障害機構の簡素化の決定） |
 
-[ADR 0005](adr/0005-drop-tamper-resistance-backend-and-heavy-fault-tolerance.md) により、`UsageLedger`・書き出しジョブ・`OutputRecord` はすべて `app.db` の平文行になった。複数保存先を跨ぐ補償はもう要らない。会計・出力の公開・ジョブの完了は**単一の SQLite トランザクション**で原子的に確定する。書き出しは直列実行キュー1本（並列数1）で処理し、実行中のジョブは常に0件か1件。
+`UsageLedger`・書き出しジョブ・`OutputRecord` はすべて `app.db` の平文行である（[ADR 0005](adr/0005-drop-tamper-resistance-backend-and-heavy-fault-tolerance.md)）。会計・出力の公開・ジョブの完了は**単一の SQLite トランザクション**で原子的に確定する。書き出しは直列実行キュー1本（並列数1）で処理し、実行中のジョブは常に0件か1件。
 
 ---
 
@@ -31,7 +31,7 @@ protocol ExportSagaStore: Sendable {
     func deleteRunningJobs(_ exportIDs: [ExportID]) async throws
 }
 
-/// 受け渡し（8 章）。ExportSagaStore とは寿命が異なるため分ける
+/// 受け渡し（7 章）。ExportSagaStore とは寿命が異なるため分ける
 protocol OutputDeliveryStore: Sendable {
     /// previousState を記録する。事前条件: settledAt != nil（nil なら throw。ADR 0006）
     func beginDeliveryAttempt(_ exportID: ExportID) async throws
@@ -96,7 +96,7 @@ struct PreviewConfirmation: Sendable, Equatable {
     let detectionRevision: Int64      // 再検出ごとに増える
     let previewRenderHash: PreviewRenderHash
 }
-/// バッチ一覧の確認状態。Bool 単独では持たない
+/// バッチ一覧の確認状態を batchID と結び付けて保持する
 struct BatchReviewState: Sendable, Equatable {
     let batchID: BatchID
     let overviewConfirmed: Bool
@@ -164,7 +164,7 @@ enum StampRequirement: Sendable, Hashable {
 | 対象 | 同一 `Project` であること（ADR 0006。素材の同一性は照合しない） |
 | 適用範囲 | 有料スタンプの能力要件のみ。クォータは免除しない |
 
-確定記録は手順 4（finalize）で直接書き込む。中間状態を経ないため、以前あった「未確定の記録を根拠にしてしまう」経路は存在しない。
+確定記録は手順 4（finalize）で直接書き込む。
 
 ### 1.4 権限とクォータ
 
@@ -194,7 +194,7 @@ enum ExportAccountingMode: Sendable, Equatable {
 
 ### 1.5 勘定の使い分け
 
-枠が数える単位は「受け渡した成果物」であり、素材の同一性は勘定に使わない（ADR 0006）。生成後の出力確認画面で、利用者が**明示的な完了操作**を行った時点（`OutputRecord.settledAt` が確定する時点。8 章）で「完了」となり、枠が確定する。保存・共有は完了後にのみ行える。
+枠が数える単位は「受け渡した成果物」であり、素材の同一性は勘定に使わない（ADR 0006）。生成後の出力確認画面で、利用者が**明示的な完了操作**を行った時点（`OutputRecord.settledAt` が確定する時点。7 章）で「完了」となり、枠が確定する。保存・共有は完了後にのみ行える。
 
 | 勘定 | 月間枠 | トライアル台帳 |
 | --- | --- | --- |
@@ -206,7 +206,7 @@ enum ExportAccountingMode: Sendable, Equatable {
 
 月間クォータを使うのは Free の単体処理だけ（Free 利用者が月 5 枚を使い切っていても、クレジットが残っていれば一括トライアルを実行できる）。
 
-**`reissue` の成立条件**（認可時に判定）: 同一 `projectID` の直近の `OutputRecord` が `state == discarded` かつ `settledAt == nil` であること。破棄（8 章の `markDiscarded`）でも実体喪失（7 章）でも `OutputRecord` は物理削除せず `discarded` へ遷移させ `settledAt` を保持するため、この行を根拠に判定できる。回数・時間の制限は無い。`settledAt` が確定した後に `discarded` になった行は `reissue` の根拠にならず、新規消費となる。
+**`reissue` の成立条件**（認可時に判定）: 同一 `projectID` の直近の `OutputRecord` が `state == discarded` かつ `settledAt == nil` であること。破棄（7 章の `markDiscarded`）でも実体喪失（6 章）でも `OutputRecord` は物理削除せず `discarded` へ遷移させ `settledAt` を保持するため、この行を根拠に判定できる。回数・時間の制限は無い。`settledAt` が確定した後に `discarded` になった行は `reissue` の根拠にならず、新規消費となる。
 
 ### 1.6 開始後の権限変化
 
@@ -266,7 +266,7 @@ struct OutputDeliveryDescriptor: Sendable {
 running → （レンダリング・ファイル移動・健全性確認。DB 上の状態変化なし）→ 手順 4（単一トランザクション）→ completed
 ```
 
-会計・出力の公開・ジョブの完了が同じトランザクションで確定するため、旧設計にあった「暫定適用してから最終確定する」区間そのものが無い。検証済みファイルは、このトランザクションが完了するまで UI・`MediaSaver`・`SharePresenter` へ公開しない。
+会計・出力の公開・ジョブの完了は同じトランザクションで確定する。検証済みファイルは、このトランザクションが完了するまで UI・`MediaSaver`・`SharePresenter` へ公開しない。
 
 **手順3（健全性確認）**: 存在確認だけでは不足する（0 バイトのファイル、途中まで書かれたファイル、デコードできないファイルも「存在する」ため）。ファイルが存在し、サイズが 0 でなく、簡易デコードが成功することを確認する。いずれかが不成立なら手順 4 へ進まず、中断として扱う（4 章）。
 
@@ -292,7 +292,7 @@ struct OutputRecord: Sendable {
     let state: OutputState
     let generatedAt: Date
     let expiresAt: Date              // generatedAt + 24h
-    let settledAt: Date?             // finalize 時は nil。8 章で確定する（ADR 0006）
+    let settledAt: Date?             // finalize 時は nil。7 章で確定する（ADR 0006）
     let format: ImageFormat
     let suggestedCreationDate: Date?
 }
@@ -300,7 +300,7 @@ struct OutputRecord: Sendable {
 
 実装はトランザクション内で次を確認する（不成立なら throw し、手順 4 を実行しない）。`ExportJob.state == running`（二重確定の防止）、同じ `projectID` の**非終端**（`discarded` 以外の）`OutputRecord` が存在しない（`OutputRecord.projectID` の部分 UNIQUE 制約。[アーキテクチャ設計](architecture.md) の 7.1。未削除の `delivered` 出力が残る `Project` は再書き出し不可、同 7.5）、`queueItemID` が指定されていれば対応するキュー項目が存在し `projectID` / `batchID` が一致し `state == .exporting`（無関係なキュー項目を `completed` にしない）。
 
-確認を通ったら、同じ `projectID` の `discarded` 行があれば同一トランザクションで削除する（`reissue` 判定の根拠は認可時に読み取り済みであり、この行はもう要らない）。続いて `ExportJob` の値だけから `OutputRecord` と `ExportRecord` を導出する。
+確認を通ったら、同じ `projectID` の `discarded` 行があれば同一トランザクションで削除する（`reissue` 判定の根拠は認可時に読み取り済み）。続いて `ExportJob` の値だけから `OutputRecord` と `ExportRecord` を導出する。
 
 | 導出先 | 導出元 |
 | --- | --- |
@@ -309,7 +309,7 @@ struct OutputRecord: Sendable {
 | `OutputRecord.format` / `suggestedCreationDate` | `ExportJob.delivery` |
 | `ExportRecord.accountingMode` | `ExportJob.authorization` |
 
-パスを DB へ直接持たない（[アーキテクチャ設計](architecture.md) の 7.1。パス文字列を保存すると `../` を含む値を注入できる経路ができる）。
+`outputFile` は不透明な参照であり、パス文字列ではない（[アーキテクチャ設計](architecture.md) の 7.1。パス文字列だと `../` を含む値を注入できる経路ができる）。
 
 ---
 
@@ -326,9 +326,9 @@ struct OutputRecord: Sendable {
 
 会計要素（月間枠・トライアル）はまだ何も書き込まれていないため、返還処理は不要。`deleteJob` は冪等（行が無ければ何もしない）。
 
-**手順 4（finalize）が完了した後、出力確認画面での「やり直す」**（ADR 0006）: `OutputRecord` は作られるが `settledAt` はまだ確定していない。この間に利用者が「やり直す」を選んだ場合は `deleteJob` ではなく `markDiscarded` で `OutputRecord` を `discarded` へ遷移させ、編集へ戻す（8 章）。台帳は変更しない（会計は既に確定済み）。次の書き出しは `reissue` として追加消費なしで行える（1.5）。
+**手順 4（finalize）が完了した後、出力確認画面での「やり直す」**（ADR 0006）: `OutputRecord` は作られるが `settledAt` はまだ確定していない。この間に利用者が「やり直す」を選んだ場合は `deleteJob` ではなく `markDiscarded` で `OutputRecord` を `discarded` へ遷移させ、編集へ戻す（7 章）。台帳は変更しない（会計は既に確定済み）。次の書き出しは `reissue` として追加消費なしで行える（1.5）。
 
-出力確認画面での**明示的な完了操作**（8 章の `markSettled`）を経たあとは前進のみで取り消せない。UI 上も、完了後はキャンセル・やり直しを提示しない。完了後の破棄は 8 章の扱いに従い、次の書き出しは新規消費になる。
+出力確認画面での**明示的な完了操作**（7 章の `markSettled`）を経たあとは前進のみで取り消せない。UI 上も、完了後はキャンセル・やり直しを提示しない。完了後の破棄は 7 章の扱いに従い、次の書き出しは新規消費になる。
 
 ---
 
@@ -341,13 +341,7 @@ struct OutputRecord: Sendable {
 
 ---
 
-## 6. 署名不正コミット
-
-[ADR 0005](adr/0005-drop-tamper-resistance-backend-and-heavy-fault-tolerance.md) により廃止。台帳が `app.db` の平文行になり、コミット行の署名という概念自体が無くなったため。
-
----
-
-## 7. 確定後に出力実体が失われた場合
+## 6. 確定後に出力実体が失われた場合
 
 `OutputRecord` と実体が食い違うことは、外部要因（OS によるキャッシュ削除、ストレージ障害）で起こりうる。v1 では自動再生成を行わない。
 
@@ -359,11 +353,11 @@ struct OutputRecord: Sendable {
 | `settledAt == nil`（未完了）のまま失った場合 | `reissue` でやり直せる（追加消費なし。1.5） |
 | `settledAt` が確定済み（完了後）に失った場合 | 新規消費でやり直す。`reissue` は成立しない |
 
-**自動再生成を持たない理由**: 現在保持しているデータでは再生成できない（元画像は書き出し完了時に `WorkingSourceRecord` ごと削除され、`RenderSpec` と `ExportSetting` も `OutputRecord` は保持しない）。再生成には出力の期限まで不変のスナップショットを保持する必要があり、未加工の顔画像を最大24時間追加保持することを意味する。プライバシーと容量の複雑性が v1 の利得に釣り合わない。未完了のまま失った場合は `reissue` により追加消費なしで行えるため、利用者の損失は「もう一度操作する手間」に限られる。
+**自動再生成を行わない理由**: 現在保持しているデータでは再生成できない（元画像は書き出し完了時に `WorkingSourceRecord` ごと削除され、`RenderSpec` と `ExportSetting` も `OutputRecord` は保持しない）。再生成には出力の期限まで不変のスナップショットを保持する必要があり、未加工の顔画像を最大24時間追加保持することを意味する。プライバシーと容量の複雑性が v1 の利得に釣り合わない。未完了のまま失った場合は `reissue` により追加消費なしで行えるため、利用者の損失は「もう一度操作する手間」に限られる。
 
 ---
 
-## 8. 利用者への受け渡し
+## 7. 利用者への受け渡し
 
 - 写真ライブラリへ保存する（`MediaSaver`）
 - OS 共有へ渡す（`SharePresenter`）
@@ -372,11 +366,11 @@ struct OutputRecord: Sendable {
 
 **完了（`settledAt`）の確定**（ADR 0006）: 生成後の出力確認画面で、利用者が**明示的な完了操作**を行った時点で枠が確定する。`markSettled` の呼び出しで、`OutputRecord.settledAt` が `nil` なら現在時刻を設定する（同一トランザクション）。一度設定した `settledAt` は変更しない。完了操作の付近には「完了すると 1 枚として確定し、以降の作り直しは新しい 1 枚になる」旨を明示する。完了前は「やり直す」で出力を破棄でき、追加消費しない（4 章）。
 
-バッチの完了操作は、結果一覧画面での操作 1 回で対象バッチ内の**全出力**の `settledAt` を同一トランザクションで設定する（`markSettled` のバッチ版。個別の出力だけを完了させる操作は持たない）。完了前は写真単位のやり直しができ、一括保存・共有は完了後にのみ行える。
+バッチの完了操作は、結果一覧画面での操作 1 回で対象バッチ内の**全出力**の `settledAt` を同一トランザクションで設定する（`markSettled` のバッチ版）。完了前は写真単位のやり直しができ、一括保存・共有は完了後にのみ行える。
 
 **不変条件**: `beginDeliveryAttempt` / `completeLibrarySave` / `completeShare` は `settledAt != nil` を事前条件とする（`nil` なら throw）。完了前の出力は UI 上も保存・共有へ到達できないが、防御として明記する。`markDiscarded` にはこの事前条件を課さない（完了前のやり直しでも呼ばれるため。4 章）。保存・共有の成否は問わない（失敗しても出力は保持され再試行できる）。
 
-### 8.0 写真ライブラリ保存の結果不明
+### 7.0 写真ライブラリ保存の結果不明
 
 PhotoKit と `app.db` は同一トランザクションにできない。保存成功後 `OutputRecord` を `delivered` へ更新する前にプロセスが終了すると、再起動後は `generated` に見え、再保存すると重複する。exactly-once は保証できないため、自動再試行で重複を作らない設計にする。
 
@@ -400,7 +394,7 @@ struct DeliveryAttempt: Sendable {
 
 ##### `delivered` を後退させない・直列化・保存結果不明の永続化
 
-受け渡しは複数回・任意の順序で行える（[アーキテクチャ設計](architecture.md) の 7.5）。OS 共有成功後に写真ライブラリ保存を試みて中断しても、`previousState` により以前の共有成功の事実を失わない。一度成立した `delivered` は取り消さない。
+受け渡しは複数回・任意の順序で行える（[アーキテクチャ設計](architecture.md) の 7.5）。OS 共有成功後に写真ライブラリ保存を試みて中断しても、`previousState` により直前の共有成功の事実を失わない。一度成立した `delivered` は取り消さない。
 
 `actor` であることは排他保証にならない（`await` のたびに再入可能なため）。`exportID` ごとの明示的な待ち行列で直列化する（[アーキテクチャ設計](architecture.md) の 4.2 と同じ方式）。`DeliveryAttempt` が存在する間、その出力への共有・破棄・別の保存はすべて拒否する。
 
@@ -435,7 +429,7 @@ enum ShareResult: Sendable, Equatable { case completed, canceled, unknown, faile
 
 `.completed` は `generated` / `deliveryUnknown` → `delivered`。`.canceled` / `.failed` / `.unknown` は現在の状態を維持する（安全側へ倒す）。
 
-### 8.1 `ShareLink` では実装できない
+### 7.1 `ShareLink` では実装できない
 
 `SharePresenter` は `UIActivityViewController` だけで実装する（`ShareLink` は完了結果を返す API を持たないため）。`completionWithItemsHandler` からの写像。
 
