@@ -419,29 +419,15 @@ export function SettingsScreen() {
               </p>
             ) : null}
 
-            <div className="grid grid-cols-2 gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-10 rounded-xl text-[11px] font-bold"
-                onClick={() => simulateUpdate("recommended")}
-              >
-                <ArrowUpCircle data-icon="inline-start" />
-                任意更新の案内
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-10 rounded-xl text-[11px] font-bold"
-                onClick={() => simulateUpdate("required")}
-              >
-                <ArrowUpCircle data-icon="inline-start" />
-                強制更新
-              </Button>
-            </div>
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
-              未保存の加工済み写真があるときに強制更新を出すと、受け渡しの導線が先に表示されます。
-            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-10 rounded-xl text-[11px] font-bold"
+              onClick={() => simulateUpdate("recommended")}
+            >
+              <ArrowUpCircle data-icon="inline-start" />
+              任意更新の案内
+            </Button>
           </div>
         </section>
 
