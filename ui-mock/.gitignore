@@ -17,4 +17,3 @@ node_modules
 # Build artifacts
 next-env.d.ts
 *.tsbuildinfo
-.pnpm-store/

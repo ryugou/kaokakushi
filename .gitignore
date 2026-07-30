@@ -36,3 +36,9 @@ GoogleService-Info.plist
 .env
 .env.*
 !.env.example
+
+.vibepod/
+
+.worktrees/
+
+.pnpm-store/
