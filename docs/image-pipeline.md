@@ -50,7 +50,7 @@ Vision の型（`FaceObservation`）を `Domain` へ流しません。
 
 ```swift
 struct DetectedFace: Sendable, Equatable {
-    let faceTrackID: FaceTrackID  // 6.6
+    let faceTrackID: FaceTrackID  // アーキテクチャ設計 6.5
     let bounds: NormalizedRect    // 左上原点へ変換済み（4 章）
     let confidence: Double        // 0.0〜1.0
     let yawDegrees: Double
@@ -120,7 +120,7 @@ struct RenderRegionSpec: Sendable, Equatable {
 /// 組み込みスタンプとカスタムスタンプを文字列で混ぜない
 enum StampSource: Sendable, Hashable {
     case builtIn(code: String)
-    case custom(assetHash: StampAssetHash)   // 32 バイト固定（正準スキーマ 5.1）
+    case custom(assetHash: StampAssetHash)   // 32 バイト固定（正準スキーマ 5.3）
 }
 
 enum RenderOpSpec: Sendable, Equatable {
@@ -691,7 +691,7 @@ struct ImageSource: Sendable {
 /// PickedPhotoLoader の戻り値
 struct LoadedPhoto: Sendable {
     let source: ImageSource           // 向き正規化済みの原寸。WorkingSourceRecord が指す実体
-    let capture: OriginalCaptureMetadata  // EXIF 由来（正準スキーマ 5.1.1）
+    let capture: OriginalCaptureMetadata  // EXIF 由来（正準スキーマ 5.1）
 }
 
 /// FaceDetector の戻り値
@@ -851,7 +851,7 @@ struct PickedPhotoInput: Sendable {
     let importedFile: ManagedFileRef          // 7.3 で物質化済み
     let providerAssetIdentifier: String?      // 一時的にのみ保持。保存・ログ禁止
     let libraryCreationDate: Date?
-    let representation: SourceRepresentation  // 6.4
+    let representation: SourceRepresentation  // アーキテクチャ設計 7.5
 }
 
 ```
@@ -982,7 +982,10 @@ protocol WorkingSourceStore: Sendable {
         _ input: AttachWorkingSourceInput
     ) async throws
 
-    /// 完了操作（settle）またはプロジェクト破棄時の破棄
+    /// projectID の処理用素材を返す（無ければ nil）。再選択後の分岐と実体の存在確認に使う
+    func loadWorkingSource(for projectID: ProjectID) async throws -> WorkingSourceRecord?
+
+    /// 破棄。呼び出し契機は 3 つ: 完了操作（settle）、プロジェクトの破棄、実体欠損による無効化（「実体の存在確認」）
     func deleteWorkingSource(_ projectID: ProjectID) async throws
 }
 ```
@@ -998,9 +1001,9 @@ struct CreateWorkingSourceInput: Sendable {
     let sourceFile: WorkingSourceFileRef      // 向き正規化済みの原寸
     let createdAt: Date
     let sourceLocator: ProjectSourceLocator
-    let capture: OriginalCaptureMetadata      // EXIF 由来（正準スキーマ 5.1.1）。Project へ保存する
+    let capture: OriginalCaptureMetadata      // EXIF 由来（正準スキーマ 5.1）。Project へ保存する
     let libraryCreationDate: Date?            // Project へ保存する
-    let representation: SourceRepresentation  // Project へ保存する（6.4）
+    let representation: SourceRepresentation  // Project へ保存する（アーキテクチャ設計 7.5）
     let initialSpec: RenderSpec
 }
 
@@ -1059,7 +1062,7 @@ struct AttachWorkingSourceInput: Sendable {
 
 | 用途 | 取得元 |
 | --- | --- |
-| `Project` が保持する撮影メタデータ（`OriginalCaptureMetadata`） | **EXIF のみ**（[正準スキーマ](canonical-schema.md) の 5.1.1）。無ければ各フィールドが `nil` |
+| `Project` が保持する撮影メタデータ（`OriginalCaptureMetadata`） | **EXIF のみ**（[正準スキーマ](canonical-schema.md) の 5.1）。無ければ各フィールドが `nil` |
 | 出力 EXIF への書き戻し（[アーキテクチャ設計](architecture.md) の 7.5） | 同上。ローカル表記のまま往復させる |
 | 写真ライブラリ保存時の `creationDate` | `PHAsset.creationDate`（権限がある場合のみ）→ EXIF → 設定しない |
 
