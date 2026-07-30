@@ -7,7 +7,7 @@
 | 本書の範囲 | 層ごとの個別テスト項目の網羅一覧 |
 | 本書の対象外 | テスト戦略そのもの（3 層への分割と各層が保証する内容は [アーキテクチャ設計](architecture.md) 11 章が正） |
 
-節番号の参照は [アーキテクチャ設計](architecture.md) のものです。画像処理は [画像処理アーキテクチャ](image-pipeline.md)、書き出し手順は [書き出し Saga](export-saga.md)、ハッシュのバイト表現は [正準スキーマ](canonical-schema.md) を参照します。[ADR 0005](adr/0005-drop-tamper-resistance-backend-and-heavy-fault-tolerance.md)（改ざん対抗・自前バックエンド・高耐障害機構の廃止）と [ADR 0006](adr/0006-accounting-per-delivered-output.md)（勘定単位を受け渡した成果物へ変更）を反映済みです。
+節番号の参照は [アーキテクチャ設計](architecture.md) のものです。画像処理は [画像処理アーキテクチャ](image-pipeline.md)、書き出し手順は [書き出し Saga](export-saga.md)、ハッシュのバイト表現は [正準スキーマ](canonical-schema.md) を参照します。[ADR 0005](adr/0005-drop-tamper-resistance-backend-and-heavy-fault-tolerance.md) と [ADR 0006](adr/0006-accounting-per-delivered-output.md) の決定を反映済みです。
 
 ---
 
@@ -19,7 +19,7 @@
 | application saga test | `swift test`（数十秒） | 偽ストアによる各中断点の検証 |
 | adapter integration test | シミュレータ / 実機 | 実 GRDB、実ファイル保護、Vision、Core Image |
 
-**各項目は、検証が成立する最も低い層へ置きます。** 実機での process-death 障害注入は行いません（[書き出し Saga](export-saga.md) の状態を 3〜4 個へ削減したため、状態機械のユニットテストで中断・再起動後の挙動を代替できます。ADR 0005）。
+**各項目は、検証が成立する最も低い層へ置きます。** 中断・再起動後の挙動は状態機械のユニットテストで検証します（[書き出し Saga](export-saga.md) の状態を 3〜4 個へ削減したため。ADR 0005）。
 
 ---
 
@@ -36,25 +36,21 @@
 - `period` が後退しないこと（`current > ledger.period` のときだけ更新される。過去へ戻しても更新されない）
 - 月初に `consumedExportIDs` だけがリセットされ、`trialConsumedExportIDs` は月をまたいで保持されること
 - 消費が件数ではなく `ExportID` の集合で持たれ、同一 `exportID` の再適用を拒否できること
-- **時刻は端末の現在時刻・現在タイムゾーンをそのまま使い、信頼時刻・巻き戻し防止・タイムゾーン前進対策を持たないこと**（ADR 0005。時計操作による前倒し取得は受容する）
-- **台帳が `app.db` の平文行であり、DB 直接改変で無料枠・トライアルを回復できることを受容すること**（ADR 0005）
+- 時刻は端末の現在時刻・現在タイムゾーンをそのまま使うこと（ADR 0005）
+- 台帳が `app.db` の平文行であること（ADR 0005）
 - 残クレジットの導出：`remainingCredits = max(0, policy.trialCreditCount - trialConsumedExportIDs.count)`
 - `BatchPolicySnapshot` を DB から読んだ直後に hard max（50 / 5 / 5 / 1）と最小値へクランプすること
 - `BatchKind` の DB 列値が `proBatch = 1` / `trial = 2` に固定され、`case` の宣言順を変えても既存行の解釈が変わらないこと
 - `kind` を `.trial` から `.proBatch` へ書き換えても `batchSizeLimit` のクランプ先が 50 へ緩むが、`trialConsumedExportIDs`（上限 5）が選択枚数を独立して縛ること
 - `canEnterBatch` が `canUseProBatch || (canUseBatchTrial && remainingCredits > 0)` で決まること
 - `batch-credit`（残クレジット超過）/ `batch-size`（Free・Standard の総数 5 枚超過）/ `batch-limit`（Pro の総数 50 枚超過）の発火条件。`batch-credit` は総枚数上限より残クレジットが少ない場合に `batch-size` より先に発火すること
-- **「新しい写真かどうか」の判定が存在しないこと**（ADR 0006。素材の同一性は問わない。消費済みの写真を無料で再処理できる経路は無い）
-- **確定した成果物ごとに 1 クレジットを消費し、`reissue`（完了前のやり直し）は追加消費しないこと**（1.5 は [書き出し Saga](export-saga.md) の節番号）
+- バッチ選択とクレジット消費の判定が選択枚数と残クレジットのみで行われ、素材の同一性を問わないこと（ADR 0006）
+- 確定した成果物ごとに 1 クレジットを消費し、`reissue`（完了前のやり直し）は追加消費しないこと（1.5 は [書き出し Saga](export-saga.md) の節番号）
 - トライアルクレジットに期限が無いこと。トライアルで解放するのは一括処理という操作方式のみで、エフェクト・スタンプの利用範囲は書き換わらないこと
 - Pro へ加入済みならトライアルクレジットを消費しないこと
 - 顔 0 件の案内が `MonthlyQuotaDecision` で分岐すること（単体処理は仕様 14.2 上も消費対象。一括の顔 0 件は `noFaceDetected` の勘定規則に従う）
 
-### 2.2 素材同一性
-
-**ADR 0006 により廃止。** 勘定の単位は「受け渡した成果物」であり、素材の同一性照合（`providerAssetKeyHash` / `contentFingerprint` / `SourceRecord` の alias 統合）は勘定に使わない。確認用の設定ハッシュと `StampAssetHash` は 2.6 を参照。
-
-### 2.3 レビュー状態とトリアージ（[アーキテクチャ設計](architecture.md) の 6.1 / 6.5）
+### 2.2 レビュー状態とトリアージ（[アーキテクチャ設計](architecture.md) の 6.1 / 6.5）
 
 - `triage`（6 つの要確認理由の各単独・複合、空集合）
 - `triage` の入力が [画像処理](image-pipeline.md) の共通モデル（`DetectionResult`）だけであること。OS 固有の値に依存しないこと
@@ -87,7 +83,7 @@
 - 書き出しの成立条件がモードごとに異なること。1 枚ずつ確認では末尾到達と確認ボタンを求めないこと
 - 確認段階から設定へ戻っても検出結果が保持されること。この経路で写真の選択を変更できないこと
 
-### 2.4 バッチ選択と能力（[アーキテクチャ設計](architecture.md) の 6.2 / 6.5）
+### 2.3 バッチ選択と能力（[アーキテクチャ設計](architecture.md) の 6.2 / 6.5）
 
 - `canEnterBatch` が `canUseProBatch` / `canUseBatchTrial` / 残クレジットから導かれること
 - `canUseProBatch` / `canUseBatchTrial` が能力で判定され、`plan = pro` かつ `status = pending` が通常一括にならないこと
@@ -96,17 +92,17 @@
 - `CapabilityResolution.verificationRequired` で書き出し認可が開始されず、Free 降格の表示も出ないこと
 - `missing` かつオフラインで `verificationRequired` になること
 - `temporarilyUnavailable` かつメモリ上に検証済み `Entitlement` が無い（コールドスタート）とき `verificationRequired` になること。メモリ上に検証済み値があるときは維持されること
-- **署名・鮮度上限・時刻に依存しない前進カウンタを持たず、`Entitlement.expiresAt` 超過のみを失効として扱うこと**（ADR 0005）
+- 失効判定が `Entitlement.expiresAt` の超過のみで行われること（ADR 0005）
 - `canEdit` が能力で判定され、`requiredPlan` の戻り値比較で可否を決めないこと
 - バッチ内の 1 枚を単体編集するとき `canEdit` に従うこと
 - `requiredPlan` が設定内容から導かれ、作成時のプランに依存しないこと
 - Free 範囲のプロジェクトが Free で編集・書き出しできること
 - 降格後の操作可否が 6.2 の表と一致すること
-- 「変更せず再書き出し」の免除条件（確定記録の存在・設定ハッシュの一致・**同一 `Project` であること**・適用範囲は有料スタンプの能力要件のみ）が [書き出し Saga](export-saga.md) の 1.3 と一致すること。**ADR 0006 により素材の同一性は判定条件に含めないこと**
+- 「変更せず再書き出し」の免除条件（確定記録の存在・設定ハッシュの一致・同一 `Project` であること・適用範囲は有料スタンプの能力要件のみ）が [書き出し Saga](export-saga.md) の 1.3 と一致すること
 - 追加スタンプとカスタムスタンプで、降格後の再書き出し可否が同一であること
 - 広告表示頻度の判定（表示禁止条件、初回書き出し、連続表示の抑止）
 
-### 2.5 レンダリング（[画像処理](image-pipeline.md) の 2 / 4）
+### 2.4 レンダリング（[画像処理](image-pipeline.md) の 2 / 4）
 
 - 拡張率適用、`RenderSpec` 生成、`compileRenderDraft`、座標正規化
 - `compileRenderDraft` が `RenderPlan` へ絶対ピクセル値のみを入れ、比率を残さないこと
@@ -140,7 +136,7 @@
 - **`YearMonth` の実型が `Int32` であること。`FaceTrackID` が `UUID` であること**
 - **`RenderedImage` が `RawBitmapDescriptor` を持ち、チャネル順・アルファ・色空間・bit depth が型で決まること**
 
-### 2.6 設定ハッシュと正準化（[アーキテクチャ設計](architecture.md) の 6.2、[正準スキーマ](canonical-schema.md) の 5.2）
+### 2.5 設定ハッシュと正準化（[アーキテクチャ設計](architecture.md) の 6.2、[正準スキーマ](canonical-schema.md) の 5.2）
 
 - 設定ハッシュが `Map` のキー順・**`Double.bitPattern`（64 ビット）**・内容ハッシュ参照で正準化され、DB ID に依存しないこと
 - **`Float` へ丸めた場合に区別できなくなる 2 つの `Double` が、異なる設定ハッシュになること**
@@ -160,25 +156,21 @@
 - **出力へ影響する子行（`FaceTrack` / `EffectSetting` / `ExportSetting` / `ProjectStampAsset`）の変更で、同一トランザクション内に `projectRevision` が増えること**
 - **各ハッシュ（`StampAssetHash` / `ProjectSettingsHash` / `PreviewRenderHash`）について、既知の入力から生成した固定 canonical bytes と出力値をテストへ埋め込むこと**（符号化ロジックの変更を検出する。[正準スキーマ](canonical-schema.md) の 6）
 
-### 2.7 HMAC canonical バイトのゴールデンテスト
-
-**ADR 0005 により廃止。** 設定ハッシュと `StampAssetHash` のゴールデンテストは 2.6 を参照。
-
-### 2.8 更新誘導（[アーキテクチャ設計](architecture.md) の 6.7）
+### 2.6 更新誘導（[アーキテクチャ設計](architecture.md) の 6.7）
 
 - `AppVersion` の比較が数値の組で行われ、`1.10.0 > 1.9.0` になること
-- `CFBundleShortVersionString` のパース失敗で `.none` になり、強制更新へ倒れないこと
+- `CFBundleShortVersionString` のパース失敗で `.none` になること
 - `latestOnStore == nil`（iTunes Lookup API の取得失敗）で `.none` になること
 - `skippedVersion` と一致する `recommendedVersion` を再提示しないこと
 - 前回提示から 24 時間未満なら `.recommended` を返さないこと。判定に `usageNow` を使うこと
 - `recommendedVersion` が上がれば、スキップ済みでも再提示されること
-- **強制更新を持たず、更新誘導が常に任意の推奨であること**（配信手段〈自前バックエンド〉を持たないため。ADR 0005）
+- 更新誘導が常に任意の推奨であること（配信元は iTunes Lookup API のみ。ADR 0005）
 
-### 2.9 その他
+### 2.7 その他
 
 - ストレージ必要量計算、`ExportQueueState` 状態機械
 - 履歴の保存期間と容量判定。24 時間のやり直し保証が容量超過時にも守られること
-- `canDeleteHistoryUnit` が列挙された全参照元を見ること（[アーキテクチャ設計](architecture.md) の 7.5。Saga 経由でも同一判定になることは 3.7 参照）
+- `canDeleteHistoryUnit` が列挙された全参照元を見ること（[アーキテクチャ設計](architecture.md) の 7.5。Saga 経由でも同一判定になることは 3.4 参照）
 - **絶対保護（非終端キュー項目 / `running` の `ExportJob` / `isUndelivered` の `OutputRecord`）が、手動削除でも拒否されること**
 - **お気に入り・編集中・`WorkingSourceRecord`・24 時間保証が、自動削除では保護され、明示確認付きの手動削除では上書きできること**
 - **上書き対象ごとに、失われるものを示す確認文言が選ばれること**
@@ -211,27 +203,19 @@
 - **手順 4 完了後、出力確認画面での「やり直す」が `deleteJob` ではなく `markDiscarded` で `OutputRecord` を `discarded` へ遷移させ、台帳を変更しないこと**（ADR 0006）。次の書き出しが `reissue` として追加消費なしで行えること
 - **明示的な完了操作（`markSettled`）を経たあとは前進のみで取り消せないこと**。完了後の破棄は新規消費になること
 
-### 3.1.1 v1 で追加した中断点
-
-**ADR 0005 により廃止。** 旧 7 状態・12 手順・`rollingBack` / `published` を前提にした中断点固有のテストは、`ExportJob`（2 状態・手順 0〜4）への簡素化にともない消滅した。中断時の後始末は 3.1 に統合されている。
-
 ### 3.2 認可とゲート（[書き出し Saga](export-saga.md) の 1 章）
 
 - 認可が 1.1（確認の一致）→ 1.2（`triage` 再導出）→ 1.3（設定内容の能力）→ 1.4（権限とクォータ）の順に検査され、いずれか不成立なら開始しないこと
 - 単体の開始条件が現在の `projectID` / `detectionRevision` / `previewRenderHash` の一致であること。バッチはこれに加え `BatchReviewState.batchID` の一致とモード別の確認条件を満たすこと
 - 確認の再導出が保存済み `reviewed` を根拠にせず、`FaceTrack` から `triage` を再実行して `ReviewDecision` の完全性を再検査すること
-- `WorkingSourceRecord` の実体（ファイルの存在）を確認すること。無ければ無効化して再選択導線へ倒すこと。**同一性照合は行わないこと**（ADR 0006）
+- `WorkingSourceRecord` の実体（ファイルの存在）だけを確認すること。無ければ無効化して再選択導線へ倒すこと
 - 権限とクォータの評価で `.blocked` なら `ExportJob` を作らず、生成も開始しないこと
 - **`reissue` の成立条件が、同一 `projectID` の直近 `OutputRecord` が `state == discarded` かつ `settledAt == nil` であること**（回数・時間の制限は無い）。`settledAt` が確定した後に `discarded` になった行は根拠にならず新規消費になること
 - 開始後に契約の失効・月間上限への到達が起きても、その書き出しは開始時の権限（`ExportJob.authorization`）で完了すること。`running` の写真は完了し、`waiting` の写真は開始しないこと
-- **直列実行キュー1本（並列数1）が同時実行を構造的に防ぎ、専用の排他ゲートや素材単位のロックが不要であること**（ADR 0005）
+- **直列実行キュー1本（並列数1）が、同時に `running` になる `ExportJob` を 1 件までに保つこと**（ADR 0005）
 - `startExport` が `expectedProjectRevision` つきで `ExportJob(running)` を挿入し、revision が変わっていれば失敗すること
 
-### 3.3 署名不正コミット
-
-**ADR 0005 により廃止。** 台帳が `app.db` の平文行になり、コミット行の署名という概念自体が無くなった。
-
-### 3.4 確定後の実体喪失（[書き出し Saga](export-saga.md) の 7 章）
+### 3.3 確定後の実体喪失（[書き出し Saga](export-saga.md) の 7 章）
 
 - 実体が無い、または `outputByteSize` / `outputSHA256` と一致しないとき、`OutputRecord` を `discarded` へ遷移させること（物理削除しない）
 - **`UsageLedger` を変更しないこと**（月間枠・トライアルクレジットのいずれも戻さない）
@@ -239,15 +223,7 @@
 - **`settledAt` が確定済み（完了後）に失った場合、新規消費でやり直すこと。`reissue` は成立しないこと**
 - 自動再生成を行わないこと。利用者へは新しい書き出しとして案内すること
 
-### 3.5 トライアル予約
-
-**ADR 0006 により廃止。** 予約は持たない。クレジットは書き出しの確定（手順 4）で計上され、直列キュー1本のため認可の競合が構造的に起きない。
-
-### 3.6 保護ストアの読み込み失敗
-
-**ADR 0005 により廃止。** 台帳・購入状態は `app.db` の平文行であり、読み込み結果は他の `app.db` テーブルと同じくアプリ全体の障害として扱う（[アーキテクチャ設計](architecture.md) の 7.2）。
-
-### 3.7 出力の寿命と履歴（[アーキテクチャ設計](architecture.md) の 7.5）
+### 3.4 出力の寿命と履歴（[アーキテクチャ設計](architecture.md) の 7.5）
 
 - `OutputRecord` が `ExportJob` の状態と独立に期限判定できること
 - 未受け渡しの出力が破棄または 24 時間経過まで保持されること
@@ -273,13 +249,13 @@
 - **`ProjectSourceSnapshot` が、書き出しの完了でも処理用ファイルの 24 時間期限でも削除されないこと**（`Project` の削除でのみ削除される）
 - `WorkingSourceRecord` の有無で `replaceWorkingSource` と `attachWorkingSourceToExistingProject` が選ばれること
 - **24 時間経過して `paused(.sourceReselectionRequired)` になったあとも、再選択（実体の存在確認）が成立すること**
-- **履歴の既存 `Project` へ `attachWorkingSourceToExistingProject` で再接続できること。選び直された写真は常に新しい素材として扱われ、既存素材との同一性判定は行わないこと**（ADR 0006）
+- **履歴の既存 `Project` へ `attachWorkingSourceToExistingProject` で再接続できること。選び直された写真は常に新しい素材として扱われること**（ADR 0006）
 - **再接続が `detectionRevision` / `projectRevision` を増やし、検出結果を再利用しないこと**
 - **再選択が顔検出をやり直し、`detectionRevision` と `projectRevision` を増やし、旧 `FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` を破棄すること**
 - **`PreviewConfirmation` が DB に存在せず、`detectionRevision` の増加だけで確認が無効になること**
 - **`isTerminal` が `completed` / `failed` / `canceled` のみ真であり、履歴削除の保護と完了判定が同じ述語を使うこと**
 
-### 3.8 更新誘導との順序（[アーキテクチャ設計](architecture.md) の 6.7）
+### 3.5 更新誘導との順序（[アーキテクチャ設計](architecture.md) の 6.7）
 
 - 更新判定が起動時復旧の完了後に実行されること
 - `.recommended` が編集中・書き出し中・未受け渡し出力があるときに表示されないこと
@@ -307,11 +283,7 @@
 - **`journal_mode` が `DELETE` であり、`TRUNCATE` / `PERSIST` / `WAL` なら復旧エラーになること**
 - `PRAGMA foreign_key_check` が起動時に実行され、違反があれば復旧エラーになること
 
-### 4.3 署名と鍵
-
-**ADR 0005 により廃止。** HKDF 鍵導出・HMAC 署名を持たない。台帳・購入状態キャッシュは `app.db` の平文行として保存する（[アーキテクチャ設計](architecture.md) の 7.2）。
-
-### 4.4 ファイル管理と保護（[アーキテクチャ設計](architecture.md) の 7.3 / 7.4）
+### 4.3 ファイル管理と保護（[アーキテクチャ設計](architecture.md) の 7.3 / 7.4）
 
 - `ManagedFileStore` が保存のたびに `isExcludedFromBackup` と `FileProtectionType` を設定し、読み返して検証すること
 - 属性の検証に失敗したファイルが完成扱いにならないこと
@@ -332,7 +304,7 @@
 - **検出用の縮小画像がメモリ内で完結し、`ManagedFileStore` へ書かれず DB へも登録されないこと**
 - **DB 登録の完了前に、選択処理の成功が呼び出し元へ返らないこと**
 
-### 4.5 メタデータ（[アーキテクチャ設計](architecture.md) の 7.5）
+### 4.4 メタデータ（[アーキテクチャ設計](architecture.md) の 7.5）
 
 - **読み取り権限あり** — 保存後に `PHAsset.creationDate` を読み戻し、元画像の登録日時と一致すること
 - **読み取り権限なし** — 偽 `PHAssetCreationRequest` または adapter spy で、**EXIF の日時が渡されたこと、または `creationDate` が設定されなかったこと**を検証する。`PHAsset` を取得しにいかないこと
@@ -340,7 +312,7 @@
 - **`OffsetTimeOriginal` があり `SubSecTimeOriginal` が無い場合、秒精度で `utcMillis` が算出されること**
 - 出力ファイルから位置情報・機器情報・編集ソフト情報が除去されていること
 
-### 4.6 Vision と Core Image（[画像処理](image-pipeline.md) の 1 / 4）
+### 4.5 Vision と Core Image（[画像処理](image-pipeline.md) の 1 / 4）
 
 - Vision の左下原点座標が左上原点へ変換されること。**角度が非 Optional の `Measurement<UnitAngle>` から度へ変換され、符号の向きが [画像処理](image-pipeline.md) の 4 章と一致すること**
 - `FaceObservation.confidence` の分布が 1.0 に張り付いていないこと（[画像処理](image-pipeline.md) の 1 の受入条件）
@@ -354,7 +326,7 @@
 - `CIAffineClamp` を経ることで、画像端の顔のぼかしが薄くならないこと
 - `extent` の原点が `(0, 0)` でない `CIImage` でも座標がずれないこと
 
-### 4.7 スタンプラスタライズ（[画像処理](image-pipeline.md) の 3）
+### 4.6 スタンプラスタライズ（[画像処理](image-pipeline.md) の 3）
 
 - `plan` が参照する `bitmapID` が `rasterAssets` に無い場合、描画を開始せずエラーになること
 - 同一 `StampRasterKey` のラスタライズが 1 回で済み、複数領域から再利用されること。**`rasterize(_ keys:)` が与えた全 key に対応する値を返すこと**
@@ -363,7 +335,7 @@
 - ラスタファイルの行末パディングがゼロ初期化されていること
 - premultiplied から straight への変換が保存前に行われていること
 
-### 4.8 Core Image 出力のゴールデン画像テスト（[画像処理](image-pipeline.md) の 2 / 4）
+### 4.7 Core Image 出力のゴールデン画像テスト（[画像処理](image-pipeline.md) の 2 / 4）
 
 **同じ `RenderSpec` から生成したプレビュー用と原寸用の出力が一致すること。** `sourceCrop` / `scaleMode` / `background` を適用した結果が設定と一致すること。
 
@@ -377,20 +349,14 @@
 
 上下の非対称性は、中央に顔がある素材では差が出ない Y 軸反転の誤りを最も検出しやすい形です。
 
-### 4.9 受け渡しと診断（[書き出し Saga](export-saga.md) の 8 章）
+### 4.8 受け渡しと診断（[書き出し Saga](export-saga.md) の 7 章）
 
 - `SharePresenter` が `UIActivityViewController` の結果を 4 値へ正しく写像すること
 - `CrashReporter` が例外メッセージ・パス・URL を除去し、breadcrumbs を列挙済みイベントに限定すること
 
 ---
 
-## 5. process-death fault injection test
-
-**ADR 0005 により廃止。** [書き出し Saga](export-saga.md) の状態を 3〜4 個へ削減したため、状態機械のユニットテスト（3 章）で中断・再起動後の挙動を代替する。実機での process-death 障害注入は行わない。
-
----
-
-## 6. 検出品質の回帰監視
+## 5. 検出品質の回帰監視
 
 仕様 30.2 の検出条件（正面、横顔、斜め、部分的な遮蔽、マスク、サングラス、暗所、逆光、遠景、集合写真、子ども、高齢者、異なる肌色、イラストの顔、鏡像、写真内の写真）は、**合否判定ではなく検出率の回帰監視**として計測します。
 
@@ -414,7 +380,7 @@
 
 ---
 
-## 7. プライバシーの受入テスト
+## 6. プライバシーの受入テスト
 
 - 履歴一覧とサムネイルに未加工の顔が現れないこと
 - タスクスイッチャのスナップショットに編集中の未加工画面が残らないこと
@@ -425,7 +391,7 @@
 
 ---
 
-## 8. アクセシビリティ
+## 7. アクセシビリティ
 
 仕様 29 章を受入条件とします。SwiftUI の `Canvas` は既定でアクセシビリティ要素を持たないため、`accessibilityLabel` / `accessibilityValue` / `accessibilityRepresentation` の明示的な付与が必須です。
 
@@ -438,6 +404,6 @@
 
 ---
 
-## 9. 実機マトリクス
+## 8. 実機マトリクス
 
 仕様 30.8 に従います。

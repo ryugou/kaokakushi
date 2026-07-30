@@ -7,7 +7,7 @@
 | 正本の範囲 | 更新誘導の運用規則、設定値の変更手段、Sentry の運用 |
 | 関連 | [アーキテクチャ設計](architecture.md)（`UpdateDecision` の判定、設定定数）、[ADR 0005](adr/0005-drop-tamper-resistance-backend-and-heavy-fault-tolerance.md) |
 
-v1 は自前バックエンドを持ちません（[ADR 0005](adr/0005-drop-tamper-resistance-backend-and-heavy-fault-tolerance.md)）。サーバの監視・保守・配信作業は存在しません。
+v1 はサーバレス構成です（[ADR 0005](adr/0005-drop-tamper-resistance-backend-and-heavy-fault-tolerance.md)）。運用担当が行うのは、アプリ更新の誘導と Sentry の監視だけです。
 
 ---
 
@@ -16,7 +16,7 @@ v1 は自前バックエンドを持ちません（[ADR 0005](adr/0005-drop-tamp
 判定そのもの（`evaluateUpdate` と `UpdateDecision`）は [アーキテクチャ設計](architecture.md) が正本です。
 
 - バージョン情報は iTunes Lookup API（`https://itunes.apple.com/lookup?id=<appStoreID>`）で取得します。CDN キャッシュにより公開直後は古いバージョンが返ることがあり、誘導の開始が数時間遅れることは受容します
-- 強制更新は持ちません。誘導は常に任意の推奨です
+- 誘導は常に任意の推奨です
 - 提示条件: ホーム画面または履歴画面の表示時のみ。検出中・顔選択中・編集中・書き出し中・書き出しエラー対応中・課金処理中は表示しません。`isUndelivered` の未受け渡し出力があるときも表示しません
 - 「後で」を選んだバージョンを `skippedVersion` として記録し、より新しいバージョンが出たら再提示します。チェックの契機は起動時とフォアグラウンド復帰時です
 - App Store は `openURL` で `https://apps.apple.com/app/id<appStoreID>` を開きます。`itms-apps://` スキームと `SKOverlay` は使いません
@@ -25,7 +25,7 @@ v1 は自前バックエンドを持ちません（[ADR 0005](adr/0005-drop-tamp
 
 ## 2. 設定値の変更
 
-リモート設定は持ちません。閾値・上限（無料枠、バッチ上限、トリアージ閾値など）はバンドル内定数であり、変更はアプリ更新で行います。定数の一覧は [アーキテクチャ設計](architecture.md) の 10 章が正本です。
+閾値・上限（無料枠、バッチ上限、トリアージ閾値など）はバンドル内定数であり、変更はアプリ更新で行います。定数の一覧は [アーキテクチャ設計](architecture.md) の 10 章が正本です。
 
 ---
 

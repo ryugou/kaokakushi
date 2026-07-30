@@ -7,7 +7,7 @@
 | 正本の範囲 | サブプロジェクトの粒度、依存、モジュール割り当て |
 | 関連 | [アーキテクチャ設計](architecture.md)、[テスト計画](test-plan.md)、[ADR 0005](adr/0005-drop-tamper-resistance-backend-and-heavy-fault-tolerance.md)（サーバレス化）、[ADR 0006](adr/0006-accounting-per-delivered-output.md)（勘定の単位） |
 
-各サブプロジェクトは個別に spec → plan → 実装のサイクルを回します。バックエンドは存在しません（ADR 0005）。
+各サブプロジェクトは個別に spec → plan → 実装のサイクルを回します。実装対象はすべてクライアント側です（ADR 0005）。
 
 ---
 
