@@ -908,7 +908,7 @@ defer {
 struct WorkingSourceRecord: Sendable {
     let projectID: ProjectID
     let sourceFile: WorkingSourceFileRef
-    let createdAt: Date               // 保持期限の起点（下記）
+    let createdAt: Date               // 作成・最終置換時刻
 }
 ```
 
@@ -916,7 +916,7 @@ struct WorkingSourceRecord: Sendable {
 | --- | --- |
 | 保存先 | `app.db`。実体は `working/` |
 | 参照 | キュー項目・編集中プロジェクトの元素材 |
-| 削除 | 書き出し完了時またはプロジェクト破棄時に `PendingFileDeletion` へ |
+| 削除 | **完了操作（settle）時**またはプロジェクト破棄時に `PendingFileDeletion` へ |
 | 起動時 | どのプロジェクトからも参照されない行を回収し、実体も削除する |
 | 実体が欠けている | そのキュー項目を **`paused(.sourceReselectionRequired)`** へ遷移させる。エラーで止めない |
 
@@ -928,14 +928,10 @@ struct WorkingSourceRecord: Sendable {
 
 1. `PickedPhotoInput.importedFile` の所有権を受け取り、EXIF を読む
 2. 向きを正規化した原寸ファイルを作成し `working/` へ書き込む
-3. 単一 DB トランザクションで `ProjectSourceSnapshot`・`Project`・キュー項目・`WorkingSourceRecord`（正規化ファイルを指す）を作成する
+3. 単一 DB トランザクションで `Project`（撮影メタデータ・再編集用参照を含む）・キュー項目・`WorkingSourceRecord`（正規化ファイルを指す）を作成する
 4. 取り込みファイルを削除する（削除に失敗したら `PendingFileDeletion` へ積む）
 
-**手順 3 が失敗した場合、作成済みのファイル（取り込み・正規化の両方）を `PendingFileDeletion` へ積み、起動時の孤児 GC に委ねます。**
-
-##### 素材スナップショットを保存する
-
-**`ProjectSourceSnapshot` は `app.db` へ平文で保存します。** 再編集用の参照（`ProjectSourceLocator`）と撮影メタデータ（`OriginalCaptureMetadata`）だけを持ちます。インポート Saga の手順 3 で `Project` 作成と同じトランザクションで保存し、`Project` の削除でのみ削除します。
+**手順 3 が失敗した場合、作成済みのファイル（取り込み・正規化の両方）を `PendingFileDeletion` へ積み、起動時の孤児 GC に委ねます。** 撮影メタデータ（`OriginalCaptureMetadata`）と再編集用の参照（`ProjectSourceLocator`）は別エンティティを持たず、`Project` 自身のフィールドとして保存します。`Project` の削除でのみ消えます。
 
 ##### 検出用の縮小画像の寿命
 
@@ -956,7 +952,7 @@ struct WorkingSourceRecord: Sendable {
 **`paused(.sourceReselectionRequired)` と履歴からの再編集は、どちらも「素材を選び直して既存 `Project` へ結び直す」操作です。** 通常のインポート Saga は新しい `Project` を作るため、既存 `Project` への結び付けにはそのまま使えません。**選び直された写真は常に新しい素材として扱います。**
 
 1. 向きを正規化した原寸ファイルを作成し、EXIF を読む
-2. 単一 DB トランザクションで、`WorkingSourceRecord` の置換または新規作成、`ProjectSourceSnapshot` の更新、`FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` の破棄、`detectionRevision` / `projectRevision` の増加を行う
+2. 単一 DB トランザクションで、`WorkingSourceRecord` の置換または新規作成、`Project` の撮影メタデータ・再編集用参照の更新、`FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` の破棄、`detectionRevision` / `projectRevision` の増加を行う
 3. 置換された旧 `sourceFile` を削除する（失敗したら `PendingFileDeletion` へ積む）
 
 手順 2 は `WorkingSourceRecord` の有無で分岐します。
@@ -964,13 +960,13 @@ struct WorkingSourceRecord: Sendable {
 | 現在の状態 | 呼ぶメソッド |
 | --- | --- |
 | `WorkingSourceRecord` **あり**（実体が欠損している場合を含む） | `replaceWorkingSource`（`sourceFile` を置換し `createdAt` を `replacedAt` へ更新） |
-| `WorkingSourceRecord` **なし**（24 時間で削除済み・履歴から開いた） | `attachWorkingSourceToExistingProject`（行を新規作成し `createdAt` は `attachedAt`） |
+| `WorkingSourceRecord` **なし**（完了操作で削除済み・履歴から開いた） | `attachWorkingSourceToExistingProject`（行を新規作成し `createdAt` は `attachedAt`） |
 
-完了後に顔検出をやり直し、新しい確認が完了するまで書き出しできません。**`PreviewConfirmation` は DB に無くセッション内の値のため**（[正準スキーマ](canonical-schema.md) の 5.2）、`detectionRevision` が増えた時点で不一致になり、破棄操作自体が不要です。
+再選択後は顔検出をやり直し、新しい確認が完了するまで書き出しできません。**`PreviewConfirmation` は DB に無くセッション内の値のため**（[正準スキーマ](canonical-schema.md) の 5.2）、`detectionRevision` が増えた時点で不一致になり、破棄操作自体が不要です。
 
 ##### 実装の所在
 
-**インポート・再選択・再接続・複製の 4 つの Saga は `Application` の `SourceImportCoordinator` が所有します。** いずれもファイルシステムと DB を協調させるため、`App` の境界サービスにも `Domain` にも置けません（[アーキテクチャ設計](architecture.md) の 4.3）。**更新はすべて単一の DB トランザクションに閉じ、`createdAt` は保持期限の起点のため置換・再接続のたびに更新します。**
+**インポート・再選択・再接続・複製の 4 つの Saga は `Application` の `SourceImportCoordinator` が所有します。** いずれもファイルシステムと DB を協調させるため、`App` の境界サービスにも `Domain` にも置けません（[アーキテクチャ設計](architecture.md) の 4.3）。**更新はすべて単一の DB トランザクションに閉じます。** `createdAt` は置換・再接続のたびに更新します。
 
 ```swift
 // Domain — 永続化ポート
@@ -986,7 +982,7 @@ protocol WorkingSourceStore: Sendable {
         _ input: AttachWorkingSourceInput
     ) async throws
 
-    /// 保持期限での破棄
+    /// 完了操作（settle）またはプロジェクト破棄時の破棄
     func deleteWorkingSource(_ projectID: ProjectID) async throws
 }
 ```
@@ -1002,6 +998,9 @@ struct CreateWorkingSourceInput: Sendable {
     let sourceFile: WorkingSourceFileRef      // 向き正規化済みの原寸
     let createdAt: Date
     let sourceLocator: ProjectSourceLocator
+    let capture: OriginalCaptureMetadata      // EXIF 由来（正準スキーマ 5.1.1）。Project へ保存する
+    let libraryCreationDate: Date?            // Project へ保存する
+    let representation: SourceRepresentation  // Project へ保存する（6.4）
     let initialSpec: RenderSpec
 }
 
@@ -1009,6 +1008,9 @@ struct ReplaceWorkingSourceInput: Sendable {
     let projectID: ProjectID
     let newSourceFile: WorkingSourceFileRef
     let replacedAt: Date       // createdAt もこの値へ更新する
+    let capture: OriginalCaptureMetadata       // Project の値を新しい素材のもので置き換える
+    let libraryCreationDate: Date?
+    let representation: SourceRepresentation
     // 旧ファイルは DB トランザクション内で読む。呼び出し側から渡さない
 }
 
@@ -1016,6 +1018,9 @@ struct AttachWorkingSourceInput: Sendable {
     let projectID: ProjectID
     let sourceFile: WorkingSourceFileRef
     let attachedAt: Date
+    let capture: OriginalCaptureMetadata
+    let libraryCreationDate: Date?
+    let representation: SourceRepresentation
 }
 ```
 
@@ -1029,19 +1034,15 @@ struct AttachWorkingSourceInput: Sendable {
 
 ##### 未完了作業の保持期限
 
-**`createdAt` を期限判定に使います。** 書き出しも破棄もされないプロジェクトを放置すると、未加工の顔画像が無期限に残るためです。
+**`WorkingSourceRecord` は時間経過では削除しません。** 完了操作（settle）またはプロジェクト破棄でのみ削除します。生成後・完了前のやり直しはこの `WorkingSourceRecord` を使って再レンダリングするため、削除せずに保持することが完了前やり直しの成立条件です。
 
 | 項目 | 規約 |
 | --- | --- |
-| 保持期限 | `createdAt` から **24 時間** |
-| 判定に使う時刻 | `retentionNow`。`nil` の間は削除しない（[アーキテクチャ設計](architecture.md) の 6.3） |
-| 期限到達時 | **DB トランザクションで `WorkingSourceRecord` を削除**し、実体を `PendingFileDeletion` へ積む |
-| キュー項目 | `paused(.sourceReselectionRequired)` へ遷移させる |
+| 削除の契機 | **完了操作（settle）** または **プロジェクト破棄** |
 | `Project` | **削除しない。** 設定と検出結果は履歴の保存期間に従う |
-| `ProjectSourceSnapshot` | **削除しない。** 再編集用の参照とメタデータとして必要 |
-| 判定の契機 | 起動時の孤児 GC と同じタイミング |
+| 判定の契機 | 起動時の孤児 GC で、どのプロジェクトからも参照されない行を回収する |
 
-期限で消すのは実体だけです。24 時間は未受け渡し出力の保持期間と揃え、利用者から見た「作業を再開できる窓」を 1 つにします。`Project` を残すのは設定と検出結果が未加工画像を含まないためです。
+**24 時間の保持規則は、完了済みで未受け渡しの出力にのみ適用します（正本は [書き出し Saga](export-saga.md)）。** `WorkingSourceRecord`（未加工の顔画像）自体には時間経過による保持期限を設けません。
 
 ##### 写真ライブラリの読み取り権限
 
@@ -1058,7 +1059,7 @@ struct AttachWorkingSourceInput: Sendable {
 
 | 用途 | 取得元 |
 | --- | --- |
-| `ProjectSourceSnapshot.capture`（`OriginalCaptureMetadata`） | **EXIF のみ**（[正準スキーマ](canonical-schema.md) の 5.1.1）。無ければ各フィールドが `nil` |
+| `Project` が保持する撮影メタデータ（`OriginalCaptureMetadata`） | **EXIF のみ**（[正準スキーマ](canonical-schema.md) の 5.1.1）。無ければ各フィールドが `nil` |
 | 出力 EXIF への書き戻し（[アーキテクチャ設計](architecture.md) の 7.5） | 同上。ローカル表記のまま往復させる |
 | 写真ライブラリ保存時の `creationDate` | `PHAsset.creationDate`（権限がある場合のみ）→ EXIF → 設定しない |
 
