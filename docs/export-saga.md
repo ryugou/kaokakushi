@@ -33,6 +33,7 @@ protocol ExportSagaStore: Sendable {
 
 /// 受け渡し（8 章）。ExportSagaStore とは寿命が異なるため分ける
 protocol OutputDeliveryStore: Sendable {
+    /// previousState を記録し、settledAt が nil なら同一トランザクションで現在時刻を設定する（ADR 0006）
     func beginDeliveryAttempt(_ exportID: ExportID) async throws
     /// delivered への更新と attempt 削除を単一トランザクションで
     func completeLibrarySave(_ exportID: ExportID) async throws
@@ -44,6 +45,8 @@ protocol OutputDeliveryStore: Sendable {
     func loadUnknownLibrarySaves() async throws -> [UnknownLibrarySave]
     func clearUnknownLibrarySave(_ exportID: ExportID) async throws
     func markDiscarded(_ exportID: ExportID) async throws
+    /// 共有の開始時に呼ぶ。settledAt が nil なら現在時刻を設定する。一度設定したら変更しない（ADR 0006）
+    func markSettled(_ exportID: ExportID) async throws
 }
 
 struct ExportQueueItemID: Sendable, Hashable { let rawValue: UUID }
@@ -156,7 +159,7 @@ enum StampRequirement: Sendable, Hashable {
 | --- | --- |
 | 確定記録の存在 | `exportedSettingsEntries` に当該 `projectID` の項目がある |
 | 設定の一致 | その項目の `settingsHash` が、いま組み立てた `RenderSpec` と `ExportSetting` から計算した値と一致する |
-| 素材の一致 | `ProjectSourceSnapshot.identity` が現在の素材と同じ alias 連結成分へ解決される |
+| 対象 | 同一 `Project` であること（ADR 0006。素材の同一性は照合しない） |
 | 適用範囲 | 有料スタンプの能力要件のみ。クォータは免除しない |
 
 確定記録は手順 4（finalize）で直接書き込む。中間状態を経ないため、以前あった「未確定の記録を根拠にしてしまう」経路は存在しない。
@@ -164,15 +167,10 @@ enum StampRequirement: Sendable, Hashable {
 ### 1.4 権限とクォータ
 
 ```swift
-struct AuthorizedGrant: Sendable {
-    let sourceID: SourceID
-    let firstSuccessAt: Date       // 認可時に有効だった grant の開始時刻
-}
 struct ExportAuthorization: Sendable {
     let entitlementSnapshot: Entitlement
     let accountingMode: ExportAccountingMode
     let authorizedAt: Date
-    let authorizedGrant: AuthorizedGrant?   // freeMonthlyReexport のとき必須
 }
 enum ExportStartBlockReason: Sendable, Equatable {
     case monthlyLimitReached, trialCreditsUnavailable
@@ -182,9 +180,11 @@ struct ExportStartBlock: Sendable, Equatable {
     let reason: ExportStartBlockReason
     let limit: Int?
 }
+/// ADR 0006: 勘定の単位は「受け渡した成果物」。素材の同一性は使わない
 enum ExportAccountingMode: Sendable, Equatable {
-    case paidUnlimited, freeMonthlyConsume, freeMonthlyReexport
+    case paidUnlimited, freeMonthlyConsume
     case batchTrial(consumesTrialCredit: Bool)
+    case reissue   // 1.5 参照。追加消費なし
 }
 ```
 
@@ -192,28 +192,19 @@ enum ExportAccountingMode: Sendable, Equatable {
 
 ### 1.5 勘定の使い分け
 
-| 勘定 | 月間枠 | トライアル台帳 | grant |
-| --- | --- | --- | --- |
-| `paidUnlimited` | 使わない | 使わない | ensure |
-| `freeMonthlyConsume` | 1 消費 | 使わない | ensure |
-| `freeMonthlyReexport` | 使わない | 使わない | preserve |
-| `batchTrial(true)` | 使わない | 1 消費 | ensure |
-| `batchTrial(false)` | 使わない | 使わない | ensure |
+枠が数える単位は「受け渡した成果物」であり、素材の同一性は勘定に使わない（ADR 0006）。利用者がその出力の保存または共有へ**最初に進んだ時点**（`OutputRecord.settledAt` が確定する時点。8 章）で「完了」となり、枠が確定する。
+
+| 勘定 | 月間枠 | トライアル台帳 |
+| --- | --- | --- |
+| `paidUnlimited` | 使わない | 使わない |
+| `freeMonthlyConsume` | 1 消費 | 使わない |
+| `batchTrial(true)` | 使わない | 1 消費 |
+| `batchTrial(false)` | 使わない | 使わない |
+| `reissue` | 使わない | 使わない |
 
 月間クォータを使うのは Free の単体処理だけ（Free 利用者が月 5 枚を使い切っていても、クレジットが残っていれば一括トライアルを実行できる）。
 
-```swift
-enum GrantAction: Sendable, Equatable {
-    /// 有効な grant がなければ firstSuccessAt で新規作成してよい
-    case ensure(sourceID: SourceID, firstSuccessAt: Date)
-    /// 認可時の grant を維持するだけ。新規作成は禁止
-    case preserveAuthorized(sourceID: SourceID, firstSuccessAt: Date)
-}
-```
-
-**ensure**（`paidUnlimited` / `freeMonthlyConsume` / `batchTrial` の両方）：有効な grant が存在すれば `firstSuccessAt` を維持し、無ければ finalize 時刻を `firstSuccessAt` とする新しい grant を作る。
-
-**preserve**（`freeMonthlyReexport`）：認可時に保存した `authorizedGrant.firstSuccessAt` をそのまま維持し、finalize 時点で新しい `firstSuccessAt` を作らない（ensure を使うと、無料の再書き出しを繰り返すだけで窓を無期限に更新できてしまう）。認可時の grant が finalize までに期限切れなら、再登録せずそのまま落とす（その 1 回は完了させるが、次回の再書き出し権は与えない）。
+**`reissue` の成立条件**: 同一 `Project` の直近の `OutputRecord` が、完了する前（`settledAt == nil`）に破棄（8 章の `markDiscarded`）または実体喪失（7 章）でやり直しになっており、その差し替えとして書き出す場合。回数・時間の制限は無い。完了後（`settledAt` が確定した後）に同じ素材・同じ設定で書き出しても新規消費であり、`reissue` は成立しない。
 
 ### 1.6 開始後の権限変化
 
@@ -226,8 +217,8 @@ enum GrantAction: Sendable, Equatable {
 1. 確認の一致を検査する（1.1）。不一致なら終える
 2. `triage` を再実行し確認の成立を再導出する（1.2）。不成立なら終える
 3. 設定内容の能力を検査する（1.3）。`blocked` なら終える
-4. `WorkingSourceRecord` の実体（ファイルの存在）を確認する（[画像処理](image-pipeline.md)）。無ければ無効化して再選択導線へ倒し、終える
-5. alias を解決して `sourceID` を確定し、権限とクォータを評価する（1.4）。`.blocked` ならここで終える
+4. `WorkingSourceRecord` の実体（ファイルの存在）を確認する（[画像処理](image-pipeline.md)）。無ければ無効化して再選択導線へ倒し、終える。`sourceID` はこの記録の参照をそのまま使う（素材の同一性照合は行わない。ADR 0006）
+5. 権限とクォータを評価する（1.4）。`.blocked` ならここで終える
 6. `startExport` で `ExportJob(running)` を挿入する（`expectedProjectRevision` つき）。revision が変わっていれば失敗し、終える
 7. 処理を開始する（3 章）
 
@@ -267,7 +258,7 @@ struct OutputDeliveryDescriptor: Sendable {
 | 1 | レンダリングし、一時ファイルへ出力する | ファイルシステム | — |
 | 2 | 一時ファイルを出力ディレクトリへ移動する | ファイルシステム | — |
 | 3 | 出力ファイルの健全性を確認する（下記） | ファイルシステム | — |
-| 4 | **単一トランザクション**。台帳の加算または grant / トライアルクレジットの消費、`ExportRecord` と `OutputRecord(generated)` の作成、キュー項目の `completed` 更新、`Project` の最終更新時刻の更新、`WorkingSourceRecord` の削除、confirmed 設定エントリの記録を行う。ここが唯一の確定境界 | DB | `completed` |
+| 4 | **単一トランザクション**。`ExportJob.authorization.accountingMode` に従って台帳を加算またはトライアルクレジットを消費（`reissue` なら何もしない）、`ExportRecord` と `OutputRecord(generated)` の作成、キュー項目の `completed` 更新、`Project` の最終更新時刻の更新、`WorkingSourceRecord` の削除、confirmed 設定エントリの記録を行う。ここが唯一の確定境界 | DB | `completed` |
 
 ```
 running → （レンダリング・ファイル移動・健全性確認。DB 上の状態変化なし）→ 手順 4（単一トランザクション）→ completed
@@ -299,6 +290,7 @@ struct OutputRecord: Sendable {
     let state: OutputState
     let generatedAt: Date
     let expiresAt: Date              // generatedAt + 24h
+    let settledAt: Date?             // finalize 時は nil。8 章で確定する（ADR 0006）
     let format: ImageFormat
     let suggestedCreationDate: Date?
 }
@@ -330,7 +322,7 @@ struct OutputRecord: Sendable {
 | 手順 3 の健全性確認が不成立 | 同上 |
 | プロセスの異常終了 | 起動時復旧が `running` の行を削除する（5 章） |
 
-会計要素（月間枠・grant・トライアル）はまだ何も書き込まれていないため、返還処理は不要。`deleteJob` は冪等（行が無ければ何もしない）。
+会計要素（月間枠・トライアル）はまだ何も書き込まれていないため、返還処理は不要。`deleteJob` は冪等（行が無ければ何もしない）。
 
 手順 4 が完了した後は前進のみで取り消せない（成果物は公開済みで正常生成が確定している）。UI 上も、手順 4 完了後はキャンセルを提示しない。受け取り後の破棄は 8 章の扱いに従う。
 
@@ -358,11 +350,12 @@ struct OutputRecord: Sendable {
 | 状況 | 扱い |
 | --- | --- |
 | 実体が無い、または `outputByteSize` / `outputSHA256` と一致しない | `OutputRecord` を削除する（[アーキテクチャ設計](architecture.md) の 7.5 の削除経路） |
-| 台帳 | 変更しない。月間枠・grant・トライアルクレジットのいずれも戻さない |
+| 台帳 | 変更しない。月間枠・トライアルクレジットのいずれも戻さない |
 | 利用者への提示 | 出力を復元できないこと、および新しい書き出しになることを示す |
-| 24 時間以内の同一素材 | grant により `freeMonthlyReexport` が成立するため、追加消費なしでやり直せる |
+| `settledAt == nil`（未完了）のまま失った場合 | `reissue` でやり直せる（追加消費なし。1.5） |
+| `settledAt` が確定済み（完了後）に失った場合 | 新規消費でやり直す。`reissue` は成立しない |
 
-**自動再生成を持たない理由**: 現在保持しているデータでは再生成できない（元画像は書き出し完了時に `WorkingSourceRecord` ごと削除され、`RenderSpec` と `ExportSetting` も `OutputRecord` は保持しない）。再生成には出力の期限まで不変のスナップショットを保持する必要があり、未加工の顔画像を最大24時間追加保持することを意味する。プライバシーと容量の複雑性が v1 の利得に釣り合わない。同じ素材の再書き出しは grant により追加消費なしで行えるため、利用者の損失は「もう一度操作する手間」に限られる。
+**自動再生成を持たない理由**: 現在保持しているデータでは再生成できない（元画像は書き出し完了時に `WorkingSourceRecord` ごと削除され、`RenderSpec` と `ExportSetting` も `OutputRecord` は保持しない）。再生成には出力の期限まで不変のスナップショットを保持する必要があり、未加工の顔画像を最大24時間追加保持することを意味する。プライバシーと容量の複雑性が v1 の利得に釣り合わない。未完了のまま失った場合は `reissue` により追加消費なしで行えるため、利用者の損失は「もう一度操作する手間」に限られる。
 
 ---
 
@@ -372,6 +365,8 @@ struct OutputRecord: Sendable {
 - OS 共有へ渡す（`SharePresenter`）
 
 いずれも任意であり、何度実行しても追加消費しない。失敗しても生成済み出力を保持したまま再試行でき、再書き出しは不要。
+
+**完了（`settledAt`）の確定**（ADR 0006）: 利用者がその出力の保存または共有へ最初に進んだ時点で枠が確定する。写真ライブラリ保存は `beginDeliveryAttempt`、共有は `markSettled` を呼ぶ時点（結果を待たず、開始した時点）で、`OutputRecord.settledAt` が `nil` なら現在時刻を設定する（同一トランザクション）。一度設定した `settledAt` は変更しない。保存・共有の成否は問わない（失敗しても出力は保持され再試行できる）。完了は明示的なステータスとして画面に表示しない。
 
 ### 8.0 写真ライブラリ保存の結果不明
 
@@ -422,8 +417,9 @@ struct UnknownLibrarySave: Sendable {
 | `abandonDeliveryAttempt` | `previousState` へ戻す（現在が `delivered` なら維持） | 写真ライブラリ保存の失敗 |
 | `resolveOrphanedAttempts` | `previousState` が `generated` なら `deliveryUnknown`、`delivered` なら維持 | 起動時 |
 | `markDiscarded` | 任意の状態 → `discarded` | 利用者の明示的な破棄のみ |
+| `markSettled` | 状態は変えない。`settledAt` のみ確定 | 共有の開始時 |
 
-共有には `DeliveryAttempt` を作らない（結果が同期的に返るため中断点が無い）。
+共有には `DeliveryAttempt` を作らない（結果が同期的に返るため中断点が無い）。ただし `settledAt` は確定させる必要があるため、共有の開始時に `markSettled` を呼ぶ。
 
 ```swift
 enum ShareResult: Sendable, Equatable { case completed, canceled, unknown, failed }
