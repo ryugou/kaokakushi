@@ -33,10 +33,11 @@ protocol ExportSagaStore: Sendable {
 
 /// 受け渡し（8 章）。ExportSagaStore とは寿命が異なるため分ける
 protocol OutputDeliveryStore: Sendable {
-    /// previousState を記録し、settledAt が nil なら同一トランザクションで現在時刻を設定する（ADR 0006）
+    /// previousState を記録する。事前条件: settledAt != nil（nil なら throw。ADR 0006）
     func beginDeliveryAttempt(_ exportID: ExportID) async throws
     /// delivered への更新と attempt 削除を単一トランザクションで
     func completeLibrarySave(_ exportID: ExportID) async throws
+    /// 事前条件: settledAt != nil（nil なら throw。ADR 0006）
     func completeShare(_ exportID: ExportID) async throws
     /// previousState へ戻す（現在が delivered なら維持）
     func abandonDeliveryAttempt(_ exportID: ExportID) async throws
@@ -44,8 +45,9 @@ protocol OutputDeliveryStore: Sendable {
     func resolveOrphanedAttempts() async throws -> [OutputDeliverySnapshot]
     func loadUnknownLibrarySaves() async throws -> [UnknownLibrarySave]
     func clearUnknownLibrarySave(_ exportID: ExportID) async throws
+    /// 事前条件なし。完了前の出力の破棄にも使う（4 章の reissue 経路）
     func markDiscarded(_ exportID: ExportID) async throws
-    /// 共有の開始時に呼ぶ。settledAt が nil なら現在時刻を設定する。一度設定したら変更しない（ADR 0006）
+    /// 出力確認画面での明示的な完了操作で呼ぶ。settledAt が nil なら現在時刻を設定する。一度設定したら変更しない（ADR 0006）
     func markSettled(_ exportID: ExportID) async throws
 }
 
@@ -192,7 +194,7 @@ enum ExportAccountingMode: Sendable, Equatable {
 
 ### 1.5 勘定の使い分け
 
-枠が数える単位は「受け渡した成果物」であり、素材の同一性は勘定に使わない（ADR 0006）。利用者がその出力の保存または共有へ**最初に進んだ時点**（`OutputRecord.settledAt` が確定する時点。8 章）で「完了」となり、枠が確定する。
+枠が数える単位は「受け渡した成果物」であり、素材の同一性は勘定に使わない（ADR 0006）。生成後の出力確認画面で、利用者が**明示的な完了操作**を行った時点（`OutputRecord.settledAt` が確定する時点。8 章）で「完了」となり、枠が確定する。保存・共有は完了後にのみ行える。
 
 | 勘定 | 月間枠 | トライアル台帳 |
 | --- | --- | --- |
@@ -324,7 +326,9 @@ struct OutputRecord: Sendable {
 
 会計要素（月間枠・トライアル）はまだ何も書き込まれていないため、返還処理は不要。`deleteJob` は冪等（行が無ければ何もしない）。
 
-手順 4 が完了した後は前進のみで取り消せない（成果物は公開済みで正常生成が確定している）。UI 上も、手順 4 完了後はキャンセルを提示しない。受け取り後の破棄は 8 章の扱いに従う。
+**手順 4（finalize）が完了した後、出力確認画面での「やり直す」**（ADR 0006）: `OutputRecord` は作られるが `settledAt` はまだ確定していない。この間に利用者が「やり直す」を選んだ場合は `deleteJob` ではなく `markDiscarded` で `OutputRecord` を `discarded` へ遷移させ、編集へ戻す（8 章）。台帳は変更しない（会計は既に確定済み）。次の書き出しは `reissue` として追加消費なしで行える（1.5）。
+
+出力確認画面での**明示的な完了操作**（8 章の `markSettled`）を経たあとは前進のみで取り消せない。UI 上も、完了後はキャンセル・やり直しを提示しない。完了後の破棄は 8 章の扱いに従い、次の書き出しは新規消費になる。
 
 ---
 
@@ -364,9 +368,11 @@ struct OutputRecord: Sendable {
 - 写真ライブラリへ保存する（`MediaSaver`）
 - OS 共有へ渡す（`SharePresenter`）
 
-いずれも任意であり、何度実行しても追加消費しない。失敗しても生成済み出力を保持したまま再試行でき、再書き出しは不要。
+完了後にのみ行える。何度実行しても追加消費しない。失敗しても生成済み出力を保持したまま再試行でき、再書き出しは不要。
 
-**完了（`settledAt`）の確定**（ADR 0006）: 利用者がその出力の保存または共有へ最初に進んだ時点で枠が確定する。写真ライブラリ保存は `beginDeliveryAttempt`、共有は `markSettled` を呼ぶ時点（結果を待たず、開始した時点）で、`OutputRecord.settledAt` が `nil` なら現在時刻を設定する（同一トランザクション）。一度設定した `settledAt` は変更しない。保存・共有の成否は問わない（失敗しても出力は保持され再試行できる）。完了は明示的なステータスとして画面に表示しない。
+**完了（`settledAt`）の確定**（ADR 0006）: 生成後の出力確認画面で、利用者が**明示的な完了操作**を行った時点で枠が確定する。`markSettled` の呼び出しで、`OutputRecord.settledAt` が `nil` なら現在時刻を設定する（同一トランザクション）。一度設定した `settledAt` は変更しない。完了操作の付近には「完了すると 1 枚として確定し、以降の作り直しは新しい 1 枚になる」旨を明示する。完了前は「やり直す」で出力を破棄でき、追加消費しない（4 章）。
+
+**不変条件**: `beginDeliveryAttempt` / `completeLibrarySave` / `completeShare` は `settledAt != nil` を事前条件とする（`nil` なら throw）。完了前の出力は UI 上も保存・共有へ到達できないが、防御として明記する。`markDiscarded` にはこの事前条件を課さない（完了前のやり直しでも呼ばれるため。4 章）。保存・共有の成否は問わない（失敗しても出力は保持され再試行できる）。
 
 ### 8.0 写真ライブラリ保存の結果不明
 
@@ -416,10 +422,10 @@ struct UnknownLibrarySave: Sendable {
 | `completeShare` | `generated` / `deliveryUnknown` → `delivered` | 共有の `.completed` |
 | `abandonDeliveryAttempt` | `previousState` へ戻す（現在が `delivered` なら維持） | 写真ライブラリ保存の失敗 |
 | `resolveOrphanedAttempts` | `previousState` が `generated` なら `deliveryUnknown`、`delivered` なら維持 | 起動時 |
-| `markDiscarded` | 任意の状態 → `discarded`。行は物理削除せず `settledAt` を保持したまま残す。実体ファイルは削除する | 利用者の明示的な破棄のみ |
-| `markSettled` | 状態は変えない。`settledAt` のみ確定 | 共有の開始時 |
+| `markDiscarded` | 任意の状態 → `discarded`。行は物理削除せず `settledAt` を保持したまま残す。実体ファイルは削除する | 利用者の明示的な破棄のみ（完了前のやり直しを含む。4 章） |
+| `markSettled` | 状態は変えない。`settledAt` のみ確定 | 出力確認画面での明示的な完了操作 |
 
-共有には `DeliveryAttempt` を作らない（結果が同期的に返るため中断点が無い）。ただし `settledAt` は確定させる必要があるため、共有の開始時に `markSettled` を呼ぶ。
+共有には `DeliveryAttempt` を作らない（結果が同期的に返るため中断点が無い）。共有の開始時点で既に `settledAt` は確定済み（完了後にのみ共有へ進めるため）であり、共有側で `settledAt` を扱う必要はない。
 
 ```swift
 enum ShareResult: Sendable, Equatable { case completed, canceled, unknown, failed }
