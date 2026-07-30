@@ -1646,7 +1646,7 @@ func canDeleteHistoryUnit(
 | 分類 | 参照元 | 巻き込んだ場合に起こること |
 | --- | --- | --- |
 | **絶対保護**（どの契機でも削除しない） | **非終端のキュー項目**（`isTerminal == false`。6.4） | 処理中のバッチが消える |
-| 同上 | **`running` の `ExportJob`**（[書き出し Saga](export-saga.md) の 2 章） | 処理中の書き出しが宙に浮く |
+| 同上 | **`ExportJob` の行**（[書き出し Saga](export-saga.md) の 2 章） | 進行中の書き出しが宙に浮く |
 | 同上 | **`isUndelivered` の `OutputRecord`**（`hasUndeliveredOutputRecord`） | 利用者が受け取っていない成果物が消える |
 | **利用者が上書きできる** | お気に入り | 利用者が明示的に保護した履歴が消える |
 | 同上 | 編集中のプロジェクト | 編集画面が参照先を失う |

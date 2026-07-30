@@ -7,7 +7,7 @@
 | 正本の範囲 | `ExportJob` / `OutputRecord` の型、手順、中断・やり直し・破棄の後始末、起動時復旧、受け渡し |
 | 関連 | [アーキテクチャ設計](architecture.md)、[ADR 0005](adr/0005-drop-tamper-resistance-backend-and-heavy-fault-tolerance.md)（改ざん対抗・耐障害機構の簡素化）、[ADR 0006](adr/0006-accounting-per-delivered-output.md)（会計境界＝完了操作） |
 
-`UsageLedger`・書き出しジョブ・`OutputRecord` はすべて `app.db` の平文行である（[ADR 0005](adr/0005-drop-tamper-resistance-backend-and-heavy-fault-tolerance.md)）。会計・出力の公開・ジョブの完了は**単一の SQLite トランザクション**で原子的に確定する。書き出しは直列実行キュー1本（並列数1）で処理し、実行中のジョブは常に0件か1件。
+`UsageLedger`・書き出しジョブ・`OutputRecord` はすべて `app.db` の平文行である（[ADR 0005](adr/0005-drop-tamper-resistance-backend-and-heavy-fault-tolerance.md)）。会計・出力の公開・ジョブの完了は**単一の SQLite トランザクション**で原子的に確定する。書き出しは直列実行キュー1本（並列数1）で処理し、**手順1〜3を処理中のジョブは常に0件か1件**。生成済み・確認待ち（`OutputRecord.settledAt == nil`）の `ExportJob` は、バッチでは複数同時に存在しうる（結果一覧の完了操作までは全件が確認待ちのまま）。
 
 **生成と完了は別の操作である**（[ADR 0006](adr/0006-accounting-per-delivered-output.md)）。生成は出力ファイルと確認用の `OutputRecord` を作るだけで、枠・クレジットは一切消費しない。消費が起こるのは、利用者が出力確認画面で明示的に完了操作を行った時点（`settleExport` / `settleBatch`）だけである。
 
@@ -57,18 +57,30 @@ protocol OutputDeliveryStore: Sendable {
     func loadUnknownLibrarySaves() async throws -> [UnknownLibrarySave]
     func clearUnknownLibrarySave(_ exportID: ExportID) async throws
     /// 完了後の出力を利用者が明示的に破棄する。OutputRecord と実体ファイルを物理削除する（状態遷移ではない）。
-    /// UnknownLibrarySave があれば FK CASCADE で消える。事前条件: settledAt != nil（完了前のやり直しは discardExport を使う）
+    /// UnknownLibrarySave があれば FK CASCADE で消える。事前条件: settledAt != nil（完了前のやり直しは discardExport を使う）、
+    /// かつ対象の DeliveryAttempt が存在しないこと（7.0。試行中の破棄は拒否する）
     func deleteOutput(_ exportID: ExportID) async throws
 }
 
 struct ExportQueueItemID: Sendable, Hashable { let rawValue: UUID }
+/// 出力の縦横比（仕様の 元比率 / 1:1 / 4:5 / 9:16）
+enum OutputAspect: Sendable, Hashable {
+    case original, square, fourFive, nineSixteen
+}
+/// 出力メタデータの扱い
+struct MetadataPolicy: Sendable, Equatable {
+    let removeLocation: Bool
+    let removeDeviceInfo: Bool
+    let removeSoftwareInfo: Bool
+    let keepCaptureDate: Bool
+}
 /// 出力形式・画質・メタデータ設定。フィールドは `ProjectSettingsHash` の 5〜8 と一致する
-/// （正準バイト表現は [正準スキーマ](canonical-schema.md) の 5.2 が正本。ここでは Swift の型宣言だけを示す）
+/// （正準バイト表現と enum の固定番号は [正準スキーマ](canonical-schema.md) の 5.2 が正本）
 struct ExportSetting: Sendable, Equatable {
-    let outputAspect: OutputAspect        // canonical-schema.md 5.2: original/square/fourFive/nineSixteen
-    let outputFormat: ImageFormat         // canonical-schema.md 5.2: jpeg/heic/png
+    let outputAspect: OutputAspect
+    let outputFormat: ImageFormat         // 宣言は [画像処理](image-pipeline.md)
     let compressionQuality: Double
-    let metadataPolicy: MetadataPolicy    // canonical-schema.md 5.2: removeLocation/removeDeviceInfo/removeSoftwareInfo/keepCaptureDate の4つの Bool
+    let metadataPolicy: MetadataPolicy
 }
 /// 手順 0 の入力
 struct StartExportInput: Sendable {
