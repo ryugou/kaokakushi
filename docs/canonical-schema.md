@@ -21,6 +21,7 @@ enum PayloadType: UInt32, Sendable {
     case subscriptionState = 2
     case exportCommit = 3
     case remoteConfigState = 4
+    case trustedTimeState = 5
 }
 ```
 
@@ -62,9 +63,28 @@ blob = BE32(payloadType)
 | 全体長 | `4 + 4 + 8 + length + 32` バイト |
 | 長さの検査 | ファイルサイズと `length` が一致しなければ**破損として扱う**（署名検証まで進めない） |
 | `payloadType` の検査 | 読み出そうとしている `ProtectedBlobKey` の型と一致しなければ破損 |
+| **破損の分類** | **`integrityFailure`**（下表） |
 | 検証 | 先頭 `4 + 4 + 8` のうち**長さフィールドを除いた 8 バイト**と `payloadBody` を連結して `signedBytes` を再構築する |
 
 **長さフィールドは署名対象に入りません。** ファイル形式の都合であり、値そのものではないためです。改変されればファイルサイズとの照合で弾かれます。
+
+##### 読み込み結果への写像
+
+**「破損」を `ProtectedLoadResult` のどの case へ写すかを定めます**（[アーキテクチャ設計](architecture.md) の 7.2）。
+
+| 事象 | `ProtectedLoadResult` |
+| --- | --- |
+| ファイルが存在しない | `missing` |
+| **ファイルを開けない・読み切れない（I/O エラー）** | **`temporarilyUnavailable`** |
+| **ファイルは存在するが先頭 `4 + 4 + 8` バイトを読めない**（ヘッダ長未満） | **`integrityFailure`** |
+| **ファイルは読み切れたが、長さ・`payloadType` がヘッダと不整合** | **`integrityFailure`** |
+| 鍵を供給できない | **観測で分ける**（[アーキテクチャ設計](architecture.md) の 7.2） |
+| ファイルは読み切れたが HMAC 不一致 | `integrityFailure` |
+| ファイルは読み切れたが `schemaVersion` が未知 | `unsupportedSchema(version:)` |
+
+**切り分けの基準は「ファイルを読み切れたか」です。** 「署名検証まで到達したか」を基準にすると、**末尾 1 バイトを切り詰めるだけで長さ検査に落ち、署名検証へ到達しないため `temporarilyUnavailable` に分類されます。** その結果、上書きも修復も行われず、`UsageLedger` については **`unverifiedLedgerWrites` が上限値へ設定されず、`transact` も走らないため加算もされません**（[アーキテクチャ設計](architecture.md) の 6.2 で塞いだ前進源が、1 バイトの改変で永久に止まります）。
+
+**改ざんを一時障害へ倒しません。** `temporarilyUnavailable` を設ける意図は、鍵ストアやファイルシステムの一時障害を改ざんとして罰しないことです（同 7.2）。**ファイル内容の破損はその対象ではありません。** 読み切れた時点で「一時的に読めない」ではなくなります。
 
 - HMAC の対象は **`signature` 自身を除く全永続フィールド**
 - `ExportCommit` の insert / update の**たびに再署名する**
@@ -72,9 +92,23 @@ blob = BE32(payloadType)
 - 検証はバイト列の**定数時間比較**で行う
 - マイグレーション時は旧形式で検証してから新形式で再署名する
 
-**`payloadType` を含めないと、種別をまたいだ付け替えを検出できません。** 4 種のデータが同じ鍵で署名されているため、有効な `SubscriptionState` の blob を `UsageLedger` の保存先へ置いても検証を通ります。
+**`payloadType` を含めないと、種別をまたいだ付け替えを検出できません。** 5 種のデータが同じ鍵で署名されているため、有効な `SubscriptionState` の blob を `UsageLedger` の保存先へ置いても検証を通ります。
 
-**追加は末尾のみ**とし、既存フィールドの順序を変えません。順序を変える必要が生じた場合は `schemaVersion` を上げ、旧バージョンのデコーダを残します。
+##### `schemaVersion` を上げる条件
+
+**追加は末尾のみ**とし、既存フィールドの順序を変えません。そのうえで、**バイト列が変わる変更はすべて `schemaVersion` を上げます。**
+
+| 変更 | `schemaVersion` |
+| --- | --- |
+| **末尾へのフィールド追加** | **上げる**（旧バイト列では新フィールドを復元できない） |
+| 既存フィールドの順序変更 | **上げる。** 旧バージョンのデコーダを残す |
+| `enum` への `case` 追加（**末尾の番号**で） | 上げない（既存値のバイト列が変わらない） |
+| `enum` の既存 `case` の番号変更 | **上げる。** ただし原則として行わない（3 章） |
+| コメントや説明の変更 | 上げない |
+
+**末尾追加でも上げます。** 旧バージョンの blob は新フィールドのバイト列を持たないため、新しいデコーダがそのまま読むと境界を誤ります。**`schemaVersion` で分岐し、旧版は既定値を補って読み込んだうえで新版として再署名します**（1 章のマイグレーション規則）。
+
+**リリース前の変更では上げません。** v1 の出荷までは `schemaVersion` 1 のまま設計を変更できます。**上げる義務が生じるのは、その版の blob が利用者の端末に存在しうる時点からです。**
 
 ---
 
@@ -209,6 +243,11 @@ blob = BE32(payloadType)
 | `accountingCommitted` | 4 |
 | `readyToPublish` | 5 |
 | `published` | 6 |
+| `rollingBack` | 7 |
+
+**`rollingBack` を末尾（7）へ置きます。** `published` を 6 のまま維持することが要点です。`rollingBack` を 6 へ挿入して `published` を 7 へずらすと、**既存の `published` 行（`state = 6` として署名済み）がバイト列を変えずに `rollingBack` としてデコードされます。** HMAC は通過するため検出できず、5.3 が「ロールバックの手順 1 から再実行する」を適用して**公開済み・会計確定済みの書き出しから消費・grant・トライアルを払い戻し、出力ファイルを削除します。**
+
+**`case` の追加は常に末尾の番号で行います**（1 章の「追加は末尾のみ」）。宣言順は可読性のために `published` の前へ置いてよく、**番号だけが不変です。**
 
 ### `ExportAccountingMode`
 
@@ -265,6 +304,7 @@ blob = BE32(payloadType)
 | `UsageLedger` | **1** |
 | `SubscriptionState` | **2** |
 | `RemoteConfigState` | **3** |
+| `TrustedTimeState` | **4** |
 
 この対応もゴールデンテストの対象です（6 章）。
 
@@ -291,6 +331,9 @@ blob = BE32(payloadType)
 | 13 | `monthlyIntegrityLock` | `MonthlyIntegrityLock` |
 | 14 | `lastTrustedMonth` | `TrustedUTCMonth?` |
 | 15 | `trialIntegrityLocked` | `Bool` |
+| 16 | `ledgerTimeZone` | `LedgerTimeZone`（`identifier` の `String`） |
+| 17 | `unverifiedLedgerWrites` | `Int32`（BE32、符号付き） |
+| 18 | `ledgerWritesSinceConfigFetch` | `Int32`（BE32、符号付き） |
 
 要素型のフィールド順です。
 
@@ -308,9 +351,9 @@ blob = BE32(payloadType)
 | `SourceIdentity` | `providerAssetKeyHash`（`String?`）→ `contentFingerprint`（32 バイト固定） |
 | `OriginalCaptureMetadata` | `dateTimeOriginal` → `subSecTimeOriginal` → `offsetTimeOriginal` → `utcMillis`（すべて `Optional`） |
 
-`ExportedSettingsEntry` と `ProjectSourceSnapshot` は **`projectID` ごとに 1 件**です。台帳の検証時に重複が無いことを確認します。
+`pendingExportedSettingsEntries` / `exportedSettingsEntries` / `projectSourceSnapshots` は **`projectID` ごとに 1 件**、`workingSourceBindings` は **`projectID` ごとに 0 件または 1 件**です。台帳の検証時に重複が無いことを確認します。
 
-台帳修復時は、両方とも**空**にします（[アーキテクチャ設計](architecture.md) の 6.3）。
+台帳修復時は、この 4 集合をすべて**空**にします（[アーキテクチャ設計](architecture.md) の 6.3）。
 
 ### 4.2 `SubscriptionState`（`schemaVersion` 1）
 
@@ -321,10 +364,11 @@ blob = BE32(payloadType)
 | 1 | `entitlement` | `Entitlement`（下記） |
 | 2 | `willRenew` | `Bool` |
 | 3 | `fetchedAt` | `Date` |
+| 4 | `lastRequestDate` | `Date` |
 
-`Entitlement` の順は `plan` → `status` → `expiresAt` → `lastVerifiedAt` です。
+`Entitlement` の順は `plan` → `status` → `expiresAt` → `lastVerifiedAt` → `isSandbox` です。
 
-**`fetchedAt` と `Entitlement.lastVerifiedAt` は別の値です。** 前者はキャッシュを書いた時刻、後者は権限を検証できた時刻で、オフライン時にキャッシュを読み直しても後者は動きません。
+**`fetchedAt` / `lastVerifiedAt` / `lastRequestDate` は 3 つとも別の値です。** `fetchedAt` はキャッシュを書いた時刻、`lastVerifiedAt` は権限を検証できた時刻、**`lastRequestDate` は RevenueCat のサーバーが応答を生成した時刻**（`CustomerInfo.requestDate`）です。**3 つ目だけが「サーバーと本当に往復したか」を表します**（[アーキテクチャ設計](architecture.md) の 6.2）。SDK がキャッシュを返した場合、前 2 つは動かせても `lastRequestDate` は動きません。
 
 ### 4.3 `ExportCommit`（`schemaVersion` 1）
 
@@ -357,7 +401,24 @@ blob = BE32(payloadType)
 
 `sha256` を固定長にするのは、長さが常に 32 バイトであり前置きが冗長なためです。他の `Data` は長さ前置きを維持します。
 
-### 4.4 `RemoteConfigState`（`schemaVersion` 1）
+### 4.4 `TrustedTimeState`（`schemaVersion` 1）
+
+型定義は [アーキテクチャ設計](architecture.md) の 6.3 が正本です。
+
+| 順 | フィールド | 型 |
+| --- | --- | --- |
+| 1 | `trustedEpochMillis` | `Int64` |
+| 2 | `observedAtUsageNow` | `Date` |
+| 3 | `source` | `TrustedTimeSource` |
+
+`TrustedTimeSource` の固定番号です。
+
+| case | 番号 |
+| --- | --- |
+| `remoteConfig` | 1 |
+| `revenueCat` | 2 |
+
+### 4.5 `RemoteConfigState`（`schemaVersion` 1）
 
 | 順 | フィールド | 型 |
 | --- | --- | --- |
@@ -537,7 +598,7 @@ contentFingerprint = SHA-256( "content-fingerprint-v2" || fullFileBytes )
 | 5 | `regions`（ordered。`ProjectSettingsHash` と同じ要素順） |
 | 6 | `outputAspect` |
 
-**`ProjectSettingsHash` の 1〜5 から `outputFormat` / `compressionQuality` / `metadataPolicy` を除き、先頭に `renderRevision` を足したものです。**
+**`ProjectSettingsHash` の 6〜8（`outputFormat` / `compressionQuality` / `metadataPolicy`）を除き、残る 1〜5 の先頭に `renderRevision` を足したものです。**
 
 除いた 3 つはいずれも見た目の確認をやり直す必要がありません。圧縮品質は厳密には画素が変わりますが、**確認の目的は匿名化の妥当性であり画質ではありません**（[アーキテクチャ設計](architecture.md) の 6.5）。
 

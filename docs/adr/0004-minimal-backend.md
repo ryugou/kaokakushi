@@ -27,7 +27,7 @@ Accepted
 | `GET /v1/config` | 無料枠、一括処理上限、トライアルクレジット数、トリアージ閾値、履歴の容量上限、スタンプの保存解像度、広告表示頻度、更新誘導、障害中の機能停止フラグ |
 | `POST /v1/diagnostics` | 利用者が明示的に同意した場合のみ受信 |
 
-実装は Rust + Axum。`/v1/config` は静的 JSON と ETag による配信とする。
+実装は Rust + Axum。`/v1/config` の設定 envelope はサーバー内の静的 JSON から読み、応答は現在の `serverTime`（信頼できる時刻の主取得元。[アーキテクチャ設計](../architecture.md) の 6.3）を付けて動的に生成する。**HTTP キャッシュと ETag は使わず `Cache-Control: no-store`** とし、last-known-good はアプリ側で保持する。毎回変わる `serverTime` を含む応答はキャッシュ可能にできない。
 
 **実装しないもの**
 

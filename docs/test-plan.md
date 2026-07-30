@@ -30,9 +30,9 @@
 
 ### 2.1 クォータ・grant・トライアル（[アーキテクチャ設計](architecture.md) の 6.3）
 
-- `QuotaPolicy`（月跨ぎ、TZ 変更、時刻巻き戻し、うるう年、月末 23:59:59 → 00:00:00、24 時間境界）
+- `evaluate` / `rollPeriod`（月跨ぎ、TZ 変更、時刻巻き戻し、うるう年、月末 23:59:59 → 00:00:00、24 時間境界）
 - `evaluate` が更新後の `UsageLedger` を返し、`unlimited` でも時刻更新と grant 整理が行われること
-- `QuotaPolicy` と開始ゲートが `Plan` を参照せず `ResolvedCapabilities` のみを受け取ること
+- `evaluate` と開始ゲートが `Plan` を参照せず `ResolvedCapabilities` のみを受け取ること
 - **`evaluate` が `monthlyLimit` を引数で受け取り、リモート設定の変更が判定へ反映されること**
 - **`Domain` が `RemoteConfig` 型そのものを参照しないこと**
 - `monthlyIntegrityLock` が解除条件を満たさないとき、`consumedExportIDs` が空でも `blocked(ledgerIntegrityFailure)` になること
@@ -56,6 +56,93 @@
 - **取得から 6 時間を超えた信頼時刻が `nil` として扱われること**
 - **保存済みの信頼時刻より過去の値を受理しないこと**
 - **設定取得が失敗し購入状態の取得に成功した場合だけ `CustomerInfo.requestDate` を使うこと。どちらも失敗なら `trustedNow = nil` になること**
+- **`TrustedTimeState` が独立した署名対象として保存され、設定取得が失敗して RevenueCat だけ成功した場合でも保存できること**
+- **鮮度判定が `usageNow − observedAtUsageNow` で行われ、端末時計の巻き戻しで鮮度が延びないこと**
+- **`TrustedTimeState` の `integrityFailure` が `missing` と同じ扱いになり、信頼時刻なしとして封鎖側へ倒れること**
+- **`UsageLedger` が `missing` でも、利用痕跡があれば保守的修復（封鎖付き）になること**
+- **利用痕跡が無い `missing` でのみ通常の新規台帳が作られること。鍵の有無を痕跡に含めないこと**
+- **台帳 blob だけを削除しても無料枠とトライアルが回復しないこと**
+- **痕跡が `protected/` の他 3 blob と `AppLifecycle` 行であり、履歴テーブルの行を見ないこと**
+- **「履歴を保存しない」設定で履歴が全削除されても、痕跡が残り封鎖されること**
+- **手動での履歴全削除でも同じく封鎖されること**
+- **`protected/` を全消去しても `AppLifecycle` 行があれば封鎖されること**
+- **`protected/` 全消去 ＋ `DELETE FROM AppLifecycle` では封鎖されず、通常の新規台帳が作られること**（9.3 の対象外。**塞げないことを退行テストとして固定する**）
+- **`AppLifecycle` が `id INTEGER PRIMARY KEY CHECK (id = 1)` により 2 行目を挿入できないこと**
+- **`AppLifecycle` が `app.db` のテーブル一覧とスキーマ移行の定義に含まれていること**
+- **`AppLifecycle` の挿入が起動時復旧の手順 9 で、痕跡の評価が手順 1 で行われ、真の初回起動が「痕跡あり」と誤判定されないこと**
+- **手順 9 に到達せず終了した初回起動の次回起動でも、誤判定されずに `AppLifecycle` が挿入されること**
+- **`AppLifecycle` がマイスタンプもプリセットも持たない Free 利用者でも必ず作られること**（痕跡が有料機能に依存しない）
+- **`AppLifecycle` が履歴設定・手動削除・容量超過・期限削除のいずれの経路でも削除されないこと**
+- **通信を遮断し端末時計を据え置いても、`unverifiedLedgerWrites >= 2000` で `verificationRequired` になること**
+- **1 枚の新規写真の書き出しで台帳が 4 回書かれること**（インポート手順 4・書き出し手順 −2・手順 4・手順 8）
+- **新しい素材を選ばない再書き出しでは 3 回であること**
+- **2000 回が約 500〜670 枚に相当し、機内モードで Pro の 10 バッチまで通常どおり動くこと**
+- **`unverifiedLedgerWrites` が `UsageLedgerStore.transact` の内側・保存直前に無条件で +1 されること**
+- **`transact` が中断・失敗した場合に加算もロールバックされ、成功時は 1 回だけ増えること**
+- **書き出しのロールバックや `finalizing` 以降からの復旧のやり直しでも、加算が手順 4 の台帳トランザクション単位でしか起きないこと**
+- **`Purchases.getCustomerInfo()` が SDK キャッシュを返した場合（`requestDate` が前回と同じ）、「取得に成功」と扱わないこと**
+- **その場合にキャッシュを置き換えず、`lastVerifiedAt` も動かさず、`recordEntitlementRefresh()` も呼ばないこと**
+- **RevenueCat のホストを遮断したまま起動を繰り返しても、`unverifiedLedgerWrites` と 14 日の猶予がどちらもリセットされないこと**
+- **`CacheFetchPolicy` がキャッシュを使わない設定で明示され、SDK の既定値に依存しないこと**
+- **`SubscriptionState.lastRequestDate` が署名対象であり、DB 改変で書き換えられないこと**
+- **`requestDate` が単調前進しない応答を受理しないこと**（`TrustedTimeState` の受理条件と同じ形）
+- **`recordConfigRefresh()` が HTTP レスポンスの新規受信で呼ばれ、同一 `configVersion` で保存が起きなくても呼ばれること**
+- **`configVersion` を上げない期間に台帳を 4000 回書いても、取得に成功し続けていれば失効から復帰すること**
+- **リセットが `recordEntitlementRefresh()` / `recordConfigRefresh()` の 2 メソッドだけで行われ、`transact` の変換関数から到達できないこと**
+- **変換関数が見る `LedgerMutableView` に `unverifiedLedgerWrites` と `ledgerWritesSinceConfigFetch` が含まれないこと**（型から外れていること）
+- **リセット後の保存値が 1 になること**（0 を書き、保存直前の +1 が効く）
+- **`SubscriptionState` の保存成功を確認してから `recordEntitlementRefresh()` を呼ぶこと**
+- **リセットを先に行う実装では、保存直前の強制終了で古い有料キャッシュに 2000 回ぶんの寿命が追加されることを、退行テストとして押さえること**
+- **リセットが失敗しても `SubscriptionState` を巻き戻さず、次回の取得成功で再試行すること**
+- **台帳 blob の末尾 1 バイトを切り詰めると `integrityFailure` になり、`temporarilyUnavailable` にならないこと**
+- **`payloadType` の不整合も `integrityFailure` になること**
+- **ヘッダ長（16 バイト）未満のファイルが `integrityFailure` になること**（0 バイトを含む）
+- **`errSecInteractionNotAllowed` / `errSecNotAvailable` が `temporarilyUnavailable`、`errSecItemNotFound` が `integrityFailure` になること**
+- **端末ロック中の Keychain 読み取り失敗で台帳が `lockedUntilReinstall` つきで消えないこと**
+- **恒久的な鍵喪失で修復が走り、アプリが永久停止しないこと**
+- **未知の `OSStatus` が `temporarilyUnavailable` へ倒れ、懲罰側にならないこと**
+- **ファイルを読み切れない I/O エラーと鍵取得の失敗だけが `temporarilyUnavailable` になること**
+- **台帳が `valid` でないとき、`resolveCapabilities` へ渡す `unverifiedLedgerWrites` が上限値（2000）であり 0 でないこと**
+- **台帳修復が `transact` を通らず `ProtectedBlobStore.save` を直接呼ぶため、保存直前の +1 が適用されないこと**
+- **`unverifiedLedgerWrites` が `UsageLedger`（署名対象）にあり、DB 改変で書き換えられないこと**
+- **修復が `UsageLedgerStore.repairLedger(evidence:)` を通り、`transact` と同じ待機キューを取ること**
+- **`transact` の保存と修復が並行しても、どちらかが他方を上書きしないこと**
+- **2 つの読み取り主体が同じ `integrityFailure` を観測しても修復が 1 回だけ走ること**（排他区間の内側で読み直す）
+- **台帳修復の直後に `unverifiedLedgerWrites == 2000` / `ledgerWritesSinceConfigFetch == 4000`（どちらも上限値）となること**
+- **修復が `SubscriptionState` blob を削除しないこと**（Free 利用者がオフラインで無料枠ごと止まる経路を作らない）
+- **修復直後・オンラインで、`requestDate` が前進した取得に成功すれば Standard / Pro が月間枠に依存せず書き出せること**
+- **修復直後・オフラインでは有料利用者が書き出せないこと**（受容する挙動。再検証まで `verificationRequired`）
+- **修復直後・オフラインでも Free 利用者は月間枠の封鎖以外の理由で止まらないこと**（鮮度判定が有料能力にしか掛からない）
+- **通信を遮断したまま台帳を繰り返し壊しても、毎回上限値が入るため有料能力を延命できないこと**
+- **HMAC 鍵だけを失った有料利用者が、オンライン復帰後に書き出せること**（`integrityFailure` として修復されても袋小路にならない）
+- **カウンタが低い時点の `valid` な台帳 blob へ巻き戻すと `integrityFailure` にならず修復も走らないこと**（9.3 が対象外と宣言した blob リプレイであることを退行テストとして記録する）
+- **判定が `>= 2000` であること**（境界を含む）
+- **導出した `ResolvedCapabilities` が有料能力を 1 つも含まないキャッシュには鮮度判定が掛からず、オフラインのまま台帳を 2000 回以上書いても無料枠の範囲で書き出せること**
+- **判定キーが `plan != .free` ではなく導出後の能力であり、`plan == .free` に有料相当の能力を追加しても鮮度免除が穴にならないこと**
+- **`plan != .free` のキャッシュでのみ鮮度切れが起き、`verificationRequired` になること**
+- **`resolveCapabilities` が `unverifiedLedgerWrites` を引数で受け取り、台帳から読んだ値で判定すること**
+- **`ledgerWritesSinceConfigFetch` が同じ `transact` で `unverifiedLedgerWrites` と同時に +1 されること**
+- **`ledgerWritesSinceConfigFetch >= 4000` で last-known-good が失効し、機能停止フラグ以外がバンドル既定値へ戻ること**
+- **通信を遮断し端末時計を据え置いても、高い `freeMonthlyExportLimit` を配信した設定が恒久化できないこと**
+- **台帳修復の直後に `ledgerWritesSinceConfigFetch == 800`（上限値）となり、`RemoteConfigState` は削除されないこと**
+- **そのため機能停止フラグが「期限切れ」として保持されること**（削除ではなく期限切れ扱い）
+- **購入状態キャッシュが `expiresAt` 超過または `lastVerifiedAt` から 14 日超で `verificationRequired` になること**
+- **`isSandbox` では 1 日で鮮度切れになること。能力そのものは本番と同じに解決されること**
+- **鮮度判定の基準が `trustedNow ?? usageNow` であり、端末時計の巻き戻しで延命できないこと**
+- **`enabledStampPacks` のバンドル既定値が同梱パックの全 ID であり、`RemoteConfigState` を消しても空集合にならないこと**
+- **`BatchPolicySnapshot` を DB から読んだ直後に hard max と最小値へクランプすること**
+- **`BatchKind` の DB 列値が `proBatch = 1` / `trial = 2` に固定され、`case` の宣言順を変えても既存行の解釈が変わらないこと**
+- **`kind` を `.trial` から `.proBatch` へ書き換えても、`batchSizeLimit` のクランプ先が 5 のままにならず 50 へ緩むこと**（クランプ表の挙動確認）
+- **それでも処理できる相異なる素材が 5 枚を超えないこと**（`remainingCredits` と `trialEntries` が別に縛るため）
+- **`kind` がクランプの対象外であり、記録用の値として保持されること**
+- **`trialCreditCount` を 500 へ書き換えても `remainingCredits` が 5 を超えないこと**
+- **月次更新の判定に `ledgerTimeZone` を使い、信頼時刻を得ない起動では端末のタイムゾーン変更に追従しないこと**
+- **東向きのタイムゾーン変更だけでは `period` が前進しないこと**
+- **`evaluate` と `rollPeriod` が `deviceTimeZone` を引数で受け取り、`ledgerTimeZone` を直接書き換えないこと**
+- **`rollPeriod` の内部手順 2 で、`deviceTimeZone` で求めた年月が保持中の `period` と等しいときだけ `ledgerTimeZone` が更新されること**
+- **等しくないとき（月境界をまたぐ変更）は更新が保留され、`period` が前進しないこと**
+- **月中のタイムゾーン変更では更新され、往復させても純利得が 0 になること**
+- **`evaluate` が `trustedNow` を受け取り、それを `ledgerTimeZone` の更新判定にのみ使い、封鎖の解除には使わないこと**
 - `trialIntegrityLocked` のとき `remainingCredits` が 0 になり、トライアル画面へ進入できないこと
 - `trialReservations` が残数計算に含まれること
 - `batchTrial` が月間枠を消費しないこと
@@ -69,7 +156,7 @@
 
 ### 2.2 素材同一性（[アーキテクチャ設計](architecture.md) の 6.4）
 
-- **`isSameSource` を直接使わず、`sourceID` で同一性を判定していること**
+- **`SourceIdentity` 同士の直接比較を使わず、`sourceID`（alias グラフの連結成分）で同一性を判定していること**
 - **provider 一致と content 一致が別レコードを指す場合に、1 件へ統合されること**
 - **統合時に最も古い `firstSuccessAt` が維持され、トライアルが消費済みへ倒れること**
 - **統合時に `grants` / `trialEntries` / `trialReservations` / `sourceLeases` のすべてが勝者 `sourceID` へ書き換わること**
@@ -101,12 +188,17 @@
 
 ### 2.3 レビュー状態とトリアージ（[アーキテクチャ設計](architecture.md) の 6.1 / 6.5）
 
-- `BatchTriagePolicy`（6 つの要確認理由の各単独・複合、空集合）
-- `triage` の入力が 5.1 の共通モデルだけであること。OS 固有の値に依存しないこと
+- `triage`（6 つの要確認理由の各単独・複合、空集合）
+- `triage` の入力が [画像処理](image-pipeline.md) の 1 章の共通モデル（`DetectedFace`）だけであること。OS 固有の値に依存しないこと
 - `ReviewIssue` が**発生単位**で列挙され、小さい顔が 3 人なら 3 件になること
 - **`lowConfidence` が顔ごとに 1 件の `ReviewIssue` になること**
 - `ReviewIssueID` が `detectionRevision` を含み、`overlappingFaces` では顔 ID が辞書順に並ぶこと
 - **`ReviewIssueID` が `projectID`（`ProjectID` 型）を含み、同じ revision の別写真の `noFaceDetected` が別 ID になること**
+- **書き出し認可が `DetectionStatus` を保存値ではなく `triage` の再実行で再導出すること**
+- **`FaceTrack` が `confidence` / `yawDegrees` / `pitchDegrees` / `rollDegrees` / `isSmallFace` を列として持ち、`triage` を再実行できること**
+- **`triage` 再導出と `ReviewDecision` 再検査が、書き出し Saga の認可検査一覧にも記載されていること**
+- **`ReviewDecision` の完全性を認可時に再検査し、`ReviewStatus` を DB 改変で `reviewed` にしても開始できないこと**
+- **`noFaceDetected` の写真は `unmaskedExportConfirmed` 相当の記録が無いかぎり開始できないこと**
 - **`affectedFaceTrackIDs` が ID から導出され、二重に保持されないこと**
 - 再検出で `detectionRevision` が増え、その写真の `ReviewIssue` / `ReviewDecision` / `Reviewed` が破棄されること
 - `ReviewDecision` が `ReviewIssueID` ごとに記録され、全 `ReviewIssue` が埋まるまで `reviewed` にならないこと
@@ -134,7 +226,7 @@
 - `canUseProBatch` / `canUseBatchTrial` が能力で判定され、`plan = pro` かつ `status = pending` が通常一括にならないこと
 - 消費済みの写真だけで 6 枚選ぼうとしたとき `batch-size` が発火すること
 - 50 枚超過が `batch-limit` であり、アップグレード誘導を伴わないこと
-- `EntitlementResolver`（仕様 27.4 の全購入状態）
+- `resolve(snapshot:usageNow:)`（仕様 27.4 の全購入状態）
 - `plan = standard` かつ `status = pending` で `singleExportAccess == .metered` になること
 - `CapabilityResolution.verificationRequired` で書き出し認可が開始されず、Free 降格の表示も出ないこと
 - キャッシュ `missing` かつオフラインで `verificationRequired` になること
@@ -147,7 +239,7 @@
 - Free 範囲のプロジェクトが Free で編集・書き出しできること
 - 降格後の操作可否が 6.2 の表と一致すること
 - 追加スタンプとカスタムスタンプで、降格後の再書き出し可否が同一であること
-- `AdFrequencyPolicy`（表示禁止条件、初回書き出し、連続表示の抑止）
+- 広告表示頻度の判定（表示禁止条件、初回書き出し、連続表示の抑止）
 
 ### 2.5 レンダリング（[画像処理](image-pipeline.md) の 2 / 4）
 
@@ -169,6 +261,29 @@
 - **`NaN` や無限大の座標が `throw` されること**
 - **完全に透明なカスタムスタンプ画像が取り込み時に拒否されること**
 - **`isMasked == true` の顔に no-op 相当の値が渡されたとき `compileRenderDraft` が `throw` すること**
+- **`authorizeRenderSpec` が有料スタンプを含む `RenderSpec` を `canUsePremiumStamps == false` で `blocked` にすること**
+- **`authorizeRenderSpec` が手順 −2 と手順 1 の直前の 2 回評価され、`prepared` で停止中に `EffectSetting` を書き換えても手順 1 で検出されること**
+- **`projectRevision` を据え置いた改変でも検出されること**
+- **`enabledStampPacks` が `ResolvedCapabilities` にあり、`Domain` が `RemoteConfig` を参照しないこと**
+- **バッチの 1 項目が `blocked` のとき `failed(capabilityRequired)`（`isRetryable == false`）へ遷移し、バッチの完了判定が成立すること**
+- **`premiumStampNotAvailable` / `customStampNotAvailable` でのみ Paywall が提示されること**
+- **`unknownBuiltInStampCode` では Paywall を提示せず、`capabilityRequired` のエラーと設定変更の誘導になること**
+- **`RenderSpecBlockReason` が 3 case であり、`disabledStampPack` を持たないこと**
+- **`authorizeRenderSpec` が `enabledStampPacks` を見ないこと**
+- **運用側がパックを無効化しても、そのパックを使う既存プロジェクト（確定記録の有無を問わず）が再書き出しできること**
+- **無効化したパックのスタンプを新規に選択できないこと**（UI 側の制約）
+- **`RemoteConfigState` を削除しても書き出しの可否が変わらないこと**
+- **`settingsEntryToApply.settingsHash` が手順 −2 の `ExportInputSnapshot.projectSettingsHash` から持ち回られ、手順 3 で再計算されないこと**
+- **手順 2 の `fileVerified` で停止中に設定を有料スタンプへ書き換えても、手順 1 の再評価のハッシュ照合で検出されロールバックへ入ること**
+- **能力要件に影響しない設定変更（領域の縮小・`cellRatio` の最小化・`isMasked` の解除）も、ハッシュ照合で検出されること**
+- **「変更せず再書き出し」の免除が `exportedSettingsEntries` の確定記録のみを根拠とし、`pendingExportedSettingsEntries` では成立しないこと**
+- **免除の適用範囲が有料スタンプの能力要件に限られ、クォータと開始ゲートを免除しないこと**
+- **降格した利用者が既存作品を変更せず再書き出しできること**
+- **カスタムスタンプを `canUseCustomStamps == false` で `blocked` にすること**
+- **`StampCatalog` に無い `code` を `blocked` へ倒し、無料扱いにしないこと**
+- **`enabledStampPacks` に無いパックのスタンプでも `authorized` になること**（認可は見ない。新規選択のみ UI が禁じる）
+- **`EffectSetting` を DB 直接改変で有料スタンプへ書き換えても、手順 −2 の認可で開始が止まること**
+- **`StampCatalog` の分類がリモート設定から変更できないこと**
 - 永続データのデコード時にも検証済み値型の `throws` 版が呼ばれること
 - **境界型（`ImageSource` / `LoadedPhoto` / `DetectionResult` / `RenderedImage` / `OutputFile`）が `URL` もパス文字列も持たないこと**
 - **`ImageSource` に未正規化を表す値が存在しないこと**（`OrientationState` を持たない）
@@ -213,7 +328,7 @@
 | 集合の構築順を変えても同じバイト列になる | unordered の分類が正しい |
 | ordered 配列の順序を変えると別のバイト列になる | ordered の分類が正しい |
 
-対象 payload は `UsageLedger` / `SubscriptionState` / `ExportCommit` / `RemoteConfigState` の 4 種すべて。
+対象 payload は `UsageLedger` / `SubscriptionState` / `ExportCommit` / `RemoteConfigState` / `TrustedTimeState` の 5 種すべて。
 
 ### 2.8 更新誘導（[アーキテクチャ設計](architecture.md) の 6.7）
 
@@ -230,7 +345,7 @@
 - ストレージ必要量計算、`ExportQueue` 状態機械
 - 履歴の保存期間と容量判定。24 時間のやり直し保証が容量超過時にも守られること
 - `canDeleteHistoryUnit` が列挙された全参照元を見ること（[アーキテクチャ設計](architecture.md) の 7.5）
-- **絶対保護（非終端キュー項目 / 非終端 `ExportCommit` / `isUndelivered` の `OutputRecord`）が、手動削除でも拒否されること**
+- **絶対保護（非終端キュー項目 / `ExportCommit` 行の存在（`published` を含む）/ `isUndelivered` の `OutputRecord`）が、手動削除でも拒否されること**
 - **お気に入り・編集中・`WorkingSourceRecord`・24 時間保証が、自動削除では保護され、明示確認付きの手動削除では上書きできること**
 - **上書き対象ごとに、失われるものを示す確認文言が選ばれること**
 - 未保存バッチが 1 件までに制限されること
@@ -266,10 +381,10 @@
 - `fileVerified` で落ちた場合、`verifiedOutput` と実体を突き合わせて復旧できること
 - 手順 7 のサイズ・SHA-256 が `verifiedOutput` からのコピーであり、再計算でないこと
 - 0 バイト・破損・SHA 不一致の出力ファイルで `readyToPublish` のコミット行が削除されないこと
-- 手順 6 の失敗時、ロールバックが台帳 → `OutputRecord` → ファイル → コミット → ゲートの順で実行されること
-- ロールバック手順 1 が失敗した場合、コミットとファイルが残り復旧エラーになること
-- コミット行削除後にファイルを失っても、月間枠・grant・トライアルが戻らないこと
-- コミット削除済みの Export A のファイル欠損で、同一素材を再書き出しした Export B の grant が消えないこと
+- 手順 6 の失敗時、ロールバックが `rollingBack` → 台帳 → ファイル → コミット → ゲートの順で実行されること
+- ロールバックの手順 1（台帳の取り消し）が失敗した場合、コミットとファイルが残り復旧エラーになること
+- 手順 9 の完了後にファイルを失っても、月間枠・grant・トライアルが戻らないこと
+- 手順 9 完了後の Export A のファイル欠損で、同一素材を再書き出しした Export B の grant が消えないこと
 - 生成完了後の異常終了では消費が戻らないこと
 - 消費確定が手順 7 であり、保存や共有の回数に影響されないこと
 - **`unavailable` のまま復旧を開始した場合に待機へ入ること**（[アーキテクチャ設計](architecture.md) の 7.4）
@@ -279,16 +394,23 @@
 - **`prepared` の `outputFile` が `nil` であり、`fileVerified` 以降は `OutputFileRef` が入っていること。手順 2 で `verifiedOutput` と同時に確定すること**
 - **手順 7 が `published` を書き、コミット行を削除しないこと**
 - **`finalizeExport` がコミットを削除せず、`deletePublished` が手順 9 で削除すること**
-- **`deletePublished` が HMAC・`state == published`・手順 8 の完了を再検査すること**
+- **`deletePublished` が HMAC と `state == published` を再検査すること。呼び出しが手順 8 の台帳保存成功後に限られること**
 - **`published` 以外の `state` で `deletePublished` が throw すること**
 - **`published` から手順 8・9 を冪等に再実行でき、手順 3 へ戻らないこと**
+- **ロールバックが手順 0 で `rollingBack` を書き、手順 1 完了後・手順 4 前の強制終了でも前進せずロールバックを再実行すること**
+- **`rollingBack` から `readyToPublish` へ戻す DB 改変が行 HMAC で弾かれること**
+- **`readyToPublish` でキャンセル要求を受けたとき、同一プロセス内でも `rollingBack` へ遷移し手順 7 を実行しないこと**
+- **手順 8 が 4 回以上失敗したとき、pending を削除して手順 9 へ進み、アプリが止まらないこと**
+- **その場合に成果物と会計が影響を受けず、「変更せず再書き出し」だけが成立しなくなること**
+- **`UnknownLibrarySave` の追加が upsert であり、同じ `exportID` の再挿入で手順 7 が失敗しないこと**
+- **`finalizeExport` が同じ `projectID` の `OutputRecord` の存在を事前検査し、手順 4 まで進んでから制約違反にならないこと**
 - **`published` で 2 つ目の `OutputRecord` が作られないこと**
 - **ゲートの解放が手順 9 またはロールバック完了であること**
 - **手順 1 の途中で落ちた一時ファイルが、どのコミットからも参照されず孤児 GC で回収されること**
 - **`FinalizeExportInput` が `exportID` と `queueItemID` の 2 つだけであり、`OutputRecord` / `ExportRecord` / `Project.updatedAt` を保存済みコミットから導出すること**
 - **`queueItemID` が別 `Project` のキュー項目を指す場合に throw すること。`projectID` / `batchID` / `state == .exporting` をすべて検査すること**
 - **単体書き出しで `queueItemID != nil` なら throw すること**
-- **`loadRecoverySnapshot` が復旧前に一度だけ読まれ、`checkForeignKeys` が復旧後に別途呼ばれること**
+- **`loadSignedCommitRows` が手順 2 で、`loadRecoverySnapshot` が手順 2.8 で、`loadPostCommitRecoverySnapshot` が手順 4.2 でそれぞれ 1 回だけ呼ばれること。`checkForeignKeys` が復旧後に別途呼ばれること**
 - **`ExportCommitColumns` が生のバイト列であり、署名検証前に `ProjectID` などへデコードされないこと**
 - **手順 7 が `WorkingSourceRecord` を同一トランザクションで削除し、実体を `PendingFileDeletion` へ積むこと**
 - **`AccountingIntent.settingsEntryToApply` が手順 4 で `pendingExportedSettingsEntries` へ入り、確定側へは入らないこと**
@@ -299,17 +421,37 @@
 - **一度も成功していない設定が「変更せず再書き出し」の判定に使われないこと**
 - **`AccountingApplied` を単独の根拠にしないこと。`applied` 未保存で落ちても正しくロールバックできること**
 - **`ProjectSourceSnapshot` が書き出しで追加も削除もされず、ロールバックの対象にもならないこと**
-- **台帳を修復した起動では、署名が正常な非終端コミットも含めてすべて破棄され、キュー項目が `failed(.ledgerRepaired)` になること**
+- **台帳を修復した起動では、署名が正常な非終端コミットも含めてすべて破棄され、キュー項目が `failed(ledgerRepaired)` になること**
 - **`loadPostCommitRecoverySnapshot()` が手順 4 の完了直後に 1 回だけ呼ばれること**
 - **`readyToPublish` から復旧して作られた出力が、手順 7.5 の復元対象と手順 8 の件数に含まれること**
 - **手順 7 で削除された `WorkingSourceRecord` が、手順 4.5 の照合対象から外れていること**
+- **`loadRecoverySnapshot()` が手順 2.8（手順 2.5 の後）で実行され、修復で破棄したコミットを手順 4 が復活させないこと**
+- **`ExportCommitState` の固定番号が `published = 6` / `rollingBack = 7` であり、既存の `published` 行が `rollingBack` としてデコードされないこと**
+- **状態別のロールバック経路がすべて手順 0（`markRollingBack`）を通ること。`finalizing` からのキャンセルでも前進しないこと**
+- **`markRollingBack` が `published` / `rollingBack` に対して throw すること**
+- **手順 8 が保護データ利用不可では諦めず、`waitUntilAvailable()` で待って再試行すること**
+- **同一プロセス内 4 回目で諦め、起動時復旧では回数を引き継がず改めて 3 回試すこと**
+- **`deletePublished` の事前条件が「pending が解消していること」であり、昇格と削除のどちらでも満たされること**
+- **署名不正行がある間、手順 5.5 が `Project` 不在を理由とする pending 削除も行わないこと**
+- **`(lease 1 / pending 1)` で復旧エラーが維持され、利用者が「すべて破棄して続ける」を選べること**
+- **「すべて破棄して続ける」で、`accountingMode == .freeMonthlyConsume` の孤立 lease の `exportID` が `consumedExportIDs` へ入り、消費が確定すること**
+- **`paidUnlimited` / `trialCredit` の孤立 lease では `consumedExportIDs` が変わらないこと**
+- **コミット行を任意に削除して孤立 lease と孤立 pending の個数を作っても、`freeMonthlyConsume` の消費が回避できないこと**
+- **「すべて破棄して続ける」が台帳の保存成功を確認したあとに、署名不正行を行 ID だけで削除すること**
+- **削除しない実装では次回起動で同じ復旧エラーへ戻ることを、退行テストとして押さえること**
+- **署名不正行が残る間に複数の `Project` を削除しても、孤児 pending が複数残ることが不変条件違反として扱われないこと**
+- **手順 8 の昇格が継続的に失敗しても、手順 4 が「完了」として扱われ、手順 4.2〜9 が実行されること**
+- **その状態で手順 7.5 が未受け渡し出力を復元し、手順 9 が通常画面を表示し、新しい書き出しが許可されること**
+- **コミットが `published` のまま残り、次回起動の手順 4 が昇格を再試行すること**
+- **`AppLifecycle` の挿入が手順 9 で行われ、手順 9 に到達しない起動では書かれないこと**
+- **手順 5.5 の孤児 binding 判定が 4.2 の snapshot ではなくその時点の DB を読むこと**
 - **同じ起動で `WorkingSourceRecord` もすべて破棄され、実体が `PendingFileDeletion` へ積まれること**
 - **その破棄が署名不正行の規則（行 ID だけで削除し、フィールドを使わない）と同じ手順で行われること**
 - **その破棄で `UsageLedger` へ触れないこと（整合性封鎖のまま）**
 - **修復後の台帳で `exportedSettingsEntries` と `projectSourceSnapshots` が空になり、既存 `Project` が削除されないこと**
 - **修復後は「変更せず再書き出し」が成立せず、新規プロジェクトとして通常の消費になること**
-- **修復対象のキュー項目が `failed(.ledgerRepaired)` になり、`paused` にならないこと**
-- **`failed(.ledgerRepaired)` が再試行不可（`isRetryable == false`）であること**
+- **修復対象のキュー項目が `failed(ledgerRepaired)` になり、`paused` にならないこと**
+- **`failed(ledgerRepaired)` が再試行不可（`isRetryable == false`）であること**
 - **修復後の既存 `Project` が閲覧と削除だけ可能で、再接続を試みられないこと**
 - **`SignedCommitRow.schemaVersion` から正準バイト列を再構築でき、`delivery` を含む全署名対象が列として読めること**
 - **`delivery` を書き換えた行が署名検証で不正になること**
@@ -329,7 +471,8 @@
 - **保持条件に `requiresDeliveryAttention`、件数に `isUndelivered` が使われ、混同されないこと**
 - **注記付き出力も 24 時間で削除され、その際に通知しないこと**
 - **利用者が確認すると `UnknownLibrarySave` が消え、`OutputRecord` 削除でも CASCADE で消えること**
-- **`resolveOrphanedAttempts()` が起動時復旧の手順 7 で必ず呼ばれ、7.5 と 8 がその後に実行されること**
+- **`resolveOrphanedAttempts()` が起動時復旧の手順 7 で必ず呼ばれ、解決後の全 `OutputDeliverySnapshot` を返すこと**
+- **手順 7.5 と 8 が `PostCommitRecoverySnapshot` ではなく手順 7 の戻り値を使い、手順 4 で作られた出力と手順 7 の解決結果の両方が反映されること**
 - **`deliveryUnknown` が未受け渡しとして 24 時間の保持と離脱確認に数えられること**
 - **`OutputRecord` の `format` / `suggestedCreationDate` から `OutputFile` を復元でき、`Project` の現在値を参照しないこと**
 
@@ -357,12 +500,16 @@
 - **`batchTrial(true)` では予約が `TrialEntry` へ変換されること**
 - **`paidUnlimited` / `freeMonthlyReexport` / `batchTrial(false)` では追加消費が起きないこと**
 - **`consumedExportIDs` への追加が冪等であること**
-- **孤立 lease が 0 件のとき（`accountingCommitted` / `readyToPublish` で壊れた場合）、台帳を変更せずコミット行だけが削除されること**
 - 孤立 lease が 2 件以上なら復旧エラーを維持し、台帳へ触れないこと
 - **署名不正行の `outputFile` / `projectID` / `exportID` が参照されず、他の正常な出力と履歴が削除されないこと**
 - **孤立 lease 1 件・孤立 pending 0 件で消費が確定し、pending は作られないこと**
 - **孤立 lease 0 件・孤立 pending 1 件で pending が削除され、確定側へ昇格しないこと**
 - **孤立 lease 0 件・孤立 pending 0 件で台帳が 1 バイトも変わらないこと**
+- **署名不正行がある間、手順 5.5 が孤児 pending を削除しないこと**
+- **そのため `(lease 1 / pending 1)` が `(1 / 0)` に見えず、復旧エラーが維持されること**
+- **「破棄して続ける」の完了後に、保留していた手順 3 と 5.5 の孤児回収が実行されること**
+- **回収前に新規認可が許可されず、空いているクレジットが「使用中」と判定されないこと**
+- **孤児 pending の判定が「コミット行が存在しない」であり、復旧エラーで残った有効コミットの pending を消さないこと**
 - **lease と pending がともに 1 件ある場合に復旧エラーが維持されること**
 - **署名不正行がある間、孤児予約と孤児 lease の自動回収が保留されること**
 
@@ -398,7 +545,7 @@
 - 未受け渡しの出力が破棄または 24 時間経過まで保持されること
 - 受け渡し成功後も完了画面を離れるまで出力が保持され、保存と共有を任意の順序で実行できること
 - 異常終了後の起動時、`isUndelivered` では復旧案内が出て、`delivered` では出ないこと
-- 「履歴を保存しない」設定で、未受け渡し出力・`UsageLedger`・未完了 `ExportCommit`・トライアル用 `SourceRecord` の 4 つ以外が残らないこと
+- 「履歴を保存しない」設定で、未受け渡し出力・注記付き `delivered` 出力・`UsageLedger`・未完了 `ExportCommit`・トライアル用 `SourceRecord` の 5 つ以外が残らないこと
 - `canDeleteHistoryUnit` が**列挙された全参照元**を保護すること
 - **`Batch` 削除が所属する全 `Project`・キュー項目・`ExportRecord` を 1 トランザクションで削除し、台帳側も全 `projectID` 分を 1 トランザクションで削除すること**
 - **`deleteHistoryUnit` が `DeletionContext` を受け取らず、DB トランザクション内で読み直して再判定すること**
@@ -423,6 +570,42 @@
 - **削除の中断（DB のみ進んだ状態）が孤児 binding として手順 5.5 で回収されること**
 - **`sourceFile` を別 `Project` の `.processingTemporary` ファイルへ差し替えると、起動時と書き出し開始時の両方で検出されること**
 - **プレビュー・再検出・複製・サムネイル生成のいずれも `VerifiedWorkingSourceResolver` を経由し、`WorkingSourceRecord` を直接読まないこと**
+- **`withVerifiedSource` が照合と利用を 1 つのスコープへ閉じ、`handle` を外へ持ち出せないこと**
+- **`FaceDetector` / `ImageEffectRenderer` が `VerifiedImageSource`（`OpenFileHandle` を持つ）を受け取り、`ManagedFileRef` から開き直せないこと**
+- **`FaceDetector` / `ImageEffectRenderer` / `PickedPhotoLoader` の宣言が文書内に 1 か所ずつしか存在しないこと**（旧署名の残置がないこと）
+- **`PickedPhotoLoader.load` が `ManagedFileRef` を受け取るのは取り込み経路だけであり、既存 `Project` の素材読み込みに使われないこと**
+- **`OpenFileHandle` が `Foundation` と標準ライブラリだけで宣言され、`CoreGraphics` / `CoreImage` の型を引数に持たないこと**
+- **`withMappedBytes` が同期・非エスケープであり、`UnsafeRawBufferPointer` を `body` の外へ持ち出せないこと**
+- **`withMappedBytes` が照合に使ったのと同じディスクリプタを `mmap` し、パスを再解決しないこと**
+- **検出経路では `body` の内側で縮小デコードが完了し、返す `CGImage` が独自のバッファを持つこと**
+- **書き出し経路では `body` の外へ圧縮バイト列の `Data` を返し、デコード済みピクセルを返さないこと**
+- **`body` を抜けた後にマップ解除済み領域の読み取りが発生しないこと**
+- **書き出し 1 枚のピーク使用量が約 192MB にならず、ファイルサイズ相当＋タイル処理分に収まること**
+- **効果の合成とエンコードが `body` の外側で行われ、`render` の `async` 契約が保たれること**
+- **同期区間がバイト列のコピー（または縮小デコード）だけであること**
+- **48 メガピクセルの原寸を 50 枚処理しても、`Data` への全読み込みによるメモリ枯渇が起きないこと**
+- **処理用素材のファイルが書き込み一度きりであり、既存 inode への追記・切り詰めを行う経路が存在しないこと**（`SIGBUS` の前提確認）
+- **検出用の縮小が `FaceDetector` の内側でメモリ内に行われ、`.processingTemporary` の中間ファイルが作られないこと**
+- **`LoadedPhoto` が `detectionSource` を持たないこと**
+- **`DetectionResult.detectionPixelSize` が検出器の内部縮小後の実寸を報告すること**
+- **再検出が `withVerifiedSource` → `VerifiedImageSource` → `detect` の 1 経路のみを通り、`PickedPhotoLoader` を経由しないこと**
+- **再検出中に原寸を差し替えても、別の写真の顔座標が `FaceTrack` へ保存されないこと**
+- **照合・レンダリング・完了後の再計算がすべて同一の `handle` を経由すること**
+- **`body` の実行中に inode を差し替えても、消費側が旧 inode を読み続け、完了後の再計算が一致すること**
+- **同じ inode への上書きが完了後の再計算で検出され、結果が破棄されること**
+- **`WorkingSourceVerifier` が `projectID` ごとに直列化され、`SourceImportCoordinator` と待機キューを共有すること**
+- **`HistoryDeletionCoordinator` が全体キューに加えて削除対象の各 `projectID` の待機キューを取得し、`projectID` の昇順で取得すること**
+- **プレビュー描画中・再検出中に同じ `Project` の削除を要求しても、`body` の完了まで待たされること**
+- **`Batch` 削除で複数の `projectID` を取得してもデッドロックしないこと**
+- **`HistoryDeletionCoordinator` が `ExportStartGate` を取得しないこと**（2 つの全体キューを跨がない）
+- **`body` の完了後に同じディスクリプタでハッシュを再計算し、不一致なら結果を破棄して `invalid(.contentMismatch)` を返すこと**
+- **照合の通過後にファイルを差し替えても、その回の処理には反映されず、完了時の再計算で検出されること**
+- **プレビューが 1 回の `withVerifiedSource` の内側で完結し、`VerifiedWorkingSource` を編集セッション中に使い回さないこと**
+- **`invalidateWorkingSource` が `projectID` だけを受け取り、`reason` を受け取らないこと**
+- **排他区間の内側で照合をやり直し、再判定で有効なら `nowValid` を返して破棄しないこと**
+- **再選択が正常完了した直後に陳腐化した無効化が走っても、`WorkingSourceRecord` が破棄されないこと**
+- **無効化が `SourceImportCoordinator` の `projectID` 待機キューで直列化され、同じ `Project` の再選択と並行しないこと**
+- **`invalid(.recordMissing)` では無効化が走らず、再接続の導線になること。無効化が冪等であること**
 - **起動後に差し替えた場合、次の読み取りで検出されて `paused(.sourceReselectionRequired)` になること**
 - **「Free 版として複製」のコピー元が検証を通ること。差し替えた画像を新 `Project` の正規 binding にできないこと**
 - **正規化ファイルの内容を書き換えると、ハッシュ不一致で検出されること**
@@ -437,17 +620,18 @@
 - **再接続が `detectionRevision` / `projectRevision` を増やし、検出結果を再利用しないこと**
 - **照合に `ProjectSourceLocator` を使わないこと（ファイル取り込みで `nil` でも成立すること）**
 - **再選択で素材が一致しない場合、そのキュー項目で続行できないこと**
-- **再選択が顔検出をやり直し、`detectionRevision` と `projectRevision` を増やし、旧 `FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` / `PreviewConfirmation` を破棄すること**
+- **再選択が顔検出をやり直し、`detectionRevision` と `projectRevision` を増やし、旧 `FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` を破棄すること**
+- **`PreviewConfirmation` が DB に存在せず、`detectionRevision` の増加だけで確認が無効になること**
 - **再選択の候補が一時領域へ物質化される間、既存の `ProjectSourceSnapshot` が上書きされないこと**
 - **候補が一致しないまま中断しても、元の素材と snapshot が失われないこと**
 - **一致した場合の差し替え・派生データ破棄・リビジョン更新が単一の DB トランザクションで行われること**
-- **その途中で終了した場合、次回起動でファイルと DB のどちらかだけが進んだ状態にならないこと**
+- **再選択 Saga の手順 8（DB 側）の途中で終了した場合、DB トランザクションが巻き戻り、作成済みファイルは孤児として回収されること**
 - **その削除で `Project` が消えないこと。`retentionNow == nil` の間は削除しないこと**
 - **`isTerminal` が `completed` / `failed` / `canceled` のみ真であり、履歴削除の保護と完了判定が同じ述語を使うこと**
 
 ### 3.8 更新誘導との順序（[アーキテクチャ設計](architecture.md) の 6.7）
 
-- **更新判定が復旧手順 −4〜7 の完了後に実行されること**
+- **更新判定が復旧手順 −4〜7.5 の完了後に実行されること**
 - **`.required` かつ `isUndelivered` の出力があるとき、受け渡し導線が先に提示されること**
 - **その画面から新規加工・履歴・設定へ進めないこと**
 - **保存または破棄で `isUndelivered` が 0 件になった時点で、通常の強制更新画面へ切り替わること**
@@ -466,7 +650,7 @@
 
 ### 4.2 永続化の原子性（[アーキテクチャ設計](architecture.md) の 7.1、[書き出し Saga](export-saga.md) の 3）
 
-- 手順 7 の DB トランザクションが原子的であり、`OutputRecord` / `ExportRecord` / キュー状態 / `Project` の更新とコミット削除が同時に成立すること
+- 手順 7 の DB トランザクションが原子的であり、`OutputRecord` / `ExportRecord` / キュー状態 / `Project` / `WorkingSourceRecord` の更新とコミットの `published` 更新が同時に成立すること
 - **「コミットあり・`OutputRecord` あり」が `published` のときだけ観測されること。それ以外の `state` では観測されないこと**
 - `synchronous = EXTRA` と `foreign_keys = ON` が設定され、起動時に読み返して検証されること
 - スキーマ移行が単一トランザクションで確定し、途中適用が観測されないこと
@@ -474,24 +658,24 @@
 - **`Project` の削除が `OutputRecord` / `ExportCommit` の存在で RESTRICT され、`FaceTrack` / `EffectSetting` / `ExportSetting` / `ExportQueueItem` / `ExportRecord` / `ProjectStampAsset` は CASCADE すること**
 - **`Batch` の削除で `OutputRecord.batchID` / `ExportCommit.batchID` / `ExportRecord.batchID` が SET NULL になること**
 - **`journal_mode` が `DELETE` であり、`TRUNCATE` / `PERSIST` / `WAL` なら復旧エラーになること**
-- **`blobKeyRawValue` が `UsageLedger = 1` / `SubscriptionState = 2` / `RemoteConfigState = 3` で固定されていること**
+- **`blobKeyRawValue` が `UsageLedger = 1` / `SubscriptionState = 2` / `RemoteConfigState = 3` / `TrustedTimeState = 4` で固定されていること**
 - `PRAGMA foreign_key_check` が起動時に実行され、違反があれば復旧エラーになること
 
 ### 4.3 署名と鍵（[正準スキーマ](canonical-schema.md)、[アーキテクチャ設計](architecture.md) の 7.2）
 
 - `ExportCommit` が状態遷移のたびに再署名され、正規の更新で検証失敗しないこと
-- `SignedPayload` の署名対象に `payloadType` が含まれ、種別間の付け替えが検出されること
+- **`signedBytes` の先頭に `payloadType` が含まれ、種別間の付け替えが検出されること**
 - 実 Keychain の鍵で署名・検証が往復すること。鍵の破棄が `integrityFailure` になること
 - HKDF による鍵の用途分離（`payload-signing-v1` / `source-provider-key-v1`）が実際に別の鍵を導くこと
 - **blob `missing` / 鍵 `missing` で新規台帳が作られること**
 - **blob `missing` / 鍵 `existing` でも新規台帳が作られ、復旧エラーにならないこと**
 - **`ProtectedBlobKey<UsageLedger>` へ `SubscriptionState` を渡すコードがコンパイルできないこと**（型検査）
 - **`OutputMetadata` に許可フィールド以外を渡せないこと。`ImageEncoder` が元のメタデータ辞書を受け取らないこと**
-- **読み込み時に `payloadType` と `schemaVersion` が型の宣言と一致することを確認し、不一致を `integrityFailure` とすること**
+- **読み込み時に `payloadType` と `schemaVersion` を型の宣言と照合し、`payloadType` 不一致は破損、`schemaVersion` 不一致は `unsupportedSchema` として移行へ回すこと**
 - **HMAC-SHA256 の署名長が 32 バイトであること。HKDF-SHA256 の派生鍵が 32 バイトで、用途ごとに異なること**
 - **`providerAssetKeyHash` が小文字 16 進 64 文字であること**
 - **`ProtectedBlobKey` から固定の内部ファイルへ解決され、再起動後も同じ blob を読めること**
-- **`ManagedFileID` を外部へ保存しなくても 3 種の blob を発見できること**
+- **`ManagedFileID` を外部へ保存しなくても 4 種の blob を発見できること**
 
 ### 4.4 ファイル管理と保護（[アーキテクチャ設計](architecture.md) の 7.3 / 7.4）
 
@@ -512,7 +696,7 @@
 - **DB 登録に失敗した場合、その snapshot が補償削除されること**
 - **補償削除の前に終了しても、対応する `Project` が無い snapshot が起動時復旧の手順 5.5 で回収されること**
 - **同じ走査で孤児 `exportedSettingsEntries` も削除されること**
-- **`RecoverySnapshot.projectIDs` が全 `Project` を含み、これを照合に使うこと**
+- **`PostCommitRecoverySnapshot.projectIDs` が全 `Project` を含み、手順 5.5 の照合にこれを使うこと**
 - **インポート Saga が `PickedPhotoInput.importedFile` を作り直さず、所有権を受け取ること**
 - **DB 確定（手順 5）の後に取り込みファイルが削除され、削除失敗時は `PendingFileDeletion` へ積まれること**
 - **DB 確定より前に取り込みファイルを削除しないこと**
@@ -525,7 +709,7 @@
 - **DB 確定と台帳削除の間で終了しても、`Project` から認可情報だけが失われる状態にならないこと**
 - **`WorkingSourceRecord` が最初から向き正規化済みの原寸ファイルを指すこと。差し替えが発生しないこと**
 - **`contentFingerprint` が取り込みファイル（正規化前）から計算されること**
-- **`detectionSource` が検出の完了後に削除され、DB へ登録されないこと**
+- **検出用の縮小画像がメモリ内で完結し、`ManagedFileStore` へ書かれず DB へも登録されないこと**
 - **DB 登録の完了前に、選択処理の成功が呼び出し元へ返らないこと**
 
 ### 4.5 メタデータ（[アーキテクチャ設計](architecture.md) の 7.5 / 6.4）
@@ -538,7 +722,7 @@
 
 ### 4.6 Vision と Core Image（[画像処理](image-pipeline.md) の 1 / 4）
 
-- Vision の左下原点座標が左上原点へ変換されること。**角度が非 Optional の `Measurement<UnitAngle>` から度へ変換され、符号の向きが 5.1 と一致すること**
+- Vision の左下原点座標が左上原点へ変換されること。**角度が非 Optional の `Measurement<UnitAngle>` から度へ変換され、符号の向きが [画像処理](image-pipeline.md) の 4 章と一致すること**
 - `FaceObservation.confidence` の分布が 1.0 に張り付いていないこと（[画像処理](image-pipeline.md) の 1 の受入条件）
 - `NormalizedRect` の `right` / `bottom` が排他的境界として扱われること
 - `rotationDegrees` が時計回り正・領域中心基準で描画されること
@@ -601,8 +785,10 @@
 
 ### 項目
 
-- 手順 −2 / 0 / 1 / 2 / 3 / 4 / 5 / 6 / 7 の**各直後**で強制終了し、再起動後に整合が回復すること
-- ロールバック手順 1 の完了後に落ちても、再起動時の再実行が冪等であること
+- 手順 −2 / 0 / 1 / 2 / 3 / 4 / 5 / 6 / 7 / 8 / 9 の**各直後**で強制終了し、再起動後に整合が回復すること
+- **手順 7 の直後（`published`）で落ちても、再起動時に手順 8・9 が完了し、出力と設定エントリの両方が確定すること**
+- **手順 8 の直後・手順 9 の前に落ちても、`deletePublished` の再実行でコミット行が消えること**
+- ロールバックの手順 1 の完了後に落ちても、`rollingBack` が残っているため再起動時の再実行が冪等であること
 - 予約を作った直後に落ちた場合、孤児予約が起動時に回収され、その完了後に新規認可が許可されること
 - `StampAsset` の作成で DB 更新の直前に落ちた場合、孤児ファイルが起動時 GC で回収されること
 - `PendingFileDeletion` の削除に失敗した場合、次回起動時の GC で再試行されること
@@ -615,7 +801,7 @@
 - **`Project` 削除の DB 確定直後・台帳削除の前に落ちた場合、次回起動で 4 集合と未参照 `SourceRecord` が回収されること**
 - **台帳だけが進んだ状態は存在しうるが、次回起動で `paused(.sourceReselectionRequired)` へ遷移し、別画像を利用できないこと**
 - **その状態で素材・設定・検出結果のいずれも壊れないこと**
-- **手順 9 の補償が走った場合、旧 binding へ戻って何も変わらない状態になること**
+- **再選択 Saga の手順 9（補償）が走った場合、旧 binding へ戻って何も変わらない状態になること**
 
 ---
 

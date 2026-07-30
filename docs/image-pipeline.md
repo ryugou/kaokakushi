@@ -37,9 +37,9 @@ MediaKit   RenderPlan を受け取り、4 プリミティブのみ実行
 処理手順は仕様 8.3 に従います。
 
 1. 元画像の向き情報を正規化する
-2. 検出用に長辺 1,920 ピクセル程度へ縮小する
+2. `FaceDetector` の内側で、検出用に長辺 1,920 ピクセル程度へ縮小する（中間ファイルを作らない。5 章）
 3. `DetectFaceRectanglesRequest` を実行する
-4. **`MediaKit` で正規化座標へ変換して返す**（Y 軸の反転を含む。5.4）
+4. **`MediaKit` で正規化座標へ変換して返す**（Y 軸の反転を含む。4 章）
 5. 以降、`Domain` は顔領域をピクセル座標として保持しない
 
 検出用画像上で顔の短辺が 24 ピクセル未満の検出結果には `isSmallFace` を立てます（仕様 8.5）。
@@ -512,15 +512,9 @@ struct RasterizedStampAsset: Sendable {
     let rasterFile: RasterFileRef
     let descriptor: RawBitmapDescriptor
 }
-
-protocol ImageEffectRenderer: Sendable {
-    func render(
-        source: ImageSource,
-        plan: RenderPlan,
-        rasterAssets: [String: RasterizedStampAsset]   // bitmapID → 実体
-    ) async throws -> RenderedImage
-}
 ```
+
+`ImageEffectRenderer` はこの型を `rasterAssets: [String: RasterizedStampAsset]` として受け取ります。**プロトコルの宣言は 5 章が正本です**（下記の検証済み境界の節）。ここでは受け渡す値の形だけを定めます。
 
 **実体はファイル経由で渡します。** 1 バッチ 50 枚では、原寸スタンプのビットマップを複数枚同時にメモリへ載せることになります。一時ファイルにすれば `CGDataProvider(url:)` でメモリマップして読めます。
 
@@ -687,7 +681,7 @@ func makeCIRect(_ rect: PixelRect, canvasHeight: Int) -> CGRect {
 
 ##### 境界型
 
-**プロトコル署名に現れる型は、すべてここで定義します。** 特に `OutputFile` を「パス文字列を持つ型」として実装すると、`ManagedFileRef` の境界（[アーキテクチャ設計](architecture.md) の `ManagedFileStore`）を迂回します。
+**プロトコル署名に現れる型は、`ShareResult` を除きすべてここで定義します**（`ShareResult` は受け渡しの結果分類であり [書き出し Saga](export-saga.md) の 8 が正本）。特に `OutputFile` を「パス文字列を持つ型」として実装すると、`ManagedFileRef` の境界（[アーキテクチャ設計](architecture.md) の `ManagedFileStore`）を迂回します。
 
 ```swift
 // Domain — すべて Foundation のみ。CGImage / CIImage / URL を持たない
@@ -702,17 +696,16 @@ struct ImageSource: Sendable {
     let format: ImageFormat
 }
 
-/// PickedPhotoLoader の戻り値。検出用の縮小画像を含む
+/// PickedPhotoLoader の戻り値
 struct LoadedPhoto: Sendable {
     let source: ImageSource           // 向き正規化済みの原寸。WorkingSourceRecord が指す実体
-    let detectionSource: ImageSource  // 長辺 1,920 程度へ縮小。検出のスコープ限り
     let capture: OriginalCaptureMetadata  // EXIF 由来（正準スキーマ 5.1.1）
 }
 
 /// FaceDetector の戻り値
 struct DetectionResult: Sendable, Equatable {
     let faces: [DetectedFace]
-    let detectionPixelSize: PixelSize   // isSmallFace の判定に使った寸法
+    let detectionPixelSize: PixelSize   // 検出器が内部で縮小した後の実寸。isSmallFace の判定に使う
     let revision: FaceDetectorRevision  // 採用した Vision リビジョン
 }
 
@@ -783,20 +776,9 @@ v1 が生成する生ビットマップは常に次の値をとります。
 
 ```swift
 protocol PickedPhotoLoader: Sendable {
-    /// 物質化済みファイルを読み、向きを正規化して返す。選択そのものは扱わない
+    /// 取り込み時のみ。まだ binding が無い新しいファイルを読み、向きを正規化する。
+    /// 既存 Project の素材には使わない（5 章の検証済み境界）
     func load(_ file: ManagedFileRef) async throws -> LoadedPhoto
-}
-
-protocol FaceDetector: Sendable {
-    func detect(_ source: ImageSource) async throws -> DetectionResult
-}
-
-protocol ImageEffectRenderer: Sendable {
-    func render(
-        source: ImageSource,
-        plan: RenderPlan,
-        rasterAssets: [String: RasterizedStampAsset]   // bitmapID → 実体
-    ) async throws -> RenderedImage
 }
 
 protocol ImageEncoder: Sendable {
@@ -814,12 +796,9 @@ protocol MediaSaver: Sendable {
     func saveToPhotoLibrary(_ file: OutputFile) async throws
 }
 
-protocol StampRasterizer: Sendable {
-    func rasterize(
-        _ keys: Set<StampRasterKey>
-    ) async throws -> [StampRasterKey: RasterizedStampAsset]
-}
 ```
+
+`StampRasterizer` の宣言は 3 章が正本です。**ここでは列挙しません。** 同じプロトコルを 2 か所に置くと、片方だけ更新される事故が起きます（`FaceDetector` と `ImageEffectRenderer` で実際に起きました）。
 
 `OutputMetadata` は許可リストで構築した出力メタデータで、ICC プロファイルの有無、ピクセル寸法、保持する場合の `OriginalCaptureMetadata`（ローカル日時・小数秒・UTC オフセット・算出済み `utcMillis`）だけを持ちます（[アーキテクチャ設計](architecture.md) の 7.5）。**`ImageEncoder` は元画像のメタデータ辞書を受け取りません。** 受け取れる形にすると、コピーして削除する実装が可能になります。
 
@@ -839,7 +818,7 @@ protocol AdPresenter: AnyObject {
 
 | プロトコル | 実装モジュール | 使用 API |
 | --- | --- | --- |
-| `SharePresenter` | `MediaKit` | `UIActivityViewController`（[書き出し Saga](export-saga.md) の受け渡し） |
+| `SharePresenter` | `MediaKit` | `UIActivityViewController`（[書き出し Saga](export-saga.md) の 8。`ShareResult` の定義も同章） |
 | `AdPresenter` | `Ads` | Google Mobile Ads |
 
 `OutputDeliveryCoordinator`（`actor`）から `await` して呼びます。`@MainActor` の型はアクタによって状態が保護されるため `Sendable` として扱えます。
@@ -871,11 +850,9 @@ struct PickedPhotoInput: Sendable {
     let representation: SourceRepresentation  // 6.4
 }
 
-protocol PickedPhotoLoader: Sendable {
-    /// 物質化済みファイルを読み、向きを正規化して返す。選択そのものは扱わない
-    func load(_ file: ManagedFileRef) async throws -> LoadedPhoto
-}
 ```
+
+`PickedPhotoLoader` の宣言は上記のプロトコル署名の節が正本です。
 
 | 順 | 操作 | 実行場所 |
 | --- | --- | --- |
@@ -1013,23 +990,25 @@ struct WorkingSourceRecord: Sendable {
 
 要素数は履歴の保存期間内の `Project` 数で、上限があります（[アーキテクチャ設計](architecture.md) の 6.3）。
 
-##### `detectionSource` の寿命
+##### 検出用の縮小画像の寿命
 
-**`detectionSource` は永続化しません。** `FaceDetector` の呼び出しが終わった時点で削除します。
+**縮小画像をファイルにしません。** `FaceDetector` の実装がメモリ内で作り、呼び出しの復帰時に解放します（5 章）。
 
 | 項目 | 規約 |
 | --- | --- |
-| 生成 | `PickedPhotoLoader.load` の中。`kind` は `.processingTemporary` |
-| 寿命 | 検出の呼び出しから復帰までのスコープ |
-| 削除 | 検出の成功・失敗にかかわらず、`LoadedPhoto` を使い終えた時点で呼び出し元が削除する |
+| 生成 | **`FaceDetector` の実装の中。** `VerifiedImageSource.handle` から `withMappedBytes` で読む |
+| 実体 | **メモリのみ。** `ManagedFileStore` へ書かない |
+| 寿命 | `detect` の呼び出しから復帰までのスコープ |
 | DB への登録 | **しない。** `WorkingSourceRecord` が指すのは原寸だけ |
 | 再検出 | そのつど作り直す |
 
 **縮小画像を残す理由がありません。** 再検出は利用者が明示的に行う操作であり頻度が低く、原寸から作り直す費用は 1 回分の縮小だけです。残せば、未加工の顔画像がもう 1 つ端末に増えます。
 
+**ファイルにしないことで、検証済み境界が閉じます。** 縮小画像を `.processingTemporary` として書き出すと、その派生ファイルには binding が無く、**再検出のたびに `handle` を経由しない読み取りが 1 回生まれます。** その瞬間に原寸を差し替えれば、別の写真の顔座標を保存させられます（5 章の照合は原寸の `handle` を見るため、一致して通過します）。**縮小を検出器の内側へ閉じ込めれば、この経路が存在しません。**
+
 ##### 再選択後の Saga
 
-**`paused(.sourceReselectionRequired)` と履歴からの再編集は、どちらも「素材を選び直して既存 `Project` へ結び直す」操作です。** 定めないと、別の写真を選び直しても**以前の顔座標・`ReviewIssue`・`ReviewDecision`・`PreviewConfirmation` を保持したまま再開できます。**
+**`paused(.sourceReselectionRequired)` と履歴からの再編集は、どちらも「素材を選び直して既存 `Project` へ結び直す」操作です。** 定めないと、別の写真を選び直しても**以前の顔座標・`ReviewIssue`・`ReviewDecision` を保持したまま再開できます。**
 
 **通常のインポート Saga を再利用しません。** インポートは新しい `Project` を作り、`ProjectSourceSnapshot` を上書きします。**比較対象を比較前に壊すため、そのままでは使えません。**
 
@@ -1056,7 +1035,9 @@ struct WorkingSourceRecord: Sendable {
 | `WorkingSourceRecord` **あり**（実体が欠損している場合を含む） | `replaceWorkingSource` | `sourceFile` を置換し、**トランザクション内で読んだ現在値**を `PendingFileDeletion` へ入れる。`createdAt` を `replacedAt` へ更新する |
 | `WorkingSourceRecord` **なし**（24 時間で削除済み・履歴から開いた） | `attachWorkingSourceToExistingProject` | 行を新規作成する。`createdAt` は `attachedAt` |
 
-どちらも**同一 DB トランザクション**で、`FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` / `PreviewConfirmation` の破棄と、`detectionRevision` / `projectRevision` の増加を行います。完了後に**顔検出をやり直します。** 新しい確認が完了するまで書き出しできません。
+どちらも**同一 DB トランザクション**で、`FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` の破棄と、`detectionRevision` / `projectRevision` の増加を行います。完了後に**顔検出をやり直します。** 新しい確認が完了するまで書き出しできません。
+
+**`PreviewConfirmation` は DB にありません。** セッション内の値であり（[正準スキーマ](canonical-schema.md) の 5.2）、DB トランザクションの対象になりません。**`detectionRevision` が増えた時点でメモリ上の確認値と一致しなくなるため、破棄操作そのものが不要です。**
 
 ##### 台帳と DB は同時に更新できない
 
@@ -1083,7 +1064,7 @@ struct WorkingSourceRecord: Sendable {
 
 ##### 実装の所在
 
-**インポート・再選択・再接続の 3 つの Saga は `Application` の `SourceImportCoordinator` が所有します。** いずれもファイル・DB・台帳の 3 者を協調させるため、`App` の境界サービスにも `Domain` にも置けません（[アーキテクチャ設計](architecture.md) の 4.3）。
+**インポート・再選択・再接続・複製の 4 つの Saga と、検証失敗時の無効化は `Application` の `SourceImportCoordinator` が所有します。** いずれもファイル・DB・台帳を協調させるため、`App` の境界サービスにも `Domain` にも置けません（[アーキテクチャ設計](architecture.md) の 4.3）。
 
 ```swift
 // Domain — 永続化ポート
@@ -1104,7 +1085,7 @@ protocol WorkingSourceStore: Sendable {
 }
 ```
 
-**`WorkingSourceStore` は DB トランザクションだけを実装します。** 入力に署名済み台帳の値（`WorkingSourceBinding` や解決済み `SourceID`）を持たせません。持たせると、DB アダプタが台帳を書けるかのような契約になり、**「同一トランザクションで両方を更新する」という実装できない読み方**を招きます。台帳の更新は Saga 側（手順 3・4・7）が別トランザクションで行います。
+**`WorkingSourceStore` は DB トランザクションだけを実装します。** 入力に署名済み台帳の値（`WorkingSourceBinding` や解決済み `SourceID`）を持たせません。持たせると、DB アダプタが台帳を書けるかのような契約になり、**「同一トランザクションで両方を更新する」という実装できない読み方**を招きます。台帳の更新は Saga 側が別トランザクションで行います（インポートは手順 4、再選択・再接続は手順 3・5・7）。
 
 ```swift
 
@@ -1202,19 +1183,17 @@ struct WorkingSourceBinding: Sendable, Equatable {
 **`WorkingSourceRecord` を直接読ませません。** 原寸ファイルを開くすべての入口を検証済み境界へ集約します。
 
 ```swift
-// Domain — 処理用実体を開く唯一の入口
-protocol VerifiedWorkingSourceResolver: Sendable {
-    /// binding と実体を照合し、一致した場合だけ参照を返す
-    func resolve(_ projectID: ProjectID) async throws -> VerifiedWorkingSource
+enum WorkingSourceInvalidity: Sendable, Hashable {
+    case fileMismatch        // sourceFile が binding と違う
+    case contentMismatch     // ハッシュまたはサイズ不一致
+    case bindingMissing      // record があり binding が無い
+    case recordMissing       // 行が無い（再接続が必要）
+    case entityMissing       // 実体ファイルが無い
 }
 
-struct VerifiedWorkingSource: Sendable, Equatable {
-    let projectID: ProjectID
-    let sourceFile: WorkingSourceFileRef
-    let binding: WorkingSourceBinding      // 照合に使った値
-    let verifiedAt: Date
-}
 ```
+
+`VerifiedWorkingSource` と `withVerifiedSource` の定義は下記です。
 
 | 入口 | 検証 |
 | --- | --- |
@@ -1225,19 +1204,201 @@ struct VerifiedWorkingSource: Sendable, Equatable {
 | 履歴サムネイルの生成 | 必須 |
 | その他の原寸ファイル読み込み | 必須 |
 
-| 検証失敗 | 扱い |
+##### 検証と無効化を分ける
+
+**resolver は永続状態を変更しません。** 検証失敗の後始末（`WorkingSourceRecord` の破棄・ファイルの削除予約・キューの `paused(.sourceReselectionRequired)` 遷移・binding の削除）は DB・台帳・ファイルへの書き込みであり、**読み取り専用の契約と両立しません。** 分けない場合、resolver が排他を持たないまま永続状態を書く経路になります。
+
+| 役割 | 主体 | 内容 |
+| --- | --- | --- |
+| 検証 | `WorkingSourceVerifier`（resolver の実装） | 照合して `body` を実行する。**`projectID` ごとに直列化する**（下記） |
+| **無効化** | **`SourceImportCoordinator` の `invalidateWorkingSource(projectID:)`** | DB（record 破棄・キュー遷移・`PendingFileDeletion`）→ 台帳（binding 削除）の順で実行する |
+
+**無効化を新しい Coordinator にしません。** 無効化は同じ `projectID` の再選択・再接続と競合するため、**`SourceImportCoordinator` の `projectID` 待機キューで直列化する必要があります**（[アーキテクチャ設計](architecture.md) の 4.3）。別の actor に置くと、2 つの排他機構が同じ `Project` を同時に触ります。
+
+| `withVerifiedSource` の結果 | 呼び出し側の対応 |
 | --- | --- |
-| binding と `sourceFile` が違う / ハッシュ不一致 | `throw`。その `Project` を `paused(.sourceReselectionRequired)` へ |
-| binding が無い | 同上 |
-| 実体が無い | 同上 |
+| `completed(R)` | 続行する |
+| `invalid(.recordMissing)` | 再接続の導線を出す（無効化は不要。壊れた状態ではない） |
+| `invalid`（それ以外） | **`invalidateWorkingSource(projectID:)` を呼ぶ** |
+
+##### 無効化は理由を受け取らず、内側で再判定する
+
+**呼び出し側が観測した理由を無効化の根拠にしません。** 再選択 Saga の手順 7（台帳）と手順 8（DB）の間に読み取りが挟まると `.fileMismatch` が返りますが、その後 `projectID` の待機キューを取得した時点では**再選択が正常完了している**可能性があります。陳腐化した理由で破棄すると、**正しく張り替えられた `WorkingSourceRecord` を壊し、キューを `paused` へ落とします。**
+
+```swift
+// Application — SourceImportCoordinator。projectID ごとに直列化する
+func invalidateWorkingSource(projectID: ProjectID) async throws -> InvalidationOutcome
+
+enum InvalidationOutcome: Sendable, Equatable {
+    case invalidated(WorkingSourceInvalidity)   // 再判定でも無効だったので破棄した
+    case nowValid                               // 再判定で有効。何もしなかった
+    case alreadyAbsent                          // 既に record が無い
+}
+```
+
+| 規則 | 内容 |
+| --- | --- |
+| 引数 | **`projectID` だけ。** `reason` を受け取らない |
+| 最初の操作 | **排他区間の内側で照合をやり直す**（DB の現在値・台帳の現在値・実体） |
+| 再判定で有効 | **`nowValid` を返して何もしない。** 破棄しない |
+| 再判定でも無効 | DB → 台帳の順で破棄し、`invalidated` を返す |
+| 冪等性 | 2 回目以降は `alreadyAbsent` を返す |
+
+**この原則は `replaceWorkingSource` の `previousSourceFile`（上記）と `deleteHistoryUnit` の `DeletionContext`（[アーキテクチャ設計](architecture.md) の 7.5）と同じです。** 呼び出し側が読んだ値を破壊的操作の根拠にしません。
 
 **実装主体は `Application` です。** DB（`WorkingSourceRecord`）・台帳（`WorkingSourceBinding`）・ファイル（ハッシュ計算）の 3 者を読むため、`Persistence` の単一アダプタにも `Domain` にも置けません（[アーキテクチャ設計](architecture.md) の 4.3）。プロトコルは `Domain` が定義します。
 
-**`VerifiedWorkingSource` を返り値の型にするのは、検証を通らずに `WorkingSourceFileRef` を得る経路を無くすためです。** `ImageEffectRenderer` や `FaceDetector` へ渡す値の出所がこの型に限られます。
-
-**照合は毎回行います。** ハッシュ計算は原寸 1 枚あたり数十ミリ秒であり、プレビューの再描画ごとではなく「ファイルを開くたび」に走ります。同一の `VerifiedWorkingSource` を編集セッション中に使い回すのは、`Project` の binding が変わらない限り許します。
+**`VerifiedWorkingSource` を `body` の引数にするのは、検証を通らずに `WorkingSourceFileRef` を得る経路を無くすためです。** `ImageEffectRenderer` や `FaceDetector` へ渡す値の出所がこのスコープに限られます。
 
 **ハッシュは正規化後ファイルに対して取ります。** `contentFingerprint`（取り込みファイル基準）とは別物です。照合したいのは「いま処理しようとしている実体」であり、取り込み時のバイト列ではありません。
+
+##### 照合と読み取りを 1 つのスコープへ閉じる
+
+**「ハッシュを読む」と「実体を開く」が別の読み取りだと、その間に差し替えられます。** 24 時間以内の再書き出しは `freeMonthlyReexport` で消費 0 なので、**攻撃者は成功するまで無制限に再試行できます。** 検証を通した直後に別画像へ差し替えれば、1 枠の消費で任意枚数の写真を書き出せます。
+
+**照合と利用を同じスコープへ閉じ、`VerifiedWorkingSource` を外へ持ち出せない形にします。**
+
+```swift
+// Domain — 処理用実体を開く唯一の入口
+protocol VerifiedWorkingSourceResolver: Sendable {
+    /// 照合してから body を実行する。body の実行中だけ実体が有効。
+    /// 照合が成立しなければ body を呼ばず WorkingSourceInvalidity を返す
+    func withVerifiedSource<R: Sendable>(
+        _ projectID: ProjectID,
+        _ body: @Sendable (VerifiedWorkingSource) async throws -> R
+    ) async throws -> VerifiedUseResult<R>
+}
+
+enum VerifiedUseResult<R: Sendable>: Sendable {
+    case completed(R)
+    case invalid(WorkingSourceInvalidity)
+}
+```
+
+**照合したディスクリプタを、消費側へそのまま渡します。** 開き直す経路を残すと、その間に inode を差し替えられます。
+
+```swift
+/// 検証済みの実体。開いたファイルそのものを表す
+struct VerifiedWorkingSource: Sendable {
+    let projectID: ProjectID
+    let binding: WorkingSourceBinding      // 照合に使った値
+    let verifiedAt: Date
+
+    /// 照合に使ったのと同一のディスクリプタから読み出す。
+    /// パスを解決し直さない。body のスコープ内でのみ有効
+    let handle: OpenFileHandle
+}
+
+/// 開いたファイルの読み取り口。Domain は fd の値を見ない
+protocol OpenFileHandle: Sendable {
+    var byteSize: Int64 { get }
+
+    /// ハッシュ計算などの逐次読み出し
+    func read(offset: Int64, length: Int) async throws -> Data
+
+    /// 全体を一括で参照する。Image I/O / Core Image への受け渡しに使う。
+    /// 同期・非エスケープ。ポインタは body の外へ持ち出せない
+    func withMappedBytes<R>(
+        _ body: (UnsafeRawBufferPointer) throws -> R
+    ) throws -> R
+}
+```
+
+**`withMappedBytes` は Foundation と標準ライブラリだけで書けます。** `Domain` は `CoreGraphics` / `CoreImage` を参照できないため（[アーキテクチャ設計](architecture.md) の 3.3）、プラットフォーム型を引数に取る形にできません。**`UnsafeRawBufferPointer` なら層の制約に触れず、`Adapters` 側で `CFData` や `CGDataProvider` を組み立てられます。**
+
+**`read` だけでは足りません。** 48 メガピクセルの原寸を `Data` として抱えると、50 枚の一括処理でメモリが尽きます（上記）。**メモリマップした領域をそのまま Image I/O へ渡せる入口が要ります。**
+
+| 規則 | 内容 |
+| --- | --- |
+| 同期にする | `async` にすると `UnsafeRawBufferPointer` を `Sendable` 境界へ通すことになる。**マップ中に中断点を作らない** |
+| 非エスケープ | `body` の外でポインタを保持したら未定義動作とする |
+| 実装 | 照合に使ったのと同じディスクリプタを `mmap` する。**パスを解決し直さない** |
+| **`body` の役割** | **「バイト列 → デコード済みピクセルバッファ」の変換だけ**（下記） |
+
+**`body` の外へ持ち出すのは、デコード済みピクセルではなく圧縮バイト列のコピーです。** `CGDataProvider` から作った `CGImage` / `CIImage` は**遅延評価**であり、`kCFAllocatorNull` でコピーを避けると、**`body` を抜けてマップ解除された領域を後から読むことになります。** 一方でデコード結果を持ち出すと、48 メガピクセルの RGBA8 で**約 192MB** を合成・エンコードの全期間にわたって抱えます。
+
+| 用途 | `body` の内側 | `body` の外へ返す値 | 概算 |
+| --- | --- | --- | --- |
+| **検出** | `CGImageSourceCreateThumbnailAtIndex`（長辺 1,920） | 縮小済み `CGImage`（新しいバッファを持つ） | 約 11MB |
+| **書き出し** | **圧縮バイト列を `Data` へコピーするだけ** | その `Data` | **ファイルサイズ相当**（HEIC で数 MB〜10MB） |
+
+**書き出しではデコードを `body` の外で行います。** `Data` を自分が保持しているため、`CGImageSourceCreateWithData` から作った `CGImage` / `CIImage` が遅延評価でも安全です。**マップ解除後に読む先がありません。**
+
+**圧縮バイト列とデコード済みピクセルを区別します。** 3 章が `Data` を退けたのは**ラスタ化済みスタンプのビットマップ**（非圧縮）についてであり、**原寸写真の圧縮バイト列は数 MB です。** ここを混同すると、192MB を持ち出す設計を「メモリのために選んだ」と誤読します。
+
+| 方式 | ピーク（書き出し 1 枚） |
+| --- | --- |
+| デコード結果を持ち出す | **約 192MB**（合成・エンコードの全期間） |
+| **圧縮バイト列を持ち出す**（採用） | **数 MB〜10MB** ＋ Core Image のタイル処理分 |
+
+**Core Image に原寸を一度に展開させません。** `CIImage` はタイル単位で評価されるため、`CGContext` へ原寸を描き込む方式より使用量が小さくなります。**`batchConcurrencyLimit = 1`（v1）なので、同時に処理するのは 1 枚です。**
+
+**レンダリング全体を `body` の内側へ入れません。** そうすると `ImageEffectRenderer.render` が `async` でありながら合成とエンコードの全体を同期区間として抱えることになり、契約と食い違います。**同期区間を「バイト列のコピー」だけに限れば、そもそも重い処理が同期区間に入りません。**
+
+**`withMappedBytes` は最適化です。** `read(offset:length:)` でファイル全体を `Data` へ読んでも同じ結果になります。**マップ経由にすると、コピーが 1 回で済みます。** どちらも同じディスクリプタから読み、パスを再解決しません。
+
+**マップ中の切り詰めによる `SIGBUS` は起こりません。** 処理用素材のファイルは**書き込みが一度きり**です。取り込みは新しいファイルを作ってから `WorkingSourceRecord` を登録し（下記のインポート Saga の手順 3〜5）、再選択も**手順 6 で新しい正規化ファイルを作って `sourceFile` を差し替えます。** 既存の inode へ追記も切り詰めも行う経路が存在しません。削除は `PendingFileDeletion` 経由の `unlink` であり、開いているディスクリプタのマップは無効化されません。
+
+| 規則 | 内容 |
+| --- | --- |
+| `VerifiedWorkingSource` の寿命 | **`body` の実行中のみ。** `handle` を外へ保持したら未定義動作とする |
+| ファイルを開く主体 | **`WorkingSourceVerifier` が 1 回だけ開く。** 消費側は開かない |
+| 照合の位置 | **開いた `handle` からハッシュを計算する。** パスを解決し直さない |
+| 消費側への受け渡し | **`handle` を渡す。** `ManagedFileRef` や `URL` を渡して開き直させない |
+| 復帰後の再利用 | **禁止。** 別の操作は `withVerifiedSource` を再度呼ぶ |
+| 編集セッション中の使い回し | **禁止。** プレビューの再描画も、そのつどこの入口を通る |
+
+**`FaceDetector` と `ImageEffectRenderer` の引数を `ImageSource` から `VerifiedImageSource` へ変えます。** `ManagedFileRef` を受け取る限り、実装は自分でパスから開き直せます。**型の上で開き直せないようにします。**
+
+**`PickedPhotoLoader` は対象外です。** 取り込み時に呼ばれる唯一の入口であり、**その時点では `WorkingSourceBinding` がまだ存在しません**（下記のインポート Saga は手順 3 で正規化ファイルを作り、手順 5 で DB へ登録します。binding が載るのはそのあとです）。照合の対象が無いため `VerifiedImageSource` を作れず、`ManagedFileRef` のままとします。**この例外が安全なのは、`load` が「まだどこからも参照されていない新しいファイル」しか読まないからです。** 既存 `Project` の素材を読む経路には使いません。
+
+```swift
+/// レンダラーと検出器へ渡す入力。開いたディスクリプタを持つ
+struct VerifiedImageSource: Sendable {
+    let handle: OpenFileHandle
+    let pixelSize: PixelSize          // 向き正規化後
+    let format: ImageFormat
+}
+
+protocol FaceDetector: Sendable {
+    func detect(_ source: VerifiedImageSource) async throws -> DetectionResult
+}
+
+protocol ImageEffectRenderer: Sendable {
+    func render(
+        source: VerifiedImageSource,
+        plan: RenderPlan,
+        rasterAssets: [String: RasterizedStampAsset]
+    ) async throws -> RenderedImage
+}
+```
+
+**検出用の縮小は `FaceDetector` の内側で行います。** 縮小画像は `.processingTemporary` の派生ファイルであり binding を持たないため、**`VerifiedImageSource` を作れません。** 縮小を呼び出し側で行う構成にすると、検出器の引数を `VerifiedImageSource` にした意味が失われます。
+
+| 項目 | 規約 |
+| --- | --- |
+| 縮小の実行者 | **`FaceDetector` の実装（`Adapters`）** |
+| 入力 | **`VerifiedImageSource`**（原寸。`handle` 経由） |
+| 縮小の方法 | `withMappedBytes` で得たバイト列から `CGImageSourceCreateThumbnailAtIndex`（`kCGImageSourceThumbnailMaxPixelSize = 1920`） |
+| 中間ファイル | **作らない。** メモリ内で完結する |
+| 報告 | `DetectionResult.detectionPixelSize` に**実際に検出へ渡した寸法**を入れる |
+
+**`LoadedPhoto` から `detectionSource` を外します。** 縮小画像をファイルとして持つ必要がなくなり、**未加工の顔画像が端末に増える経路が 1 つ減ります。** 再検出も `withVerifiedSource` → `VerifiedImageSource` → `detect` の 1 経路になり、`PickedPhotoLoader` を通りません。**「`body` 内のすべての読み取りが同じ `handle` を経由する」という防御の前提が、再検出でも成立します。**
+
+**`ImageSource` は残します。** 処理用素材以外（ラスタ一時ファイル、履歴サムネイルの入力）には binding が無く、照合の対象になりません。**`VerifiedImageSource` を要求するのは `WorkingSourceRecord` が指す原寸を読む経路だけです。**
+
+**上書き（同じ inode への書き込み）も防ぎます。** `body` の完了後、**同じ `handle` からハッシュを再計算して開始時の値と一致することを確認します。** 不一致なら `R` を破棄し `invalid(.contentMismatch)` を返します。
+
+| 段階 | 照合 |
+| --- | --- |
+| `body` の開始前（`handle` を開いた直後） | ハッシュとサイズを binding と照合する |
+| **`body` の完了後（`handle` を閉じる前）** | **同じ `handle` で再計算し、開始時の値と一致することを確認する** |
+
+**この 2 段構えが成立するのは、`body` 内のすべての読み取りが同じ `handle` を経由するからです。** 消費側が開き直せる設計では、開始時と完了時の照合が旧 inode を見続け、**差し替えを構造的に検出できません。** `handle` を渡す型にすることが防御の前提です。
+
+**排他が必要になります。** `body` は書き出し手順 1 やプレビュー描画の全体を包む長時間スコープです。その間に `replaceWorkingSource` や `invalidateWorkingSource` が走ると、開いている実体が削除対象になります。**`WorkingSourceVerifier` も `projectID` ごとに直列化し、`SourceImportCoordinator` と同じ待機キューを共有します**（[アーキテクチャ設計](architecture.md) の 4.3）。
+
+**プレビューにも同じ規則を課します。** 数十ミリ秒のハッシュ計算がプレビューの再描画ごとに走るのを避けるため、**プレビューは 1 回の `withVerifiedSource` の内側で描画を完結させ、パラメータ変更ごとに入口を通り直します。** 原寸の再読み込みが問題になる場合は、`body` の内側でデコード済みのビットマップを取得し、そのスコープ内で複数回描画します。**「検証を省く」ことでは解決しません。**
 
 ##### 照合に使ってよいもの・使ってはいけないもの
 

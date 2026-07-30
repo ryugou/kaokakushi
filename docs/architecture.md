@@ -15,7 +15,7 @@
 | --- | --- |
 | **本書** | 目的、技術スタック、モジュール構成と依存方向、並行性、ドメインモデル、永続化、セキュリティ境界、リモート設定、テスト戦略、逸脱と未決事項 |
 | [画像処理アーキテクチャ](image-pipeline.md) | `RenderSpec` / `RenderDraft` / `RenderPlan`、座標・色・合成規約、スタンプラスタライズ、写真選択の境界型 |
-| [書き出し Saga](export-saga.md) | 認可、`ExportCommit` の状態、手順 0〜7、ロールバック、起動時復旧、実体喪失時の扱い、受け渡し |
+| [書き出し Saga](export-saga.md) | 認可、`ExportCommit` の状態、手順 −2〜9、ロールバック、起動時復旧、実体喪失時の扱い、受け渡し |
 | [正準スキーマ](canonical-schema.md) | HMAC 署名対象のバイト表現、型ごとのフィールド順、`enum` の固定番号 |
 | [運用](operations.md) | 更新誘導の運用、審査への配慮、リモート設定の配信規約、診断と Sentry の運用制約 |
 | [商品面の決定](product-decisions.md) | v1 のリリース範囲、動画の扱い、課金訴求の分類、利用者向け表現 |
@@ -252,6 +252,9 @@ actor FileUsageLedgerStore: UsageLedgerStore {
 | 保持 | **`await` を含む処理の全体で保持し続ける**（ファイル保存中も解放しない） |
 | 解放 | `defer` で必ず行う。`throw` しても解放される |
 | 順序 | 待機キューを**明示的に FIFO** とする。actor の暗黙の順序に依存しない |
+| **`unverifiedLedgerWrites`** | **保存する直前に、読み取った値 +1 へ更新する**（6.2）。呼び出し側の変換関数には触らせない |
+
+**`unverifiedLedgerWrites` の加算を `transact` の内側に置きます。** 呼び出し側が加算する形にすると、加算を忘れた経路がそのまま鮮度判定の抜け穴になります。**保存の直前に無条件で +1 すれば、台帳を書くすべての経路が数えられます。** 加算はトランザクションの一部なので、保存に失敗すれば増えません。
 
 `ExportStartGate` も同じ構造です。permit を保持したまま `await operation()` を実行し、`withExclusivePermit` から復帰するまで次の要求を待たせます。
 
@@ -284,9 +287,15 @@ actor FileUsageLedgerStore: UsageLedgerStore {
 **actor 内部に tombstone を持ちます。**
 
 ```swift
+// 最終形。上の宣言はこれに置き換わる
 actor FileUsageLedgerStore: UsageLedgerStore {
-    private var waiters: [Waiter] = []            // FIFO
-    private var canceledWaiterIDs: Set<UUID> = [] // 登録前キャンセルの記録
+    private var isBusy = false
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, any Error>
+    }
+    private var waiters: [Waiter] = []             // FIFO
+    private var canceledWaiterIDs: Set<UUID> = []  // 登録前キャンセルの記録
 }
 ```
 
@@ -315,7 +324,7 @@ actor FileUsageLedgerStore: UsageLedgerStore {
 | 時点 | 扱い |
 | --- | --- |
 | 手順 4 より前 | ロールバック。消費なし |
-| 手順 4 以降・手順 7 より前 | 暫定会計を取り消してロールバック（[書き出し Saga](export-saga.md)） |
+| 手順 4 以降・手順 7 より前（`readyToPublish` を含む） | 暫定会計を取り消してロールバック（[書き出し Saga](export-saga.md)） |
 | 手順 7 の完了後 | **キャンセルではなく破棄として扱う。** 枠は戻さない |
 
 手順 7 が完了した時点で成果物は公開されており、正常生成が確定しています。UI 上も、手順 7 の完了後は取り消せるかのような文言にしません。
@@ -324,7 +333,7 @@ actor FileUsageLedgerStore: UsageLedgerStore {
 
 次の処理は `Domain`（純粋 Swift）にも `App`（SwiftUI）にも置けません。
 
-- 書き出しの手順 −2〜7（[書き出し Saga](export-saga.md)）と補償トランザクション
+- 書き出しの手順 −2〜9（[書き出し Saga](export-saga.md)）と補償トランザクション
 - 起動時復旧、ロールバック
 - DB・台帳・ファイルの協調、ゲートの取得と解放
 - 出力の受け渡し
@@ -333,7 +342,7 @@ actor FileUsageLedgerStore: UsageLedgerStore {
 
 ```swift
 // Application — Domain のプロトコルだけを使う
-actor ExportCoordinator { }            // 手順 −2〜7、ロールバック
+actor ExportCoordinator { }            // 手順 −2〜9、ロールバック
 actor StartupRecoveryCoordinator { }   // 起動時復旧（[書き出し Saga](export-saga.md)）
 actor OutputDeliveryCoordinator { }    // MediaSaver / SharePresenter の呼び出しと状態遷移
 actor SourceImportCoordinator { }      // インポート / 再選択 / 再接続 / 複製（[画像処理](image-pipeline.md)）
@@ -350,13 +359,25 @@ actor HistoryDeletionCoordinator { }   // Project / Batch 削除、編集中の�
 | `ExportCoordinator` | **アプリ全体で 1 件**（v1） | `ExportStartGate` の permit（[書き出し Saga](export-saga.md) の 1.5） |
 | `OutputDeliveryCoordinator` | **`exportID` ごと** | 明示的な待機キュー（[書き出し Saga](export-saga.md) の 8.0） |
 | `SourceImportCoordinator` | **`projectID` ごと**（新規インポートは新しい `projectID` なので競合しない） | 明示的な待機キュー |
-| `WorkingSourceVerifier` | **排他不要**（読み取りのみ。結果は `VerifiedWorkingSource` として呼び出し元が保持する） | — |
-| `HistoryDeletionCoordinator` | **アプリ全体で 1 件** | 明示的な待機キュー |
+| `WorkingSourceVerifier` | **`projectID` ごと**。`SourceImportCoordinator` と**同じ待機キューを共有する** | 明示的な待機キュー |
+| `HistoryDeletionCoordinator` | **アプリ全体で 1 件。** 加えて**削除対象の各 `projectID` の待機キューを取得する**（下記） | 明示的な待機キュー |
 | `StartupRecoveryCoordinator` | 起動時に 1 回のみ。**完了まで他のすべてを開始させない** | 起動シーケンス |
 
-**`SourceImportCoordinator` を `projectID` で直列化します。** 同じ `Project` へ再選択と再接続が並行すると、`WorkingSourceRecord` の作成が主キー衝突で失敗するか、片方の正規化ファイルが孤児になります。
+**`SourceImportCoordinator` を `projectID` で直列化します。** 同じ `Project` へ再選択と再接続が並行すると、`WorkingSourceRecord` の作成が主キー衝突で失敗するか、片方の正規化ファイルが孤児になります。**検証失敗時の無効化と `withVerifiedSource` のスコープ（[画像処理](image-pipeline.md)）も同じ待機キューで直列化します。**
+
+**`WorkingSourceVerifier` が待機キューを共有するのは、`withVerifiedSource` の `body` が長時間スコープだからです。** 書き出し手順 1 やプレビュー描画の全体を包む間に `replaceWorkingSource` や無効化が走ると、開いている実体が削除対象になります。**読み取りだけでも、実体の寿命に対する排他が必要です。**
 
 **`HistoryDeletionCoordinator` を全体で直列化します。** 削除は複数の `Project` を跨ぐため、`projectID` 単位の排他では `Batch` 削除を保護できません。
+
+**加えて、削除対象の各 `projectID` の待機キューも取得します。** 全体キューだけでは `withVerifiedSource` の `body` と排他されません。**再検出は `body` の内側で `FaceTrack` を書き換えるため**（[画像処理](image-pipeline.md)）、その途中で同じ `Project` が削除されると外部キー違反で失敗します。プレビュー描画中は `ExportCommit` が存在せず、7.5 の絶対保護も効きません。
+
+| 規則 | 内容 |
+| --- | --- |
+| 取得の順序 | **`projectID` の昇順に固定する。** 順序は **`UUID` の 16 バイトを符号なしバイト列として辞書順**（[正準スキーマ](canonical-schema.md) の 2.1 が `FaceTrackID` に定めるのと同じ規則）。`Batch` 削除で複数取得するため、順序が一意でないとデッドロックしうる |
+| 取得の位置 | **DB トランザクションへ入る前。** 全体キューを取得したあと |
+| 解放 | `defer` で必ず行う |
+
+**`ExportStartGate` は取得しません。** 書き出しとの整合は、`canDeleteHistoryUnit` が非終端の `ExportCommit` を絶対保護として同一 DB トランザクション内で見ることで成立します（7.5）。**2 つの全体キューを跨いで取得する経路を作ると、そこがデッドロックの発生源になります。**
 
 **書き出しと削除は互いに排他ではありません。** 判定と削除を同一 DB トランザクションへ閉じ、`canDeleteHistoryUnit` が非終端の `ExportCommit` を絶対保護として見ることで整合します（7.5）。`DatabaseQueue` はトランザクションを直列化するため、判定と挿入が交差しません。
 
@@ -505,6 +526,58 @@ enum ReviewStatus: Sendable { case unreviewed, reviewed }        // 利用者の
 
 検出ステータスは利用者の操作で変わりません。確認ステータスはアプリの判断で変わりません。
 
+##### 認可時に検出ステータスを再導出する
+
+**どちらも未署名の `app.db` にあります。** `DetectionStatus` を `reviewRequired` → `normal`、`ReviewStatus` を `unreviewed` → `reviewed` へ書き換えれば、`requiresUserReview`（6.5）が全件 `false` を返し、**顔を 1 つも検出できなかった写真を含めて個別確認なしで書き出せます。** 一覧を末尾までスクロールする操作だけで成立します。
+
+| 規則 | 内容 |
+| --- | --- |
+| `DetectionStatus` | **書き出し認可の内側で `triage` を再実行して再導出する。** 保存値を根拠にしない |
+| `ReviewDecision` の完全性 | 再導出した `[ReviewIssue]` のすべてに `ReviewResolution` が記録されていることを**認可時に再検査する** |
+| 再導出の入力 | 保存済みの `FaceTrack` と `detectionRevision`。**検出をやり直すのではなく `triage` だけを再実行する** |
+| 不成立なら | 開始しない（[書き出し Saga](export-saga.md) の 1.1） |
+
+**`triage` は純粋関数なので、再実行の費用は無視できます**（顔数に比例するだけで、Vision の呼び出しを伴いません）。**保存値は表示の高速化のためのキャッシュとして扱い、認可の根拠にしません。**
+
+**`ReviewStatus` の書き換えは、再導出だけでは防げません。** `reviewRequired` を再導出しても、`reviewed` が立っていれば通ります。**`ReviewDecision` の完全性を再検査することで、`ReviewIssueID` ごとの判断が実際に記録されていることを要求します。** 判断を偽造するには `ReviewDecision` 行も `ReviewIssueID`（`projectID` / `detectionRevision` / `reason` / `affectedFaceTrackIDs` から決まる）ごとに作る必要があり、**`noFaceDetected` については「顔を隠さず保存する」という明示の選択（`unmaskedExportConfirmed`）を記録することと等価になります。**
+
+**この規則は 10.3 の「リモート設定で変更できないこと」と対応します。** 確認画面を安全性の中核と位置づける以上、DB 直接改変からも守ります。
+
+##### 再導出の入力
+
+`triage` は `DetectionResult` を受け取ります（上記）。その材料を `FaceTrack` が列として持ちます。
+
+| `FaceTrack` の列 | 用途 |
+| --- | --- |
+| `faceTrackID` / `bounds` / `createdManually` | 描画と `RegionOrigin` の決定 |
+| **`confidence`** | `lowConfidence` の判定 |
+| **`yawDegrees` / `pitchDegrees` / `rollDegrees`** | `extremePose` の判定と描画の回転 |
+| **`isSmallFace`** | `smallFace` の判定 |
+| **`detectionPixelSize`**（`Project` の列） | 検出時の寸法。`isSmallFace` の根拠 |
+
+**検出品質の列を `FaceTrack` へ持たせます。** 持たせないと `triage` を再実行できず、再導出そのものが成立しません。
+
+##### `FaceTrack` の改変は防げないが、倒れる向きが逆になる
+
+**`FaceTrack` も未署名です。** 検出品質の列を書き換えたり、偽の顔行を挿入すれば `triage` の結果を変えられます。**署名で防ぐことはしません。** 顔の集合は編集操作（手動領域の追加・移動・削除）で頻繁に変わり、署名対象にすると編集のたびに台帳更新が要ります。
+
+**代わりに、改変で何が得られるかを確認します。**
+
+| 改変 | `triage` の結果 | 帰結 |
+| --- | --- | --- |
+| `isSmallFace` / `confidence` / 角度を書き換える | その警告が消える | 自分の写真について確認を省ける |
+| **偽の顔行を挿入して `noFaceDetected` を消す** | 空集合になる | **偽領域が無害な場所を隠し、実際の顔は露出したまま書き出される** |
+| 顔行を削除する | その顔の警告が消える | **その顔が加工対象から外れ、露出する** |
+| 顔行を追加する（正規の手動領域） | 警告が増える | 確認が増える |
+
+**いずれも「自分の写真を、自分の判断で確認せずに書き出す」ことに帰着します。** 無料枠も有料機能も増えず、露出するのは改変した本人の写真です。**アプリには `unmaskedExportConfirmed`（顔を隠さずそのまま保存する明示的な選択。6.1）という正規の経路が既にあり、DB 改変はその遠回りな代替にすぎません。**
+
+> **対象としない:** `FaceTrack` の改変による確認手順の省略。得られるのは自分の写真に対する自己判断の省略であり、**他者への影響も権利の増加もありません**（9.3）。
+
+**それでも `DetectionStatus` / `ReviewStatus` の再導出は行います。** 攻撃者にとっての利得は同じでも、**トラストバウンダリを「検出結果そのもの」まで押し下げることには意味があります。** `DetectionStatus` の 1 列を書き換えるだけなら偶発的な不整合（アプリのバグ、移行の失敗）でも起こりえますが、**検出品質の列や顔行の整合を取りながら偽造するのは、明確に意図した操作だけです。** 前者を通さないことが再導出の目的です。
+
+**顔行を削除して露出させる方向は、そもそも防ぐ対象ではありません。** 6.1 の「取り返しがつかない方向へ倒さない」は**アプリの既定の挙動**についての規則であり、利用者が自分の意思で自分の写真を露出させる操作を禁じるものではありません。
+
 ##### 要確認への対応
 
 **`reviewRequired` かつ `unreviewed` の写真が 1 枚でも残っている間は、一括書き出しを開始できません。**
@@ -564,8 +637,14 @@ struct CustomerInfoSnapshot: Sendable, Equatable {
     let expirationDates: [String: Date]     // 同 ID → 失効時刻
     let willRenew: Bool
     let isInBillingRetry: Bool              // 支払い保留（pending の根拠）
-    let isSandbox: Bool
-    let fetchedAt: Date
+    let isSandbox: Bool                     // サンドボックス購読の区分（下記）
+
+    /// CustomerInfo.requestDate。サーバーが応答を生成した時刻。
+    /// SDK がキャッシュを返した場合は元の応答時刻のまま動かない（下記）
+    let requestDate: Date
+
+    /// この値を Domain へ渡す時点の usageNow。requestDate と混同しない
+    let observedAt: Date
 }
 
 /// 契約の等級。固定番号は正準スキーマ 3 章
@@ -591,22 +670,65 @@ struct Entitlement: Sendable, Equatable {
     let status: PlanStatus       // active / grace / pending / expired / revoked
     let expiresAt: Date?
     let lastVerifiedAt: Date     // 権限を検証できた時刻
+    let isSandbox: Bool          // サンドボックス購読（鮮度上限が 1 日）
 }
 
 /// ProtectedBlobStore へ保存する購入状態キャッシュ
 struct SubscriptionState: Sendable, Equatable {
     let entitlement: Entitlement
     let willRenew: Bool
-    let fetchedAt: Date          // RevenueCat から取得に成功した時刻
+    let fetchedAt: Date            // このキャッシュを書いた時刻（usageNow）
+
+    /// 採用した CustomerInfoSnapshot.requestDate。
+    /// 「サーバーと本当に往復したか」の唯一の判定材料（下記）
+    let lastRequestDate: Date
 }
 ```
 
 **`fetchedAt` と `Entitlement.lastVerifiedAt` は別の値です。** 前者はキャッシュを書いた時刻、後者は権限を検証できた時刻で、オフライン時にキャッシュを読み直しても後者は動きません。
 
+##### 「取得に成功」を SDK 境界で定義する
+
+**`Purchases.getCustomerInfo()` は、ネットワークへ到達できなくても throw しません。** RevenueCat SDK は既定でキャッシュ済みの `CustomerInfo` を返します。**これを「取得に成功」と扱うと、RevenueCat のホストを DNS や VPN で遮断するだけで、次のすべてが起動のたびに成立します。**
+
+- `Entitlement.lastVerifiedAt` が現在時刻へ更新され、**14 日の猶予がリセットされる**
+- `SubscriptionState` が置き換えられ、その成功を確認して `recordEntitlementRefresh()` が呼ばれ、**`unverifiedLedgerWrites` がリセットされる**
+
+**時刻ベースと回数ベースの 2 つの backstop が、同時に無効化されます。** 端末改造もコンテナへの書き込みも要らず、必要なのはルーターか VPN の設定だけです。**9.3 が対象外とする能力を 1 つも使いません。**
+
+**判定材料は `CustomerInfo.requestDate` です。** これは**サーバーが応答を生成した時刻**であり、SDK がキャッシュを返した場合は**元の応答時刻のまま動きません。**
+
+| 規則 | 内容 |
+| --- | --- |
+| **「取得に成功」の定義** | **`CustomerInfoSnapshot.requestDate` が、`SubscriptionState.lastRequestDate` より新しいこと** |
+| 等しいか古い場合 | **「取得に成功していない」と扱う。** キャッシュを置き換えず、`lastVerifiedAt` も動かさず、`recordEntitlementRefresh()` も呼ばない |
+| SDK の呼び出し | **`CacheFetchPolicy` を「キャッシュを使わない」相当で明示する。** 既定値に依存しない |
+| `CustomerInfoSnapshot.observedAt` | **`requestDate` と混同しない。** 前者は端末側の観測時刻、後者はサーバー側の生成時刻 |
+| 保存先 | **`SubscriptionState.lastRequestDate`**（署名対象。[正準スキーマ](canonical-schema.md) の 4.2） |
+
+**`requestDate` の単調前進を条件にします。** これは `TrustedTimeState` の受理条件（「保存済みの値以上であること」。下記 6.3）と同じ形です。**規則が 1 つ増えるだけで、SDK のキャッシュ応答を確実に弾けます。**
+
+**この定義が無いと、他の防御がすべて空振りします。** `>` と `>=` の違い、保存値が 0 か 1 か、blob 保存とリセットの順序といった細部を固定しても、**「そもそも何が成功か」が未定義なら、実装者が SDK の既定挙動に従った時点で backstop 全体が動きません。**
+
+**同じ規則を `/v1/config` にも課します。** `recordConfigRefresh()` を呼ぶのは「**HTTP レスポンスを新規に受信したとき**」であり、**保存が起きたかどうかとは独立です**（10.2 の同一 `configVersion` の扱いを参照）。`Cache-Control: no-store` により `URLSession` のキャッシュは効きませんが、規則として固定します。
+
+##### `isSandbox` の用途
+
+**フィールドを定義したまま用途を決めない状態にしません。** サンドボックス購読は実費なしで取得でき、更新周期も短縮されているため、本番と同じ扱いにすると区別できません。
+
+| 項目 | 規則 |
+| --- | --- |
+| 能力の付与 | **本番と同じ。** サンドボックスでも `ResolvedCapabilities` を制限しない（TestFlight と審査で有料機能を検証できなくなる） |
+| `Entitlement` への伝搬 | **`isSandbox` を `Entitlement` と `SubscriptionState` へ持たせる**（下記） |
+| 鮮度上限 | **サンドボックスは 1 日。** 本番の 14 日を適用しない |
+| 分析・診断 | **`PlanKind` の区分値として送る**（9.2 の `sandbox`）。本番の集計へ混ぜない |
+
+**鮮度上限だけを分けます。** サンドボックスの購読期間は最短 3 分であり、14 日の猶予はその期間より長くなります。**能力を制限せず猶予だけを詰めることで、検証は通り恒久化は防げます。**
+
 要件は 3 点です。
 
 - **`pending`（支払い保留）では有料機能を付与しません**（仕様 5.4）。個々の権限フラグはすべて `Entitlement` から導出し、`plan` から直接導出しません
-- **オフライン耐性**（仕様 25.3 / 27.3）。最後に検証成功した `Entitlement` を `ProtectedBlobStore` へ保存し、ネットワーク不通時はこのキャッシュで有料機能を維持します。失効が明示的に確認された場合のみ剥奪します
+- **オフライン耐性**（仕様 25.3 / 27.3）。最後に検証成功した `Entitlement` を `ProtectedBlobStore` へ保存し、ネットワーク不通時は**鮮度上限（14 日）の範囲で**このキャッシュで有料機能を維持します（下記）
 - **バックエンド障害で編集を止めません**（仕様 21.6）
 
 ##### 能力の解決
@@ -621,6 +743,9 @@ struct ResolvedCapabilities: Sendable, Equatable {
     let singleExportAccess: SingleExportAccess
     let canUsePremiumStamps: Bool
     let canUseCustomStamps: Bool
+
+    /// 有効な追加スタンプパック。リモート設定から能力解決時に写す（10 章）
+    let enabledStampPacks: Set<String>
     let canUseProBatch: Bool      // 制限なしの一括処理
     let canUseBatchTrial: Bool    // クレジット消費による一括トライアル
     let shouldShowAds: Bool
@@ -643,19 +768,184 @@ enum SubscriptionCacheState: Sendable {
     case integrityFailure
 }
 
-func resolveCapabilities(_ state: SubscriptionCacheState) -> CapabilityResolution
+func resolveCapabilities(
+    _ state: SubscriptionCacheState,
+    usageNow: Date,                  // 単調（6.3）。巻き戻せない
+    trustedNow: Date?,               // 得られていれば優先する
+    unverifiedLedgerWrites: Int32    // UsageLedger の 17 番目。時刻から独立した前進源（下記）
+) -> CapabilityResolution
 ```
+
+**`unverifiedLedgerWrites` は `UsageLedger` にあり、`SubscriptionCacheState` から到達できません。** 別の署名対象なので、呼び出し側が台帳から読んで渡します。**引数に無いと、下記の鮮度判定を `resolveCapabilities` の内側で評価できません。**
 
 | 状態 | 解決結果 |
 | --- | --- |
-| `loaded` | `Entitlement` から `ResolvedCapabilities` を導出する |
+| `loaded` かつ鮮度内（下記） | `Entitlement` から `ResolvedCapabilities` を導出する |
+| **`loaded` かつ鮮度切れ** | **`verificationRequired`**（下記） |
 | `missing` かつオンラインで取得成功 | 取得結果で `loaded` として解決する |
 | `missing` かつオフライン | **`verificationRequired`** |
 | `temporarilyUnavailable(verified: nil)` | **`verificationRequired`**（コールドスタート） |
 | `temporarilyUnavailable(verified: 値)` | その値で解決する |
 | `integrityFailure` | **`verificationRequired`**。Free へ暗黙降格させない |
 
-**`Plan` を参照してよいのは能力解決の内側だけです。** `QuotaPolicy`、`AdFrequencyPolicy`、開始ゲート、一括処理の可否判定、既存作品の編集可否、UI の活性制御は、すべて `ResolvedCapabilities` を見ます。`Plan` を渡すと `plan = standard` かつ `status = pending` でも `plan != free` が成立し、規則を迂回します。
+##### キャッシュに鮮度上限を課す
+
+**「失効が明示的に確認された場合のみ剥奪する」だけでは、通信を遮断された購読が永続します。** RevenueCat の API ホストだけを DNS や VPN で落とせば、解約後も `loaded` が成立し続け、`paidUnlimited` として月間枠も整合性封鎖も参照しなくなります。**端末改造を要しない攻撃です。**
+
+**時刻で測ると、時刻を止められます。** `usageNow = max(now, lastObservedAt, trusted)` は**後退しないこと**しか保証せず、**前進することを保証しません。** 通信を遮断して端末時計を据え置けば `usageNow` は恒久的に同じ値を返し、`referenceNow − lastVerifiedAt` は永久に 0 のままです。**14 日が到来しません。**
+
+**時刻に加えて、時刻に依存しない量で測ります。** 台帳への書き込み回数を数えます。
+
+| 項目 | 規則 |
+| --- | --- |
+| フィールド | **`UsageLedger.unverifiedLedgerWrites: Int32`**（17 番目。[正準スキーマ](canonical-schema.md) の 4.1） |
+| 意味 | **最後に `Entitlement` の取得へ成功して以降、`UsageLedgerStore.transact` が成功した回数** |
+| 増加の契機 | **`transact` の内側で無条件に +1。** 呼び出し側が指定するのではなく、台帳を書けば必ず増える |
+| 上限 | **2000 回**（1 枚あたり 4 回の換算。下記） |
+| リセット | **専用ポート `UsageLedgerStore.recordEntitlementRefresh()` のみ**（下記）。変換関数からは触れない |
+| 保存先 | **`UsageLedger`**（署名対象）。DB へ置くと書き換えられる |
+| 台帳修復時の値 | **上限値（2000）。** 0 にすると台帳を壊すたびにリセットできる（6.3） |
+
+| 条件 | 判定 |
+| --- | --- |
+| `Entitlement.expiresAt` が `referenceNow` を過ぎている | **鮮度切れ** |
+| `referenceNow − Entitlement.lastVerifiedAt` > **14 日**（`isSandbox` なら **1 日**） | **鮮度切れ** |
+| **`unverifiedLedgerWrites` >= 2000** | **鮮度切れ** |
+| 上記以外 | 鮮度内 |
+
+**判定は `>=` です。** `> 2000` にすると、台帳修復時に入れる 2000 が**鮮度内**になり、「壊せばリセットできる」を塞ぐという修復時の値の目的が達成されません（6.3）。修復直後にただちに鮮度切れとするため、境界を含めます。
+
+##### リセットを専用ポートへ閉じる
+
+**加算は `transact` の内側で構造的に強制されていますが、リセットは変換関数から呼べます**（4.2）。変換関数は呼び出し側が渡すクロージャであり、**`UsageLedger` を組み立て直す任意の実装がこの 2 フィールドを 0 にできます。** 台帳を部分的に再構築する変換関数が 1 つ入るだけで、ここで塞いだ経路が無言で再開します。**加算について「加算を忘れた経路がそのまま抜け穴になる」と述べたのと同じ危険です。**
+
+**`UsageLedgerStore` に専用メソッドを 2 つ置きます**（宣言は[書き出し Saga](export-saga.md) の 0 章が正本）。`recordEntitlementRefresh()` と `recordConfigRefresh()` です。
+
+| 規則 | 内容 |
+| --- | --- |
+| 変換関数が見る型 | **`LedgerMutableView`。** `UsageLedger` から `unverifiedLedgerWrites` と `ledgerWritesSinceConfigFetch` を除いた射影 |
+| リセットの経路 | **上記 2 メソッドのみ。** どちらも内部で `transact` と同じ排他区間を取る |
+| リセット後の値 | **0 を書き、保存直前の +1 により保存値は 1 になる**（加算は無条件のため） |
+
+**変換関数から型ごと外します。** `transact` にフラグ引数を足す形にすると、その引数を渡すすべての経路が抜け穴になります。**射影型にすれば、リセットは「書けない」のではなく「存在しない」ため、忘れようがありません。**
+
+##### リセットと blob 保存の順序
+
+**リセットと `SubscriptionState` / `RemoteConfigState` の保存は、必ず 2 つの独立した書き込みになります。** 前者は `UsageLedger` blob、後者は別 blob であり、同一トランザクションに入れられません（7.1）。**順序を固定しないと、片方だけ成功した状態で古いキャッシュが延命されます。**
+
+| 順序 | 中断したときの結果 |
+| --- | --- |
+| **blob の保存 → リセット**（採用） | 新しいキャッシュに古いカウンタが残り、**早期に鮮度切れ**になる。安全側 |
+| リセット → blob の保存 | **古いキャッシュに 2000 回ぶんの寿命が追加される。** 取得成功のたびに保存直前で強制終了すれば、解約済みの `Entitlement` を無期限に延命できる |
+
+| 規則 | 内容 |
+| --- | --- |
+| `recordEntitlementRefresh()` | **`SubscriptionState` の保存が成功したことを確認してから呼ぶ** |
+| `recordConfigRefresh()` | **`/v1/config` の HTTP レスポンスを新規に受信したら呼ぶ。保存の有無に依らない**（下記） |
+| リセットが失敗した場合 | **`SubscriptionState` を巻き戻さない。** 次回の取得成功でもう一度リセットを試みる |
+
+**加算側と同じ原則です。** 「別トランザクションにすると片方だけ進んだ区間が生まれる」ことは避けられないため、**片方だけ進んだ状態が安全側へ倒れる順序を選びます。** 早期の鮮度切れは通信すれば解消し、成果物を失いません。
+
+**鮮度上限を課すのは有料権限を持つキャッシュだけです。**
+
+| キャッシュから導出した `ResolvedCapabilities` | 鮮度判定 |
+| --- | --- |
+| **有料能力を 1 つ以上含む** | **上表を評価する** |
+| **有料能力を 1 つも含まない** | **評価しない。常に鮮度内として扱う** |
+
+**判定キーを `plan != .free` にしません。** `plan` を直接見る形は、`Plan` を参照してよいのは能力解決の内側だけという規則（下記）と表面的に似てしまいます。いまは導出規則により両者が一致しますが、**将来 `plan == .free` にも何らかの有料相当の能力を付与する変更が入ると、この鮮度免除が同時に穴になります。** 導出後の能力で判定すれば、能力の追加に対して壊れません。
+
+**Free のキャッシュに鮮度を課すと、オフラインの Free 利用者が無料枠ごと止まります。** Free 利用者も「`missing` かつオンラインで取得成功（購読なし）」を経て `loaded` になります。同じ判定を掛けると、**一度オンラインで解決された後にオフラインのまま台帳を 2000 回書けば、月間無料枠が残っていても書き出せません。** 提示できるのは再試行と購入の復元だけで、Free 利用者には解決手段がありません。仕様 25.3 / 27.3 のオフライン耐性と、仕様 21.6（バックエンド障害で編集を止めない）に反します。
+
+**鮮度上限の目的は有料権限の永続化を防ぐことです。** Free のキャッシュには剥奪する有料権限が無く、古くなっても付与される能力は変わりません。**測る対象が存在しない判定を課しても、正当な利用者を止める副作用だけが残ります。**
+
+**カウンタの巻き戻しは対象外です。** カウンタが低かった時点の `UsageLedger` blob をコピーして戻せば、鍵が同じなので `valid` として検証を通り、**カウンタも `consumedExportIDs` も一緒に巻き戻ります。** これは 9.3 が「過去の正規 blob を丸ごと復元するリプレイ攻撃」として明示的に対象外と宣言した操作であり、**このカウンタに限った弱点ではありません**（同じ操作で無料枠も巻き戻ります）。**したがってカウンタの設計は、リプレイを前提としない範囲での防御です。**
+
+**回数は時計から独立しています。** 端末時刻をどう操作しても、書き出せば手順 4 が台帳を書き、月が変われば `rollPeriod` が台帳を書きます。**「有料機能を使い続けながら、検証を永久に回避する」経路が消えます。**
+
+**「起動回数」ではなく「台帳書き込み回数」にします。** 起動は台帳を読むだけで書きません。起動時に +1 させるには専用の台帳トランザクションを増やすことになり、**その加算が中断で失われたのか二重に適用されたのかを判定する規則が新たに要ります。** 台帳を書く既存のトランザクションの内側で数えれば、**トランザクションの原子性がそのまま冪等性になります。** 中断すればロールバックされ、成功すれば 1 回だけ増えます。
+
+**手順 7 では数えられません。** 手順 7 は DB だけのトランザクションであり、`ProtectedBlobStore` を同時に更新できません（7.1、[書き出し Saga](export-saga.md) の 4）。「`published` に到達した回数」を台帳へ持つには手順 7 の後に別の台帳トランザクションが必要で、**そこで強制終了すれば加算を落とせます。** 書き出し 1 回につき手順 4 が必ず台帳を書くため、**手順 4 で数えれば同じ量を冪等に測れます。**
+
+**使わなければ増えません。** これは欠陥ではありません。台帳を書かない＝書き出しも月次ロールも起きていない状態であり、**有料機能を使い続けることによる利得も発生していません。** 測っているのは経過時間ではなく使用量です。
+
+##### 上限値の換算
+
+**1 枚の書き出しで台帳は複数回書かれます。** 上限を枚数へ換算するには、その回数を数える必要があります。
+
+| 契機 | 回数 |
+| --- | --- |
+| インポート Saga の手順 4（`ProjectSourceSnapshot` の作成。[画像処理](image-pipeline.md)） | 1 |
+| 書き出し手順 −2（`SourceLease` と `TrialReservation` の追加） | 1 |
+| 書き出し手順 4（台帳への暫定適用） | 1 |
+| 書き出し手順 8（pending の昇格） | 1 |
+| **合計（新規写真 1 枚の書き出し）** | **4** |
+
+**新しい素材を選ばない再書き出しは 3 回です**（インポートを通らない）。月次ロールと起動時の孤児回収も台帳を書きますが、頻度が低いため換算には含めません。
+
+| 単位 | 台帳の書き込み回数 |
+| --- | --- |
+| 新規写真 1 枚の書き出し | 4 |
+| 新しい素材を選ばない再書き出し | 3 |
+| **Pro の 1 バッチ（50 枚）** | **200** |
+
+| 上限 | 相当する枚数 | Pro のバッチ数 |
+| --- | --- | --- |
+| `unverifiedLedgerWrites` **2000** | **約 500〜670 枚**（新規のみ〜再書き出しのみ） | **約 10 バッチ** |
+| `ledgerWritesSinceConfigFetch` **4000** | 約 1,000〜1,330 枚 | 約 20 バッチ |
+
+**上限を回数で切るのは利用者にも説明できます。** 2000 回はオフラインで約 500 枚、Pro の一括処理なら 10 バッチに相当します。**そこまで 1 度も通信できない状況は通常の利用では起こりません。**
+
+**当初の 100 / 200 は狭すぎました。** それぞれ約 25 枚・50 枚に相当し、**Pro の 1 バッチ（50 枚）で 200 回に達するため、機内モードで 2 バッチ目に書き出せなくなります。** 旅行や式の写真を数百枚オフラインで処理する利用は通常の範囲であり、**上限がそれを止めてはなりません。**
+
+**攻撃側の視点では、値の大小は二次的です。** 本質は**無制限だったものが有限になったこと**です。攻撃者は解約後に**永久にオフラインを維持する**必要があり、一度でもオンラインになれば `requestDate` が前進した取得により Free の `Entitlement` が返って延命が終わります。**500 枚で有界になることと、無制限であることの差が本質的です。**
+
+**逆に、正当な Pro 利用者を止める害は回復しません。** 撮って戻れない場面（旅行先、式の当日）で書き出せなくなると、成果物を得る機会そのものが失われます。**両方向の副作用を比べて、正当な利用者を止めない側へ寄せます。**
+
+**`TrustedTimeState` の 6 時間鮮度にも同じ問題があります。** `usageNow` を凍結すると `usageNow − observedAtUsageNow` が 0 のままになり、**一度得た信頼時刻が永久に「鮮度内」として通ります。** `trustedNow` の用途を 1 つずつ検討します。
+
+| `trustedNow` の用途 | 凍結の影響 | 対策 |
+| --- | --- | --- |
+| 整合性封鎖の解除（`trustedMonth` 経由） | **利得なし**（下記） | 不要 |
+| 台帳修復の分岐選択（「ライブの信頼時刻がある場合」。6.3） | 陳腐な値が「ライブ」として通るが、封鎖の基準が古い月になるだけ | 不要 |
+| `rollPeriod` の `ledgerTimeZone` 更新条件 | 条件が恒久的に成立するが、更新は「端末 TZ で求めた年月が保持中の値と等しいとき」に別途縛られる | 不要 |
+| **リモート設定の `expiresAt` 判定**（10.2） | **失効しなくなる**（下記） | **要る** |
+
+**封鎖の解除には利得がありません。** 解除には `trustedMonth` が封鎖時の月より後であることが必要で、**時計を止めている間は月も進まないため、解除も進みません。** 凍結を解けば `trustedMonth` は進みますが、同時に `usageNow` も跳ねて `rollPeriod` が `period` を進め、`consumedExportIDs` はどのみち空になります。**破損させても得られる結果が同じです。** 逆向き（時計だけ進めて古い信頼時刻を保持する）も、`usageNow − observedAtUsageNow > 6h` で `trustedNow` が `nil` になり、修復が `lockedUntilReinstall` へ倒れるため攻撃者に不利です。
+
+**リモート設定の期限には対策が要ります。** 10.2 は期限判定に `retentionNow` ではなく `trustedNow ?? usageNow` を使う理由を「古い設定を延命できるため」としていますが、**その選択が同じ理由（単調 ≠ 前進）で破れます。** 運用側が一度でも高い `freeMonthlyExportLimit` や小さい `interstitialAdExportInterval` を配信すれば、その時点で凍結して恒久化できます。**同じ道具で塞ぎます。**
+
+| 規則 | 内容 |
+| --- | --- |
+| フィールド | **`UsageLedger.ledgerWritesSinceConfigFetch: Int32`**（18 番目。[正準スキーマ](canonical-schema.md) の 4.1） |
+| 増加の契機 | **`transact` の内側で `unverifiedLedgerWrites` と同時に +1**（4.2） |
+| 上限 | **4000 回**（`>=` で判定する） |
+| 効果 | **上限に達した last-known-good は、`expiresAt` を過ぎたものと同じに扱う**（機能停止フラグ以外がバンドル既定値へ戻る。10.2） |
+| リセット | **専用ポート `UsageLedgerStore.recordConfigRefresh()` のみ**（6.2 のリセット規則）。**HTTP レスポンスを新規に受信したら呼ぶ。保存が起きたかどうかとは独立**（下記） |
+| 台帳修復時の値 | **上限値（4000）** |
+
+**`RemoteConfigState` の中ではなく `UsageLedger` に置きます。** 加算の契機が `UsageLedgerStore.transact` である以上、**同じトランザクションで書ける場所へ置かなければ冪等性が失われます。** `RemoteConfigState` は `ProtectedBlobStore` 上の別 blob であり、台帳のトランザクションから同時に更新できません（7.1）。**別トランザクションにすると、片方だけ進んだ区間が生まれ、`unverifiedLedgerWrites` で避けた問題がそのまま再発します。**
+
+**上限を購入状態より緩くします。** リモート設定の失効はバンドル既定値へ戻るだけで、利用者の操作を止めません。**4000 回は、購入状態の 2000 回に対して「先に有料権限の再検証が要求される」ことを意味します。** 通信できる状態へ戻れば両方とも同時に解消します。
+
+**`RemoteConfigState` の保存を条件にできません。** 10.2 は「`configVersion` が同じで canonical payload も同一なら**無視する**（同じ設定の再配信）」と定めています。**設定内容が変わらない限り保存は起きません。** 保存を条件にすると次が成立します。
+
+| 経路 | 結果 |
+| --- | --- |
+| 運用側が `configVersion` を上げない期間に台帳を 4000 回書く | last-known-good が失効し、バンドル既定値へ戻る |
+| その後も毎回取得に成功する | **保存が起きないためリセットされない。** 運用側が `configVersion` を上げるまで復帰しない |
+
+**「取得できているのに失効したまま」は、この機構が想定した状態ではありません。** 通信できていることが確認できた時点で、last-known-good を信頼し続ける根拠は回復しています。**したがって条件は「HTTP レスポンスを新規に受信したこと」であり、その内容が保存に値するかとは独立です。**
+
+**`SubscriptionState` 側には同じ問題がありません。** 「同一値なら保存しない」という規則を持たず、`requestDate` が前進していれば必ず保存します（6.2 の SDK 境界の定義）。
+
+**`expiresAt` の超過を鮮度切れに含めます。** `status == .active` のまま `expiresAt` を過ぎたキャッシュは、更新の確認が取れていない状態であり、有効と扱う根拠がありません。
+
+**`verificationRequired` は「Free として動かす」ことではありません。** 有料機能を新規に付与せず、書き出しの認可も開始しません（上記）。**未検証で有料機能を渡す経路と、正当な利用者を無言で降格させる経路の両方を避けます。**
+
+**`enabledStampPacks` を `ResolvedCapabilities` へ写します。** `Domain` の判定関数がリモート設定の型（`RemoteConfig`）を参照しないためです（3.3）。能力解決の内側で写し、以降は能力の一部として扱います。
+
+**`Plan` を参照してよいのは能力解決の内側だけです。** クォータ判定、広告表示頻度の判定、開始ゲート、一括処理の可否判定、既存作品の編集可否、UI の活性制御は、すべて `ResolvedCapabilities` を見ます。`Plan` を渡すと `plan = standard` かつ `status = pending` でも `plan != free` が成立し、規則を迂回します。
 
 **「確認できない」を型で表します。** `ResolvedCapabilities` を必ず返す関数では、`metered` を返せば暗黙降格になり、`unlimited` を返せば未検証で有料機能を付与します。
 
@@ -664,7 +954,10 @@ func resolveCapabilities(_ state: SubscriptionCacheState) -> CapabilityResolutio
 - **書き出しの認可を開始しない**（`ExportStartGate` を通さない）
 - **有料機能を新規に付与しない**
 - **Free へ降格したとも表示しない**
+- **カスタムスタンプ・履歴・プリセットを削除しない**
 - 再試行と購入の復元を提示する
+
+**`verificationRequired` で書き出しを止める範囲は限られます。** 上記のとおり Free のキャッシュは鮮度切れになりません。この状態へ入るのは、**有料権限を持つキャッシュが古くなった場合**と、**能力をそもそも判定できない場合**（`missing` かつオフライン / `temporarilyUnavailable(verified: nil)` / `integrityFailure`）だけです。前者は通信すれば復帰でき、後者はオフラインでの初回起動という限られた場面です。
 
 ##### `missing` を Free として扱ってよい条件
 
@@ -675,7 +968,8 @@ func resolveCapabilities(_ state: SubscriptionCacheState) -> CapabilityResolutio
 | `missing` かつ RevenueCat への問い合わせが**成功**（購読なし） | `resolved`（Free 相当の能力） |
 | `missing` かつ問い合わせが**成功**（購読あり） | `resolved`（該当プランの能力） |
 | `missing` かつ**オフライン等で問い合わせ不能** | **`verificationRequired`** |
-| `valid` かつオフライン | `resolved`（キャッシュで維持） |
+| `loaded` かつオフライン かつ鮮度内 | `resolved`（キャッシュで維持） |
+| `loaded` かつ**鮮度切れ** | **`verificationRequired`** |
 
 **キャッシュが無い状態でオフラインなら、書き出しを止めます。** Free として進めると有料利用者の再インストール直後に無料枠を消費させ、`unlimited` として進めると未検証で有料機能を渡します。どちらも取れません。購読の確認は初回起動時に一度行えば済むため、制約はオフラインでの初回起動という限られた場面だけです。
 
@@ -685,7 +979,7 @@ func resolveCapabilities(_ state: SubscriptionCacheState) -> CapabilityResolutio
 
 | 結果 | 扱い |
 | --- | --- |
-| `valid` | オフラインでもこのキャッシュで有料機能を維持する |
+| `valid` | オフラインでも**鮮度上限（14 日）の範囲で**このキャッシュで有料機能を維持する |
 | `missing` | RevenueCat へ問い合わせる。成功するまでは `verificationRequired` |
 | `integrityFailure` / `unsupportedSchema`（移行不能） | キャッシュを信頼せず、RevenueCat から再取得する |
 | `temporarilyUnavailable` | 上書きせず再試行する。**メモリ上に検証済みの `Entitlement` があれば維持し、無ければ `verificationRequired`**（下記） |
@@ -708,13 +1002,27 @@ func resolveCapabilities(_ state: SubscriptionCacheState) -> CapabilityResolutio
 
 **判定軸は「作成時のプラン」ではなく「現在の設定内容が要求するプラン」です。**
 
+判定の入力は `Project` 行そのものではなく、**出力へ影響する設定だけを集めた値**です。`Project` は `app.db` のテーブルであり `Domain` の型ではありません（7.1）。
+
 ```swift
+/// 能力判定と Paywall 文言の入力。Project とその子行から組み立てる
+struct ProjectCapabilityRequirement: Sendable, Equatable {
+    /// この Project の RenderSpec が使う全スタンプの必要能力。
+    /// StampRequirement の定義は [書き出し Saga](export-saga.md) の 1.1.1
+    let stampRequirements: Set<StampRequirement>
+}
+
 /// 表示用。Paywall の文言を組み立てるためだけに使う
-func requiredPlan(_ project: Project) -> Plan
+func requiredPlan(_ requirement: ProjectCapabilityRequirement) -> Plan
 
 /// 実装上の判定。プラン名ではなく能力で決める
-func canEdit(_ project: Project, capabilities: ResolvedCapabilities) -> Bool
+func canEdit(
+    _ requirement: ProjectCapabilityRequirement,
+    capabilities: ResolvedCapabilities
+) -> Bool
 ```
+
+**`RenderSpec` を直接受け取りません。** 判定に必要なのはスタンプの必要能力だけであり、座標や強度は無関係です。**同じ `ProjectCapabilityRequirement` を書き出し認可の `authorizeRenderSpec`（同 1.1.1）と共有し、UI と認可で判定材料を一致させます。**
 
 **`requiredPlan` の戻り値で可否を決めません。** 必要プラン名と現在のプラン名を比較する実装になると `status = pending` が素通りします。
 
@@ -740,8 +1048,6 @@ Free 範囲のプロジェクトとは、モザイク・ぼかし・黒塗り・
 
 **新しい `projectID` が付くため、元の台帳要素をそのまま共有できません。** `ProjectSourceSnapshot` は `projectID` ごとに 1 件であり、参照ではなく複製が要ります。
 
-| 順 | 操作 | 保存先 | 失敗時 |
-| --- | --- | --- | --- |
 | 順 | 操作 | 保存先 | 失敗時 |
 | --- | --- | --- | --- |
 | 1 | 新しい `ProjectID` を発行する | — | — |
@@ -859,6 +1165,9 @@ struct UsageLedger: Sendable, Equatable {
     let monthlyIntegrityLock: MonthlyIntegrityLock  // 破損修復による月間枠の封鎖
     let lastTrustedMonth: TrustedUTCMonth?       // 信頼できる時刻から導出した最新の UTC 年月
     let trialIntegrityLocked: Bool               // 破損修復によりトライアルを封じたか
+    let ledgerTimeZone: LedgerTimeZone           // 月次更新の基準。信頼時刻を得た起動でのみ更新
+    let unverifiedLedgerWrites: Int32            // 最後の Entitlement 取得成功以降の台帳書き込み回数（6.2）
+    let ledgerWritesSinceConfigFetch: Int32      // 最後のリモート設定取得成功以降の同回数（定義 6.2 / 効果 10.2）
 }
 
 extension UsageLedger {
@@ -916,9 +1225,14 @@ struct ProjectSourceSnapshot: Sendable, Equatable {
 
 | 集合 | 一意条件 | 上限 |
 | --- | --- | --- |
+| `pendingExportedSettingsEntries` | `projectID` ごとに 1 件 | 通常は同時に進行できる書き出しの数（v1 は 1）。**署名不正コミットが残る間は保留された孤児 pending が積み上がる**（下記） |
 | `exportedSettingsEntries` | `projectID` ごとに 1 件 | 履歴の保存期間内の `Project` 数 |
 | `projectSourceSnapshots` | `projectID` ごとに 1 件 | 履歴の保存期間内の `Project` 数 |
 | `workingSourceBindings` | `projectID` ごとに 0 件または 1 件 | 処理用ファイルを持つ `Project` 数 |
+
+**`pendingExportedSettingsEntries` の上限は「同時 1 件」ではありません。** 署名不正コミットが存在する間、孤児 pending の自動回収は全件保留され（[書き出し Saga](export-saga.md) の 5 の手順 5.5）、`Project` 削除 Saga も pending だけを持ち越します。**その間に複数の `Project` を削除すると、進行中の書き出しが 0 件でも孤児 pending が複数残ります。** 上限を「同時 1 件」と読むと、この状態を不変条件違反として扱う実装になります。
+
+**複数残ること自体は異常ではありません。** 保留は署名不正行が解消されるまでの一時的な状態であり、解消時に手順 5.5 がまとめて回収します。**ただし 2 件以上の孤立 pending は 6.2 の「一意に決められない」分岐へ倒れるため、利用者は最終手段（「すべて破棄して続ける」）を選ぶまで書き出せません。** これは受容します。署名不正コミットが存在する状態は既に異常であり、**復旧の手段が用意されている限り、袋小路にはなりません。**
 
 ##### 素材の実体と identity を分ける
 
@@ -949,7 +1263,7 @@ struct ProjectSourceSnapshot: Sendable, Equatable {
 | `sourceRecords` | 参照元がある素材のみ。削除規則により有界（6.4） |
 | `sourceLeases` / `trialReservations` | 同時実行数。v1 は 1 |
 | `grants` | 24 時間以内に成功した書き出しの素材数 |
-| `trialEntries` | `configuredCreditCount`（既定 5・hard max 5。[運用](operations.md) の 2.1） |
+| `trialEntries` | `BatchPolicySnapshot.trialCreditCount`（既定 5・hard max 5。[運用](operations.md) の 2.1） |
 | `consumedExportIDs` | 月間上限（既定 5） |
 | `exportedSettingsEntries` / `projectSourceSnapshots` | 履歴の保存期間内の `Project` 数。`Project` 削除で回収する（7.5） |
 
@@ -979,10 +1293,13 @@ func evaluate(
     sourceID: SourceID,              // 6.4 で解決済み
     monthlyLimit: Int,               // リモート設定の freeMonthlyExportLimit（10 章）
     usageNow: Date,                  // 正規化済み。端末時刻を直接渡さない
+    trustedNow: Date?,               // ledgerTimeZone を更新してよいかの判定に使う
     trustedMonth: TrustedUTCMonth?,  // 封鎖の解除判定に使う。端末時刻由来の値を渡さない
-    timeZone: TimeZone
+    deviceTimeZone: TimeZone         // 採用の可否は rollPeriod が決める（下記）
 ) -> QuotaEvaluation
 ```
+
+**`timeZone` をそのまま使いません。** 月次更新の基準は台帳が保持する `ledgerTimeZone` であり、`deviceTimeZone` は「更新してよいか」の判定材料として渡すだけです（下記）。`evaluate` は内部で `rollPeriod` を呼びます。
 
 **判定結果だけでなく更新後の台帳も返します。** 判定だけでは `lastObservedAt` の前進、月次更新、期限切れ grant の削除を永続化できません。
 
@@ -1082,15 +1399,42 @@ usageNow = max(
 | 主取得元 | **`/v1/config` のレスポンス本文に含まれる `serverTime`**（UTC epoch milliseconds の `Int64`） |
 | 補助経路 | RevenueCat の `CustomerInfo.requestDate`。設定取得が失敗し、購入状態の取得に成功した場合のみ |
 | どちらも失敗 | **`trustedNow = nil`。** 端末時刻を信頼時刻として扱わない |
-| 鮮度 | 取得から **6 時間以内**の値だけを「最近取得した信頼時刻」とする。超えたら `nil` |
-| 保存 | `RemoteConfigState` と同じ `ProtectedBlobStore` の署名対象へ、取得時刻とともに保存する |
+| 鮮度 | 観測から **6 時間以内**の値だけを「最近取得した信頼時刻」とする。超えたら `nil` |
+| 保存 | **独立した `TrustedTimeState`** として `ProtectedBlobStore` へ保存する（下記・7.2） |
 | 単調性 | 保存済みの信頼時刻より**過去の値を受理しない**（巻き戻しの防止） |
 
-**HTTP の `Date` ヘッダを使いません。** CDN や中間キャッシュが差し替えた値を掴む可能性があり、キャッシュヒット時には**取得のたびに同じ古い値**が返ります。`serverTime` をレスポンス本文へ入れ、**`Cache-Control: no-store` を設定した専用の応答**とします。設定本体のキャッシュ可否とは分けます。
+**HTTP の `Date` ヘッダを使いません。** CDN や中間キャッシュが差し替えた値を掴む可能性があり、キャッシュヒット時には**取得のたびに同じ古い値**が返ります。`serverTime` はレスポンス本文の値であり、**`/v1/config` の応答全体を `Cache-Control: no-store` の動的応答**とします（10.2 の配信方式）。
 
 **鮮度を 6 時間とするのは、整合性封鎖の解除に使うためです。** 長すぎると封鎖の解除が古い時刻で通り、短すぎるとオフラインの利用者が解除できません。**封鎖の解除は月単位の判定であり、6 時間の粒度で足ります。**
 
 **過去の値を受理しないのは、サーバー応答を差し替えられた場合の巻き戻しを防ぐためです。** HTTPS で保護されますが、**保存側でも単調性を守ります。**
+
+##### `TrustedTimeState`
+
+**信頼時刻の永続化を `RemoteConfigState` へ相乗りさせません。** 設定取得が失敗して RevenueCat だけが成功した場合、保存すべき信頼時刻はあるのに `lastKnownGood` が存在しない可能性があります。独立した署名対象にします。
+
+```swift
+/// 最後に受理した信頼時刻。ProtectedBlobStore の署名対象（7.2）
+struct TrustedTimeState: Sendable, Equatable {
+    let trustedEpochMillis: Int64      // 受理した信頼時刻（UTC epoch ms）
+    let observedAtUsageNow: Date       // 観測した時点の usageNow。鮮度判定の基準
+    let source: TrustedTimeSource
+}
+
+enum TrustedTimeSource: Sendable, Hashable {
+    case remoteConfig    // /v1/config の serverTime
+    case revenueCat      // CustomerInfo.requestDate
+}
+```
+
+| 項目 | 規則 |
+| --- | --- |
+| 鮮度判定 | **現在の `usageNow` − `observedAtUsageNow` ≤ 6 時間** |
+| 基準に端末時刻を使わない理由 | `usageNow` は単調であり、**時計を巻き戻しても鮮度を延ばせない。** 前進ジャンプでは早期に失効するが、封鎖が続くだけで成果物は失わない |
+| 受理条件 | `trustedEpochMillis` が保存済みの値以上であること |
+| `integrityFailure` | **`missing` と同じ扱い。** 信頼時刻なしとして封鎖側へ倒す。台帳のような修復は不要 |
+
+符号化順・`payloadType`・`blobKeyRawValue` は [正準スキーマ](canonical-schema.md) の 4.4 が正本で、HMAC ゴールデンテストの対象です。
 
 **2 つに分けるのは、単調性が削除判定と両立しないためです。** 単調な時刻は一度未来へ進むと時計を正しい値へ戻しても未来のままで、削除が保留されません。`retentionNow` に `max` を掛けないからこそ、時計を直したときに通常の判定へ復帰します。巻き戻しによる保持期間の延長は利用者に不利ではないため許容します。
 
@@ -1133,7 +1477,7 @@ enum MonthlyIntegrityLock: Sendable, Equatable {
 
 **`usageNow` だけを渡すと、それが信頼時刻由来か端末時刻由来かを受け手が判別できません。** `usageNow` は `max(now, lastObservedAt, trusted)` なので、信頼時刻が無くても値は入ります。封鎖の解除に使えば、端末時刻で解除できてしまいます。
 
-`observeTime` は `trustedNow` と `trustedMonth` を**別のフィールドとして**返し、`QuotaPolicy.evaluate` は両方を受け取ります。
+`observeTime` は `trustedNow` と `trustedMonth` を**別のフィールドとして**返します。**封鎖の解除に使うのは `trustedMonth` だけです。** `evaluate` は `trustedNow` も引数に取りますが、用途は `ledgerTimeZone` を更新してよいかの判定（`rollPeriod` の内部手順 2）に限り、**封鎖の解除には使いません。** `trustedNow` はほかにリモート設定の期限判定（10.2）と購入状態の鮮度判定（6.2）で使います。
 
 | 判定 | 使う値 |
 | --- | --- |
@@ -1169,12 +1513,10 @@ enum MonthlyIntegrityLock: Sendable, Equatable {
 **月初にリセットするのは `consumed` だけです。`grants` は月をまたいで保持します。**
 
 ```swift
-func rollPeriod(
-    _ ledger: UsageLedger,
-    usageNow: Date,
-    timeZone: TimeZone
-) -> UsageLedger {
-    let current = YearMonth(from: usageNow, in: timeZone)
+// 完全な引数は下記の「タイムゾーンの前進で月をまたがせない」を参照
+func rollPeriod(...) -> UsageLedger {
+    // 基準は台帳が保持する ledgerTimeZone。端末の現在値ではない
+    let current = YearMonth(from: usageNow, in: effectiveTimeZone)
     // 24時間を過ぎた権利だけを落とす。月の境界とは無関係
     let activeGrants = ledger.grants.filter {
         usageNow.timeIntervalSince($0.firstSuccessAt) < 24 * 3600
@@ -1192,6 +1534,56 @@ func rollPeriod(
 24 時間の窓は月の境界と無関係です。`grants` を月初に空にすると、7 月 31 日 23:59 の書き出しを 8 月 1 日 00:01 に再書き出しした場合に `freeReexport` になりません。
 
 タイムゾーンを西へ移動して月をまたぎ戻しても、端末時計を手動で戻しても、`period` は後退しません。
+
+##### タイムゾーンの前進で月をまたがせない
+
+**後退方向だけを保証しても、東向きの変更で月をまたげます。** UTC−12 から UTC+14 へ変更すると最大 26 時間前進し、月末なら `current > ledger.period` が成立して `consumedExportIDs` が空になります。リセット後に戻せば `period` は後退しないため、**実際の月境界より最大 26 時間早く枠が回復します。**
+
+| 規則 | 内容 |
+| --- | --- |
+| 月次更新の判定に使うタイムゾーン | **台帳が保持する `ledgerTimeZone`**。端末の現在値を直接使わない |
+| 更新の契機 | **`trustedNow` を得ており、かつ更新後も `period` が前進しない**場合のみ、現在のタイムゾーンへ更新する |
+| 更新後に月が変わる場合 | **更新を保留する。** 次の月次更新（保持中のタイムゾーンで月が変わった時点）の後に反映する |
+| 信頼時刻が無い間 | 保持している値を使い続ける。端末の現在値へ追従しない |
+
+**更新の可否に「`period` が前進しないこと」を含めます。** `trustedNow` を得た起動でタイムゾーンを東へ変えておくだけで更新されるなら、**通信できる状態で月末に UTC+14 へ変えれば同じ前倒しが成立します。** 更新が月境界を越えさせる場合は保留し、**保持中のタイムゾーンで月が変わってから反映します。** 遅れて反映されても、利用者が体験するのは「月替わりの通知が数時間ずれる」ことだけです。
+
+**渡航した利用者は、次の月替わり以降に新しいタイムゾーンで判定されます。** 月の途中で移動した場合はその月の残りを移動前の基準で過ごし、翌月から現地基準になります。**枠の総量は変わりません。**
+
+**更新は `rollPeriod` の内側で行います。** 月次更新と同じ関数に閉じることで、「更新してから判定する」順序が一意に決まります。
+
+```swift
+func rollPeriod(
+    _ ledger: UsageLedger,
+    usageNow: Date,
+    trustedNow: Date?,               // 更新の可否に使う
+    deviceTimeZone: TimeZone         // 端末の現在値。採用するかは内部で決める
+) -> UsageLedger
+```
+
+| 順 | 操作 |
+| --- | --- |
+| 1 | `ledger.ledgerTimeZone` で `current = YearMonth(from: usageNow, in:)` を求める |
+| 2 | **`trustedNow != nil` かつ `deviceTimeZone` で求めた年月が `current` と等しいなら、`ledgerTimeZone` を更新する** |
+| 3 | 等しくないなら更新を保留する（次回以降へ持ち越す） |
+| 4 | 更新後の `ledgerTimeZone` で `current > ledger.period` を判定する |
+
+**手順 2 の条件が「月をまたがせない」を実現します。** 端末の現在タイムゾーンで求めた年月が保持中の値と同じなら、更新しても `period` は動きません。**違うなら、その更新は月境界を越えさせるため保留します。**
+
+**保留は永続化しません。** 次回の起動で同じ判定を行い、月が変わっていれば更新できます。**保留回数を数える必要がありません。**
+
+```swift
+/// UsageLedger の一部。月次更新の基準タイムゾーン
+struct LedgerTimeZone: Sendable, Equatable {
+    let identifier: String      // "Asia/Tokyo" などの IANA 識別子
+}
+```
+
+**信頼時刻を得た起動でのみ更新するのは、更新そのものを利得にしないためです。** 正当な渡航では通信もできるため信頼時刻が得られ、数時間から数日のうちに追従します。**オフラインでタイムゾーンだけを変える操作では追従しません。**
+
+**`period` の後退防止（`current > ledger.period` の比較）は維持します。** 前進の抑制と後退の禁止は独立した防御であり、両方を課します。
+
+**整合性封鎖の `TrustedUTCMonth` とは別の値です。** あちらは UTC 固定で端末タイムゾーンを一切使わず、こちらは「利用者の感覚に合う月境界」を保ちながら操作されないようにするための値です。
 
 ##### 一括処理トライアル
 
@@ -1211,16 +1603,19 @@ Free および Standard の利用者は、Pro の中核である一括処理を�
 **残クレジット数は保存せず、台帳から導出します。**
 
 ```swift
+// policy は BatchPolicySnapshot（6.5）。DB から読んだ直後に hard max へクランプ済み
 let remainingCredits =
     usageLedger.trialIntegrityLocked
         ? 0
         : max(
             0,
-            configuredCreditCount
+            policy.trialCreditCount
                 - usageLedger.trialEntries.count
                 - usageLedger.trialReservations.count
         )
 ```
+
+**クランプ後の値を使います。** `BatchPolicySnapshot` は未署名の DB 行であり、読み出し直後に hard max（5）と最小値（0）へ丸めます（6.5）。**丸める前の値を導出へ渡すと、DB を書き換えるだけでクレジットを増やせます。**
 
 残数と台帳の両方を保存すると、更新途中の異常終了で「残 3 枚なのに台帳は 4 件」という判断できない状態が生じます。導出にすれば正が 1 つになり、付与数がリモート設定で変わっても挙動が自動的に決まります。
 
@@ -1268,7 +1663,68 @@ v1 は全体排他ゲート（[書き出し Saga](export-saga.md)）により同
 | `lastTrustedMonth` | **信頼時刻の UTC 年月** | `nil` |
 | `monthlyIntegrityLock` | `.lockedUntilTrustedMonthAfter(信頼時刻の UTC 年月)` | **`.lockedUntilReinstall`** |
 | `trialIntegrityLocked` | `true` | `true` |
+| `ledgerTimeZone` | **信頼時刻の取得元と同じ起動の端末タイムゾーン** | **端末の現在タイムゾーン**（封鎖中なので月次判定に利得なし） |
+| **`unverifiedLedgerWrites`** | **上限値（2000）** | **上限値（2000）** |
+| **`ledgerWritesSinceConfigFetch`** | **上限値（4000）** | **上限値（4000）** |
 | `grants` / `consumedExportIDs` / `trialEntries` / `trialReservations` / `sourceRecords` / `sourceLeases` / `pendingExportedSettingsEntries` / `exportedSettingsEntries` / `projectSourceSnapshots` / `workingSourceBindings` | **すべて空** | **すべて空** |
+
+**修復は `transact` を通しませんが、排他区間は取ります。** 専用ポート `UsageLedgerStore.repairLedger(evidence:)` で行い（下記）、変換関数を適用しないため 4.2 の「保存直前に +1」も適用されません。**表の値がそのまま保存されます。**
+
+##### カウンタを 0 にできない
+
+**修復が掛ける `monthlyIntegrityLock` と `trialIntegrityLocked` は Free の月間枠とトライアルの封鎖であり、有料キャッシュの鮮度には一切効きません。** 0 へ戻す実装にすると、**台帳を壊すたびに鮮度がリセットされ、6.2 で塞いだ「通信を遮断したまま有料権限を永続させる」経路が復活します。**
+
+**この 2 つは他のフィールドと違って「引き継げないから空にする」対象ではありません。** 空（0）が安全側ではなく攻撃側の値であるため、**取得できないときは最も保守的な値を入れます。**
+
+**`SubscriptionState` blob を削除する方式は採りません。** 修復と同時に購入状態キャッシュを消せば「壊すたびに本物の取得が要る」形になりますが、**次の 2 つが成立しません。**
+
+| 検討した方式の問題 | 内容 |
+| --- | --- |
+| **直そうとした問題を直さない** | オフラインの有料利用者は、封鎖の理由が「カウンタが上限」から「キャッシュ `missing`」へ変わるだけで**書き出せないまま**。オンラインの有料利用者は**上限値のままでも `recordEntitlementRefresh()` で復帰できる**（6.2） |
+| **Free 利用者を止める** | 削除は Free 利用者の `SubscriptionState` にも及ぶ。`missing` かつオフラインは `verificationRequired` なので、**月間無料枠が残っていても書き出せない。** 6.2 が避けた事態そのもの |
+
+**さらに、削除方式の前提が弱いです。** 「台帳を壊すと購入状態キャッシュも失う」という結合は、**壊さずに巻き戻せば働きません。** カウンタが低かった時点の `UsageLedger` blob をコピーして戻せば、鍵が同じなので `valid` として検証を通り、`integrityFailure` にならないため修復も走りません。**これは 9.3 が対象外と宣言した blob リプレイであり、結合を主軸に据える方式はその範囲で無効になります。**
+
+##### 修復後に書き出せる条件
+
+**結果リストの「Standard / Pro の通常書き出しは許可」は、再検証を済ませた後の状態を指します。** 修復直後は上限値が入っているため鮮度切れであり、`verificationRequired` の間は書き出しの認可を開始しません（6.2）。
+
+| 状況 | 書き出し |
+| --- | --- |
+| 修復直後・**オンライン** | `requestDate` が前進した取得に成功すれば `recordEntitlementRefresh()` が走り、**月間枠に依存せず書き出せる** |
+| 修復直後・**オフライン** | **書き出せない。** 再検証まで `verificationRequired` |
+
+**オフラインで書き出せないことを受容します。** 台帳が改ざんされた（または鍵を失った）状態で、有料権限を未検証のまま付与する根拠がありません。**7.2 は「HMAC 鍵の喪失と改ざんは端末側から区別できない」と定めているため、鍵を失っただけの正当な利用者も同じ扱いになります。** 一度オンラインになれば解消し、履歴・マイスタンプ・未受け渡し出力はいずれも失われません。
+
+**Free 利用者への影響はありません。** 6.2 のとおり、鮮度判定は導出した `ResolvedCapabilities` が有料能力を含む場合にしか掛かりません。**修復が課す月間枠の封鎖は別の規則であり、そちらは信頼できる時刻から導出した年月で解除されます。**
+
+##### 修復も排他区間の内側で行う
+
+**「`transact` を通さない」と「排他を取らない」は別です。** 修復済み台帳の保存を `ProtectedBlobStore.save` の直接呼び出しにすると、**`UsageLedgerStore` の待機キュー（4.2）を経由しない台帳書き込み経路が生まれます。** 4.3 の排他表は `UsageLedgerStore` を台帳書き込みの唯一の直列化主体としており、その外から同じ blob を書く主体は想定していません。
+
+| 並行 | 何が起こるか |
+| --- | --- |
+| `transact` が排他区間内で保存中、別の読み取り主体が破損を観測して排他外から修復する | 順序次第で**修復（封鎖つき）が正当な保存に上書きされ、封鎖もカウンタも消える** |
+| 逆順 | **修復が正当な保存を上書きし、grant・`consumedExportIDs`・`exportedSettingsEntries` が消える** |
+| 2 つの読み取り主体が同じ `integrityFailure` を同時に観測 | **修復が 2 回並行する。** `lastObservedAt` / `ledgerTimeZone` の後勝ち規則が無い |
+
+**修復も `UsageLedgerStore` の専用ポートへ置きます。**
+
+| 規則 | 内容 |
+| --- | --- |
+| ポート | **`UsageLedgerStore.repairLedger(evidence:)`**（宣言は[書き出し Saga](export-saga.md) の 0 章） |
+| 排他 | **`transact` と同じ待機キューを取る。** 台帳を書く主体を 1 つに保つ |
+| 変換関数 | **通さない。** 読めていない台帳に変換は適用できない |
+| 加算 | **適用しない。** 表の値がそのまま保存される |
+| 検出者 | **`repairLedger` の内側で読み直して判定する。** 呼び出し側の観測を根拠にしない |
+
+**排他区間の内側で読み直します。** 呼び出し側が観測した `integrityFailure` を根拠にすると、待機中に別の主体が修復を完了させた場合に**二重修復**になります。`invalidateWorkingSource` が排他区間の内側で再判定するのと同じ形です（4.2）。
+
+**これは `recordEntitlementRefresh()` / `recordConfigRefresh()` と同じ構成です。** 変換関数を通さない専用ポートでありながら、排他区間は取ります。
+
+**修復は痕跡を 1 つ減らします。** `SubscriptionState` を消すと `PriorUseEvidence.hasSubscriptionStateBlob` が偽になります。**残る 3 つ（`RemoteConfigState` / `TrustedTimeState` / `AppLifecycle`）で痕跡が成立し続けます** — いずれも修復では消えません（7.2）。**依存が増えた点を記録します。** 痕跡を 4 つ持つ理由の 1 つが、この種の自己減衰に耐えることです。
+
+**`RemoteConfigState` は削除しません。** 設定の失効はバンドル既定値へ戻るだけですが、**削除すると機能停止フラグが失われます。** `ledgerWritesSinceConfigFetch` を上限値にすれば「期限切れ」として扱われ、10.2 の規則により**機能停止フラグは保持されます**（[運用](operations.md) の 2.1）。削除より期限切れのほうが安全側です。
 
 **端末年月を封鎖の基準にしません。** 信頼時刻を取得できない場合は基準を決められないため、`lockedUntilReinstall` へ倒します（整合性封鎖の項）。
 
@@ -1437,8 +1893,8 @@ OS がトランスコード provider = P1, content = F2  → R へ F2 を追加 
 | 7 | `SourceRecord.aliases` が空でなく、全レコードを通じて一意 | alias を持たないレコードは二度と解決されず、永久に残る |
 | 8 | **同じ `sourceID` の `SourceLease` が 2 件以上存在しない** | 同一素材の非終端書き出しが 2 件走っており、所有者モデルが壊れる |
 | 9 | **`projectSourceSnapshots` の各 `identity` の alias が、いずれかの `SourceRecord` に存在する** | 再接続の照合元が消え、履歴を再編集できなくなる |
-| 11 | **`workingSourceBindings` の各 `projectID` が `projectSourceSnapshots` にも存在する** | 実体だけがあり identity が無い `Project` ができる |
 | 10 | **`pendingExportedSettingsEntries` / `exportedSettingsEntries` / `projectSourceSnapshots` / `workingSourceBindings` の各集合に、同じ `projectID` が 2 件以上存在しない** | どちらを認可の根拠にするか決まらない |
+| 11 | **`workingSourceBindings` の各 `projectID` が `projectSourceSnapshots` にも存在する** | 実体だけがあり identity が無い `Project` ができる |
 
 条件 5 は、予約と lease が手順 −2 の同一トランザクションで作られ、手順 4 またはロールバックで同時に消えることの帰結です。条件 7 の前半（空集合の禁止）は条件 1 に違反しないため、別条件として立てます。
 
@@ -1740,15 +2196,58 @@ case .oneByOne:
 ```swift
 struct BatchPolicySnapshot: Sendable, Equatable {
     let configVersion: Int64
+    let kind: BatchKind            // クランプ先を決める（下記）
     let batchSizeLimit: Int32
     let trialCreditCount: Int32
     let concurrencyLimit: Int32
+}
+
+/// このバッチが Pro の通常一括かトライアルか。作成時に確定する
+enum BatchKind: Sendable, Hashable {
+    case proBatch      // canUseProBatch による通常の一括処理
+    case trial         // クレジット消費による一括トライアル
 }
 ```
 
 `Batch` の行が保持し、**再起動後も同じ値を使います。** リモート設定を読み直して適用すると、復元したバッチの上限が実行中に変わります。
 
+| `BatchKind` | DB 列値 |
+| --- | --- |
+| `proBatch` | **1** |
+| `trial` | **2** |
+
+**列値を固定します。** `BatchKind` は署名対象に入りませんが、`Batch` の DB 列としてスキーマ移行をまたぎます。`case` の宣言順に依存させると、宣言順を変えた版が既存行を逆の `kind` として読み、**`trial` のバッチが `proBatch` として上限 50 でクランプされます**（`OutputState` と同じ規則。7.5）。
+
 新しいバッチの作成時に、その時点の `RemoteConfig` から作ります。
+
+##### 読み出しのたびに hard max へクランプする
+
+**`BatchPolicySnapshot` は未署名の DB 行です。** `trialCreditCount` を 5 → 500 へ書き換えれば、`remainingCredits` の導出（下記）が 500 近くを返し、**一括処理を任意枚数の新規写真に対して無制限に使えます。** `RemoteConfig` を HMAC で保護しても、その値を複製した DB 行が無防備なら意味がありません。
+
+| フィールド | クランプ先（[運用](operations.md) の 2.1） |
+| --- | --- |
+| `batchSizeLimit`（`kind == .proBatch`） | `proBatchSizeLimit` の hard max **50** / 最小 1 |
+| `batchSizeLimit`（`kind == .trial`） | `trialBatchSizeLimit` の hard max **5** / 最小 1 |
+| `trialCreditCount` | hard max **5** / 最小 0 |
+| `concurrencyLimit` | `batchConcurrencyLimit` の hard max **1**（v1）/ 最小 1 |
+| `configVersion` / `kind` | **クランプの対象外**（記録用の値であり上限を持たない） |
+
+| 規則 | 内容 |
+| --- | --- |
+| 読み出し | **`app.db` から読んだ直後にクランプする** |
+| クランプの向き | **hard max を超える値は hard max へ、最小値を下回る値は最小値へ** |
+| 適用箇所 | `remainingCredits` の導出、`canEnterBatch`、選択枚数条件、キューの並列数のすべて |
+| `kind` の改変 | **`.trial` → `.proBatch` の書き換えは `batchSizeLimit` の上限を 5 → 50 へ緩めるが、新規写真は `remainingCredits`（≤5）に縛られる**（下記） |
+
+**`kind` を持たせるのは、`batchSizeLimit` のクランプ先が 2 つあるからです。** `BatchPolicySnapshot` だけでは Pro の 50 とトライアルの 5 のどちらへ丸めるか決まりません。
+
+**`kind` の改変では枚数が増えません。** 選択枚数の条件は 2 本独立しており（6.5）、新規写真は `remainingCredits`（クランプ後は最大 5）に、消費済みの写真は `trialEntries` の件数（最大 5）に縛られます。**処理できる相異なる素材は 5 枚のままです。** 重複は `canonicalCount` が畳みます（6.4）。
+
+**リモート応答の受理時だけでなく、DB からの読み出し時にもクランプします。** 受理時の検証（[運用](operations.md) の 2.1）は配信経路にしか効きません。**同じ上限を 2 か所で課すのは冗長ではなく、経路が 2 つあるからです。**
+
+**署名対象へ移しません。** `Batch` は DB の履歴行であり、台帳へ移すと `Project` 数に比例して署名対象が増えます。**クランプで上限が保証できるため、署名は不要です。** 改変しても hard max（トライアル 5・バッチ 50・並列 1）を超えられません。
+
+**下限もクランプします。** `batchSizeLimit` を 0 にして「上限 0 だから何枚でも通る」という実装ミスを誘発させないためです。
 
 その他の規則は仕様 16.5 / 16.7 / 16.8 に従います。
 
@@ -1856,8 +2355,8 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 
 | テーブル | 備考 |
 | --- | --- |
-| `Project` | 仕様 19.1。`projectRevision`（下記）と再編集用の `ProjectSourceLocator` を持つ（[画像処理](image-pipeline.md)）。**ここにのみ平文の `localIdentifier` が存在する** |
-| `FaceTrack` | 仕様 19.2。手動領域は `createdManually = true` |
+| `Project` | 仕様 19.1。`projectRevision`（下記）、`detectionRevision`、`detectionPixelSize`、再編集用の `ProjectSourceLocator` を持つ（[画像処理](image-pipeline.md)）。**ここにのみ平文の `localIdentifier` が存在する** |
+| `FaceTrack` | 仕様 19.2。手動領域は `createdManually = true`。**検出品質の列（`confidence` / `yawDegrees` / `pitchDegrees` / `rollDegrees` / `isSmallFace`）も持つ**（6.1 の再導出に要る） |
 | `EffectSetting` | 仕様 19.4 |
 | `ExportSetting` | 仕様 19.5 |
 | `CustomStamp` | 仕様 19.6。スタンプ一覧の項目（7.5） |
@@ -1873,6 +2372,7 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `ExportQueueItem` | 一括処理のキュー状態（6.5） |
 | `WorkingSourceRecord` | 処理用にアプリ領域へ複製した元素材（[画像処理](image-pipeline.md)） |
 | `PendingFileDeletion` | 参照 0 になった実体の削除候補（7.5） |
+| **`AppLifecycle`** | **利用痕跡（7.2）。行は最大 1 件。起動時復旧の手順 9 で挿入し、更新も削除もしない** |
 
 **`app.db` 全体がバックアップ対象外です**（7.4）。復元してはいけない理由は 2 つあり、どちらも DB を分けても解消しません。
 
@@ -1924,6 +2424,7 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `ExportQueueItem(batchID, projectID)` | **UNIQUE** |
 | `DeliveryAttempt.exportID` | **PRIMARY KEY** |
 | `UnknownLibrarySave.exportID` | **PRIMARY KEY** |
+| **`AppLifecycle`** | **`id INTEGER PRIMARY KEY CHECK (id = 1)`。** 1 行しか存在できないことをスキーマで強制する |
 
 外部キーは `PRAGMA foreign_keys = ON` で有効化し、次を宣言します。
 
@@ -2003,6 +2504,7 @@ v1 では、**出力ファイルと保護ブロブについてもファイルと
 - `UsageLedger`（6.3）
 - `SubscriptionState`（6.2 の `Entitlement` キャッシュ）
 - `RemoteConfigState`（10 章）
+- `TrustedTimeState`（6.3 の信頼時刻）
 
 **鍵の保管とデータの保管を分けます。**
 
@@ -2034,12 +2536,18 @@ protocol ProtectedPayload: Sendable {
 extension UsageLedger: ProtectedPayload { }
 extension SubscriptionState: ProtectedPayload { }
 extension RemoteConfigState: ProtectedPayload { }
+extension TrustedTimeState: ProtectedPayload { }
+
+// ExportCommit も同じ正準化を使うが、blob ではなく DB 行として保存する。
+// blobKeyRawValue を持たないため ProtectedPayload へは適合させず、
+// canonicalBodyBytes() と payloadType / schemaVersion を個別に実装する
 
 /// 値の型がキーに結びついている。型引数を取り違えられない
 struct ProtectedBlobKey<Value: ProtectedPayload>: Sendable {
     static var usageLedger: ProtectedBlobKey<UsageLedger> { .init() }
     static var subscriptionState: ProtectedBlobKey<SubscriptionState> { .init() }
     static var remoteConfigState: ProtectedBlobKey<RemoteConfigState> { .init() }
+    static var trustedTimeState: ProtectedBlobKey<TrustedTimeState> { .init() }
 }
 
 protocol ProtectedBlobStore: Sendable {
@@ -2064,7 +2572,7 @@ protocol ProtectedBlobStore: Sendable {
 | `ManagedFileKind` | `.protectedBlob`。ディレクトリの決定にのみ使う |
 | 検証 | 読み込み時に `payloadType` と `schemaVersion` が型の宣言と一致することを確認する |
 
-**`ProtectedBlobStore` までランダム UUID で管理する必要はありません。** 論理キーは 3 つに固定されており、増減はスキーマ変更を伴います。ID による間接参照は、任意個のファイルを扱う `ManagedFileStore` の要件であって、この 3 つには当てはまりません。
+**`ProtectedBlobStore` までランダム UUID で管理する必要はありません。** 論理キーは 4 つに固定されており、増減はスキーマ変更を伴います。ID による間接参照は、任意個のファイルを扱う `ManagedFileStore` の要件であって、この 4 つには当てはまりません。
 
 `blobKeyRawValue` は `UInt32` で固定します。ファイル名の決定に使うため、宣言順が変わってもファイルの対応が変わってはいけません。`payloadType` の検証と併せて、**種別をまたいだ付け替えを実行時にも弾きます**（9.1）。
 
@@ -2078,35 +2586,181 @@ enum ProtectedLoadResult<T: Sendable>: Sendable {
     case missing                        // まだ存在しない
     case integrityFailure               // HMAC 不一致
     case temporarilyUnavailable         // Keychain・ファイルの一時障害
-    case unsupportedSchema(version: Int)
+    case unsupportedSchema(version: UInt32)
 }
 ```
 
 | 結果 | 扱い |
 | --- | --- |
 | `valid` | そのまま使う |
-| `missing` | **新規利用者用の通常状態を作る** |
+| `missing` | **利用痕跡が無ければ**新規利用者用の通常状態を作る。**あれば `integrityFailure` と同じ扱い**（下記） |
 | `integrityFailure` | 保守的な修復（6.3 の台帳、10 章のリモート設定、6.2 の購入状態） |
 | `temporarilyUnavailable` | **上書きしない。** 再試行し、書き出しの開始を一時停止する。再試行可能なエラーを提示する |
 | `unsupportedSchema` | 定義済みの移行処理を実行し、移行後に再検証する |
 | 移行不能 | 復旧エラーとして扱う。**自動初期化しない** |
 
-**`temporarilyUnavailable` と `integrityFailure` を混同しないことが要点です。** 鍵ストアが一時的に利用できないだけの状態を改ざんとして修復すると、正常な利用者の枠を消します。両者は「署名検証まで到達したか」で区別できます。データを読めて HMAC が一致しない場合のみ `integrityFailure` であり、読み込み自体の失敗や鍵を取得できなかった場合は `temporarilyUnavailable` です。
+##### `UsageLedger` の `missing` を無条件に信用しない
 
-**HMAC 鍵そのものが失われた場合は `integrityFailure` として扱います。** 鍵の喪失と改ざんは端末側から区別できません。
+**改変を罰して削除に報酬を与える設計にできません。** `integrityFailure` では封鎖付きの修復を課す一方、`missing` で無条件に新規台帳を作ると、**`protected/` から台帳 blob だけを削除すれば無料枠とトライアルが何度でも全回復します。** 履歴もカスタムスタンプも購入状態も失われないため、再インストール（仕様 14.5 が許容）と違って利用者側の損失がありません。
+
+**`missing` が真の初回起動なら、この端末にアプリの利用痕跡は存在しません。** 痕跡があるのに台帳だけが無い状態は、真の初回起動では成立しません。
+
+**履歴テーブルの行を痕跡にできません。** 「履歴を保存しない」設定（7.5）は完了画面を離れた時点で `Project` / `ExportRecord` / 完了済みキュー項目 / `WorkingSourceRecord` を削除し、`delivered` の `OutputRecord` も削除されます。`ExportCommit` は手順 9 で消え、単体処理では `Batch` が無く、`CustomStamp` は有料機能です。**アプリ自身が正規機能として痕跡を全消去するため、削除の代償がゼロになります。** 手動での履歴全削除でも同じ状態を作れます。
+
+**痕跡は「消せないもの」に置きます。**
+
+```swift
+/// UsageLedger が missing のときだけ評価する。
+/// 利用者操作では削除できない場所だけを見る
+struct PriorUseEvidence: Sendable, Equatable {
+    /// 他の署名済み blob が存在する。真の初回起動では 1 つも存在しない
+    let hasSubscriptionStateBlob: Bool
+    let hasRemoteConfigStateBlob: Bool
+    let hasTrustedTimeStateBlob: Bool
+
+    /// app.db の AppLifecycle 行が存在する。2 回目以降の起動では必ず真
+    let hasCompletedStartupBefore: Bool
+
+    var indicatesPriorUse: Bool {
+        hasSubscriptionStateBlob || hasRemoteConfigStateBlob
+            || hasTrustedTimeStateBlob || hasCompletedStartupBefore
+    }
+}
+```
+
+| 痕跡 | いつ作られるか | 利用者が消せるか |
+| --- | --- | --- |
+| `RemoteConfigState` | **初回のリモート設定取得に成功した時点**（10.2） | 設定画面から消せない |
+| `TrustedTimeState` | **初回の信頼時刻取得に成功した時点**（上記） | 同上 |
+| `SubscriptionState` | 初回の購入状態取得に成功した時点（6.2） | 同上 |
+| **`AppLifecycle`** | **起動時復旧の全手順を完了した時点**（[書き出し Saga](export-saga.md) の 5 の手順 9） | **設定画面からは消せない。DB への直接書き込みでは消せる**（下記） |
+
+**`AppLifecycle` は 1 行だけのテーブルです。**
+
+```swift
+/// app.db。行は最大 1 件。更新も削除もしない
+struct AppLifecycle: Sendable {
+    let firstStartupCompletedAt: Date   // 起動時復旧を初めて完走した時刻
+}
+```
+
+| 規則 | 内容 |
+| --- | --- |
+| 書き込み | **起動時復旧の手順 9 で、行が無いときだけ挿入する**（[書き出し Saga](export-saga.md) の 5） |
+| 更新 | **しない。** 2 回目以降の起動では既存行をそのまま残す |
+| 削除 | **どの経路からも削除しない。** 履歴設定・手動の履歴全削除・容量超過・期限削除のいずれの対象にもしない（7.5） |
+| 評価の位置 | **起動時復旧の手順 1**（`UsageLedger` の読み込み判定） |
+
+**真の初回起動では、評価時点にまだ存在しません。** 書き込みは手順 9、評価は手順 1 です。**手順の順序そのものが誤検知を構造的に防ぎます。** 初回起動の利用者が「痕跡あり」と判定されて整合性封鎖つきの修復へ入る事故は起こりません。
+
+**2 回目以降の起動では必ず存在します。** 手順 9 に到達せずに終了した起動では書かれませんが、その場合は次の起動でもう一度書き込みが試みられます。**「一度でも復旧を完走した」ことの記録であり、履歴設定と独立しています。**
+
+**利用者が作るデータを痕跡にできません。** `StampAsset` は `canUseCustomStamps`（有料能力）が要るため、**狙われている Free 利用者には構造的に存在しません。** `BatchPreset` は作成が任意であり、利用者自身が削除できます。**Free の月間枠を回復する経路を塞ぐ痕跡が、その層では常に偽になります。**
+
+**スキーマ移行の件数も痕跡にできません。** `DatabaseMigrator` は**新規作成時にも登録済みの全 migration を適用する**ため、「適用済み migration の件数」を素朴に読むと**真の初回起動でも 0 になりません。** 「作成時のスキーマ版より後に適用された数」を得るには作成時の版を別途記録する必要があり、その保存先自体が新しい未署名の状態になります。**さらに、初版のまま更新を当てていない利用者では常に 0 です。** リリース時点では全利用者がこれに該当するため、**この痕跡が守る対象は初日には 0 人です。**
+
+| `UsageLedger` | 利用痕跡 | 扱い |
+| --- | --- | --- |
+| `missing` | **無し** | 通常の新規台帳を作る（真の初回起動・再インストール） |
+| `missing` | **有り** | **`integrityFailure` と同一の保守的修復**（6.3 の表）。封鎖を掛ける |
+| `valid` / `integrityFailure` / その他 | 評価しない | 上表のとおり |
+
+**`protected/` 配下の他の blob を痕跡にします。** 台帳だけを消す攻撃者は、**`protected/` の中身を全部消さなければ痕跡が残ります。** 全部消すと `RemoteConfigState` と `TrustedTimeState` も失われますが、それらは再取得できるため利得側の損失にはなりません。**そこで `app.db` 側の痕跡を併せて見ます。**
+
+**`protected/` だけを消しても痕跡が残ります。** これが `AppLifecycle` を置く唯一の目的です。`protected/` の 3 blob はいずれも次回のオンライン起動で自動的に再生成されるため、**削除の代償になりません。** 痕跡を `protected/` だけに置くと、**ファイルを消すだけの操作**（SQL を伴わない）で無料枠とトライアルが回復します。
+
+##### `PriorUseEvidence` が守る範囲と、守れない範囲
+
+**`AppLifecycle` は `DELETE` 1 行で消せます。** `DELETE FROM AppLifecycle` はテーブルを残すためスキーマ移行の記録と食い違わず、他のデータも一切失いません。**そして `app.db` への直接書き込みは、本設計が明示的に前提とする攻撃者能力です**（1.1.1 の `EffectSetting` 改変、6.1 の `FaceTrack` 改変。どちらも「未署名の DB 行だから書き換えられる」から出発しています）。`protected/` を消せる攻撃者は、同じアクセス権で `sqlite3` を 1 回叩けます。
+
+| 操作 | `indicatesPriorUse` | 判定 |
+| --- | --- | --- |
+| 台帳 blob だけを削除 | **真**（他の 3 blob が残る） | 保守的修復 |
+| `protected/` を全消去 | **真**（`AppLifecycle` が残る） | 保守的修復 |
+| **`protected/` 全消去 ＋ `DELETE FROM AppLifecycle`** | **偽** | **通常の新規台帳。塞げない**（9.3） |
+
+**この経路を完全に塞ぐ構成は存在しません。** 痕跡は次の 3 つを同時に満たす必要がありますが、両立しません。
+
+| 性質 | 要求 | 根拠 |
+| --- | --- | --- |
+| **健全性** | 真の初回起動**と正当な再インストール**の直後は痕跡が**無い** | 仕様 14.5 が再インストールでの枠回復を明示的に許容する。痕跡が残れば正当な再インストール利用者が封鎖され、`trialIntegrityLocked` は二度と解除されない |
+| **完全性** | 一度でも利用した後は痕跡が**ある** | 痕跡の目的そのもの |
+| **耐久性** | 攻撃者がゼロコストで消せない | 塞ぎたい経路 |
+
+**健全性と完全性を合わせると、痕跡はアプリコンテナ内にしか置けません。** iOS で「再インストールでは消え、それ以外では消えない」ものはコンテナ（`app.db` / `protected/` / `UserDefaults` / App Group）だけです。**一方コンテナ内は、9.3 が「差し替えの対象とする」と宣言した攻撃者の書き込み範囲そのものです。** 健全性と完全性が痕跡をコンテナ内へ強制し、耐久性がコンテナ内を禁じます。
+
+| コンテナ外の候補 | 壊れる性質 |
+| --- | --- |
+| Keychain | **健全性。** 再インストール後に残る事例があり、正当な利用者を封鎖する（下記） |
+| iCloud Key-Value Store | **健全性と商品仕様。** 端末変更でも残り、7.4 の「端末内にのみ保存し、端末変更では引き継がれない」に反する |
+| **DeviceCheck / App Attest** | **仕様 14.5。** 技術的にはこの用途の唯一の正解だが、Apple のサーバーへの問い合わせに自前サーバーが要る |
+
+**これは実装の不備ではなく、仕様が選んだトレードオフの帰結です。** 唯一の技術的正解である DeviceCheck を仕様 14.5 が排除しているため、端末内だけで完全な痕跡は作れません。**この不可能性を記録するのは、次の担当者が痕跡の置き場所を探し直さないためです。**
+
+**したがって `PriorUseEvidence` はセキュリティ制御ではなく、低労力の初期化に対するガードです。**
+
+| 対象 | 扱い |
+| --- | --- |
+| **ファイル削除だけで完結する操作** | **塞ぐ。** Jailbreak 端末で最も手軽であり、塞ぐ価値がある |
+| **SQL を伴う操作** | **塞げない。** 上記の不可能性により原理的に不可能 |
+
+**引き上げた水準は「`rm` 1 回」から「`rm` 1 回 ＋ `DELETE` 1 回」です。** 小さいですが実在します。**過大に書きません。**
+
+**`sqlite_sequence` の残渣を痕跡に使いません。** `AUTOINCREMENT` の採番高水位は行を `DELETE` しても 0 に戻らないため痕跡になりますが、**攻撃者の能力区分が変わらず（`DELETE` が 2 回になるだけ）、SQLite の内部テーブルへの依存が `VACUUM` やマイグレーションで正当な利用者を封鎖する方向の事故を招きます。** 検証できない防御を足すと、文書が「守れている」と誤読される副作用のほうが大きくなります。
+
+**鍵の有無を痕跡に含めません。** 再インストール後に Keychain の項目だけが残る事例があり（下記）、これを痕跡にすると正常な再インストールが封鎖されます。
+
+**サーバー照合は採りません。** 仕様 14.5 が不正利用防止のためだけの端末識別子の収集を禁じています。
+
+**`SubscriptionState` と `RemoteConfigState` と `TrustedTimeState` には同じ規則を課しません。** いずれも `missing` で保守側（`verificationRequired` / バンドル既定値 / 信頼時刻なし）へ倒れるため、削除が利得になりません。
+
+**`temporarilyUnavailable` と `integrityFailure` を混同しないことが要点です。** 鍵ストアが一時的に利用できないだけの状態を改ざんとして修復すると、正常な利用者の枠を消します。**両者は「ファイルを読み切れたか」で区別します**（写像の全体は[正準スキーマ](canonical-schema.md) の 1 章）。読み切れなかった場合が `temporarilyUnavailable`、**読み切れたうえで長さ・`payloadType`・HMAC のいずれかが合わない場合が `integrityFailure`** です。鍵を供給できない場合は観測で分けます（下記）。
+
+**「署名検証まで到達したか」を基準にしません。** それだと**末尾 1 バイトを切り詰めるだけで長さ検査に落ち、署名検証へ到達しないため `temporarilyUnavailable` に分類されます。** 修復が走らないため `unverifiedLedgerWrites` は上限値へ設定されず、`transact` も走らないため加算もされません。**6.2 で導入した「時刻に依存しない前進源」が、1 バイトの改変で永久に止まります。**
+
+**台帳が `valid` でないときの `resolveCapabilities` の引数を定めます。**
+
+| `UsageLedger` の読み込み結果 | `unverifiedLedgerWrites` に渡す値 |
+| --- | --- |
+| `valid` | 読み込んだ値 |
+| **それ以外**（`missing` / `integrityFailure` / `temporarilyUnavailable` / `unsupportedSchema`） | **上限値（下記の上限）** |
+
+**引数は非 Optional です。** 素直に `0` を渡す実装だと、台帳を読めない状態が**恒久的に鮮度内**になります。**値を取得できないときは最も保守的な値を渡します。** `ledgerWritesSinceConfigFetch` も同様です。
+
+**これは 6.3 の修復時の値とは別の規則です。** 修復は台帳を作り直して `SubscriptionState` を削除するため、カウンタは 0 で足ります。**一方こちらは「まだ修復していない・修復できない」時点の判定であり、`SubscriptionState` がまだ生きています。** `temporarilyUnavailable` のように修復へ進まない状態が継続しうるため、判定側で保守的に倒します。
+
+##### 鍵を供給できない場合の分類
+
+**「一時的に取れない」と「恒久的に無い」を観測から分けます。** どちらも `CryptoKeyStore` が鍵を供給できない状態ですが、分類を誤ると正反対の事故が起きます。
+
+| 観測 | 分類 | 根拠 |
+| --- | --- | --- |
+| **`errSecInteractionNotAllowed`**（端末ロック中に `AfterFirstUnlock` の項目を読んだ等）・`errSecNotAvailable` | **`temporarilyUnavailable`** | 解錠すれば読める。ここで修復すると正常な利用者の枠を消す |
+| **`errSecItemNotFound`**（項目が存在しない） | **`integrityFailure`** | 鍵が無ければ既存 blob を検証できない。恒久的な状態 |
+| その他の `OSStatus` | **`temporarilyUnavailable`** ＋ 再試行 | 未知の失敗を懲罰側へ倒さない |
+
+**どちらか一方へ倒すことはできません。**
+
+- **すべて `temporarilyUnavailable`** にすると、恒久的な鍵喪失で「上書きしない。再試行し、書き出しの開始を一時停止する」が永久に続き、**修復が走らず `transact` も走らないためアプリが永久に停止します。** 末尾 1 バイトの切り詰めで塞いだのと同じ失敗モードが、鍵側の扉から入ります
+- **すべて `integrityFailure`** にすると、**端末ロック中の Keychain 読み取り失敗で正常な利用者の台帳が `lockedUntilReinstall` つきで消えます**
+
+**`errSecItemNotFound` は改ざんと区別できません。** 攻撃者が Keychain の項目を消しても同じ観測になります。**その場合の扱いを `integrityFailure`（封鎖つき修復）とするのは意図した設計です** — 鍵を消すことで封鎖を回避できてはいけません。
 
 ##### 再インストール後に鍵だけが残る場合
 
 **`ThisDeviceOnly` が保証するのは「別端末へ移行しないこと」であり、アンインストール時に削除されることではありません。** 実際、再インストール後に Keychain の項目が残る事例が知られています。
 
-| `ProtectedBlobStore` | `CryptoKeyStore` | 扱い |
-| --- | --- | --- |
-| `missing` | `missing` | 通常の新規台帳を作る |
-| `missing` | **`existing`** | **同じく通常の新規台帳を作る。** 鍵はそのまま再利用してよい |
-| `valid` | `existing` | 通常経路 |
-| `integrityFailure` | `existing` | 保守的台帳へ修復（6.3） |
+| `ProtectedBlobStore` | `CryptoKeyStore` | 利用痕跡 | 扱い |
+| --- | --- | --- | --- |
+| `missing` | `missing` | 無し | 通常の新規台帳を作る |
+| `missing` | **`existing`** | **無し** | **同じく通常の新規台帳を作る。** 鍵はそのまま再利用してよい |
+| `missing` | いずれでも | **有り** | **保守的台帳へ修復**（上記） |
+| `valid` | `existing` | — | 通常経路 |
+| `integrityFailure` | `existing` | — | 保守的台帳へ修復（6.3） |
 
-**「データが無いのに鍵がある」を異常として扱いません。** 再インストール直後の正常な状態でありえます。ここで復旧エラーにすると、再インストールした利用者がアプリを使えません。鍵を再利用するか新しく生成するかで安全性は変わらないため、**再利用します。** 削除自体が失敗しうる余計な経路を増やさないためです。
+**「データが無いのに鍵がある」を、それだけでは異常として扱いません。** 再インストール直後の正常な状態でありえます。ここで復旧エラーにすると、再インストールした利用者がアプリを使えません。鍵を再利用するか新しく生成するかで安全性は変わらないため、**再利用します。** 削除自体が失敗しうる余計な経路を増やさないためです。
+
+**判断を分けるのは鍵ではなく利用痕跡です。** 再インストールでは `protected/` と `app.db` の両方が消えるため痕跡が無く、台帳 blob だけを削除した場合は同じ `protected/` に他の blob が残ります。
 
 ##### 鍵と署名のポート
 
@@ -2154,7 +2808,7 @@ protocol CrashReporter: Sendable {
 }
 
 /// クラッシュ報告に添える文脈。識別子と自由文字列を持たない
-struct CrashContext: Sendable {
+struct CrashContext: Sendable, Equatable {
     let commitState: ExportCommitState?
     let queueDepth: Int
     let recoveryStep: Int?
@@ -2441,14 +3095,16 @@ protocol ProtectedDataAvailability: Sendable {
 - `WorkingSourceRecord` と処理用ファイル
 - `ExportRecord`、完了済みの `ExportQueueItem`
 
-例外は 4 つです。
+例外は 6 つです。
 
 - **未受け渡しの出力ファイル。** 利用者がまだ受け取っていない成果物であり、履歴とは性質が異なる。保存・共有・破棄のいずれかで解消する
+- **保存結果不明の注記（`UnknownLibrarySave`）が付いた `delivered` 出力。** 利用者の確認・再試行・破棄、または 24 時間で解消する（下記）
 - **`UsageLedger` の `SourceRecord` と初回成功時刻。** 無料枠の判定に必要な最小限であり、画像の内容を復元できる情報を含まない
 - **一括処理トライアルの消費済み素材識別値。** 5 枚分のトライアル対象を判定するために `SourceRecord` を**期限なく**保持する
 - **未完了の `ExportCommit` と、それが参照する検証済み出力ファイル。** 中断した処理の後始末であり、履歴ではない
+- **`AppLifecycle` の 1 行。** 利用痕跡（7.2）であり、履歴でも成果物でもない。**この設定・手動の履歴全削除・容量超過・期限削除のいずれの対象にもしない**
 
-3 つ目は保持期間が無期限である点が他と異なります。**プライバシーポリシーの記載と整合させる必要があります**（12.2）。
+3 つ目と 6 つ目は保持期間が無期限である点が他と異なります。**プライバシーポリシーの記載と整合させる必要があります**（12.2）。
 
 この設定ではやり直しができません。24 時間以内であれば grant により無料枠は追加消費されませんが、編集内容は復元されません。設定画面にその旨を明記します。
 
@@ -2687,9 +3343,7 @@ func canDeleteHistoryUnit(
 
 **これらは DB・台帳・ファイルの 3 者を跨ぐため、`Application` の Coordinator が所有します。**
 
-```swift
-actor HistoryDeletionCoordinator { }   // Project / Batch 削除、編集中 Project の破棄
-```
+`HistoryDeletionCoordinator` の宣言は 4.3 が正本です。排他の規則は 4.2 にあります。
 
 ```swift
 // Domain — 永続化ポート
@@ -2789,7 +3443,7 @@ context を読む
 | 透過 PNG | 透過状態を維持する |
 | 非透過画像 | 円形または角丸マスクで切り抜く |
 | 自動背景除去 | **v1 では行わない**（前景マスク生成の品質が素材に依存し、失敗時の説明が難しい） |
-| 登録上限 | **Standard・Pro ともに 100 個**（仕様 12.7 から変更。12.4） |
+| 登録上限 | **Standard・Pro ともに 100 個**（仕様 12.7 から変更。12.1） |
 | 登録時の縮小 | 長辺 1,024px を上限とする |
 | 保存形式 | 透過を維持できる圧縮形式（PNG または HEIC） |
 
@@ -2951,7 +3605,7 @@ struct OutputMetadata: Sendable, Equatable {
 
 ## 8. 書き出し Saga
 
-**正本は [書き出し Saga](export-saga.md) です。** 状態遷移表、手順 0〜7、ロールバック順序、起動時復旧順序をここへ複製しません。
+**正本は [書き出し Saga](export-saga.md) です。** 状態遷移表、手順 −2〜9、ロールバック順序、起動時復旧順序をここへ複製しません。
 
 書き出しの完了で確定する事柄は、ファイルシステム・DB・`ProtectedBlobStore` の 3 か所に分かれており、**単一トランザクションで更新できません。** 異常終了の位置によって「出力だけ残り枠が消費されない」「枠だけ消費され出力が残らない」が起こります。**永続的なコミットジャーナル（`ExportCommit`）を置きます。**
 
@@ -2959,8 +3613,8 @@ struct OutputMetadata: Sendable, Equatable {
 
 | 不変条件 | 内容 |
 | --- | --- |
-| **確定点** | 会計の最終確定は**コミット行の削除（手順 7）**ただ 1 点。それ以前は成果物を公開しない |
-| **公開の観測可能性** | `OutputRecord` の insert とコミット行の delete は同一トランザクション。「両方ある」状態は存在しない |
+| **確定点** | 会計の最終確定は **`published` への到達（手順 7）**ただ 1 点。それ以前は成果物を公開しない。手順 8・9 は前進のみ |
+| **公開の観測可能性** | `OutputRecord` の insert とコミットの `published` 更新は同一トランザクション。「コミットあり・`OutputRecord` あり」は `published` のときだけ存在する |
 | **会計時刻** | `finalizedAt` は `finalizing` の保存時点の `usageNow`。`generatedAt` / `expiresAt` / grant の起点はすべてここから導出する |
 | **所有者** | ロールバックの根拠は台帳側の `ownerExportID` のみ。`AccountingApplied` は単独の根拠にならない |
 | **`SourceLease`** | 認可時に**勘定を問わず**追加し、手順 4 またはロールバックで削除する |
@@ -2975,7 +3629,7 @@ struct OutputMetadata: Sendable, Equatable {
 
 ### 9.1 HMAC と正準化
 
-**バイト表現の正本は [正準スキーマ](canonical-schema.md) です。** 型ごとのフィールド順、`enum` の固定番号、`PayloadType` と `SignedPayload` を含む payload の定義をここへ複製しません。
+**バイト表現の正本は [正準スキーマ](canonical-schema.md) です。** 型ごとのフィールド順、`enum` の固定番号、`PayloadType` と署名バイト列の式を含む payload の定義をここへ複製しません。
 
 | 規則 | 内容 |
 | --- | --- |
@@ -2986,7 +3640,7 @@ struct OutputMetadata: Sendable, Equatable {
 | 検証 | バイト列の**定数時間比較** |
 | 移行 | 旧形式で検証してから新形式で再署名する |
 
-**`payloadType` を含めないと、種別をまたいだ付け替えを検出できません。** 4 種のデータが同じ鍵で署名されているため、有効な `SubscriptionState` の blob を `UsageLedger` の保存先へ置いても検証を通ります。復号ではなく検証しかしていないため、内容の構造が偶然パースできれば通過します。
+**`payloadType` を含めないと、種別をまたいだ付け替えを検出できません。** 5 種のデータが同じ鍵で署名されているため、有効な `SubscriptionState` の blob を `UsageLedger` の保存先へ置いても検証を通ります。復号ではなく検証しかしていないため、内容の構造が偶然パースできれば通過します。
 
 **`JSONEncoder` や binary plist を正準形として使いません。** 集合と配列の順序、`Date` の表現、辞書のキー順が実装とバージョンに依存し、**同じ意味の値から別の署名が出れば正規の起動が `integrityFailure` になります。**
 
@@ -3098,8 +3752,14 @@ struct PaywallFields: Sendable {
 }
 
 struct PurchaseFields: Sendable {
-    let plan: Plan
+    let purchasedPlan: PurchasedPlan   // 購入した等級。Plan をそのまま送らない
     let isRestore: Bool
+}
+
+/// 購入イベント専用の区分値。有料 2 種のみで、free を表現できない
+enum PurchasedPlan: Int32, Sendable, Hashable {
+    case standard = 0
+    case pro = 1
 }
 
 struct RecoveryFields: Sendable {
@@ -3129,6 +3789,7 @@ enum ResolutionBucket: Int32, Sendable, Hashable {
 /// 課金区分。Plan と status を潰した分析用の値。Plan をそのまま送らない
 enum PlanKind: Int32, Sendable, Hashable {
     case free = 0, standardActive = 1, standardPending = 2
+    case sandbox = 6
     case proActive = 3, proPending = 4, expired = 5
 }
 
@@ -3161,10 +3822,11 @@ enum AppErrorCode: Int32, Sendable, Hashable {
     case remoteConfigRejected = 20
     case sourceMissing = 21
     case sourceMismatch = 22
+    case capabilityRequired = 23      // 設定内容が現在の能力で許されない（書き出し Saga 1.1.1）
 }
 ```
 
-**`AppErrorCode` を `Domain` に置きます。** `ExportQueueFailure` と診断の両方が使うため、どちらか一方の層に置くと依存が逆流します。
+**`AppErrorCode` を `Domain` に置きます。** `ExportQueueFailure` と診断の両方が使うため、どちらか一方の層に置くと依存が逆流します。**全 24 case（0〜23）がこの列挙の全体です。**
 
 | 要素 | 表現 |
 | --- | --- |
@@ -3181,7 +3843,17 @@ enum AppErrorCode: Int32, Sendable, Hashable {
 
 ##### エラー型と握りつぶしの禁止
 
-仕様 26.1 の 20 コードを `enum AppError: Error` として表現し、各要素は再試行可否、利用者向けメッセージ、診断フィールドを持ちます。**仕様 26.2 の再試行可否は型の上で表現し、実行時判断に委ねません。**
+`AppErrorCode`（上記の 24 case）を持つ `AppError` を定義し、各要素は**再試行可否と診断フィールド**を持ちます。**仕様 26.2 の再試行可否は型の上で表現し、実行時判断に委ねません。**
+
+```swift
+struct AppError: Error, Sendable, Equatable {
+    let code: AppErrorCode
+    let isRetryable: Bool
+    let context: CrashContext?      // 診断へ渡す文脈（識別子と自由文字列を含まない）
+}
+```
+
+**利用者向けメッセージを `AppError` が持ちません。** 文言は `App` 層が `code` から解決します。`Domain` に文言を持たせると、ローカライズと文言変更のたびにドメイン層が変わります。
 
 すべての `catch` 節で `AppError` へ変換したうえで `log` を通すことを規約とします。`try?` による握りつぶしは lint で禁止し、`do / catch` または `Result` で明示的に扱います。
 
@@ -3225,11 +3897,27 @@ Sentry Cocoa SDK は `Domain` が定義する `CrashReporter` プロトコルの
 
 **HMAC が防げるのは改変であって、リプレイではありません。** 過去の正しい署名済み台帳をファイルごと保存しておき、枠を使い切ったあとで書き戻す攻撃は、署名が正当なため検出できません。完全に防ぐにはサーバー照合か端末外の単調増加カウンタが必要ですが、仕様 14.5 は不正利用防止のためだけの端末識別子収集を禁じています。
 
-> **対象とする:** 署名対象 payload（`UsageLedger` / `SubscriptionState` / `RemoteConfigState`）と署名付き `ExportCommit` 行の値改変、および 4 種の相互の付け替え。
+> **対象とする:** 署名対象 payload（`UsageLedger` / `SubscriptionState` / `RemoteConfigState` / `TrustedTimeState`）と署名付き `ExportCommit` 行の値改変、および 5 種の相互の付け替え。
 >
 > **対象としない:** ルート化 / Jailbreak 済み端末で、過去の正規 blob を丸ごと復元するリプレイ攻撃。
+>
+> **対象としない:** アプリ専用領域のファイルを**読み取る**こと。手順 7 の完了前に `outputs/` の実体を取り出せば、会計を発生させずに加工済み出力を得られます。防ぐには手順 7 まで出力を暗号化し、公開時に復号する必要があり、**未加工の顔画像を扱う経路の複雑さに対して、得られる利益が「自分の写真の加工結果を無料で得ること」に限られます。** `outputs/` の `.complete` 保護（7.4）は端末ロック中の解析を防ぎますが、利用中の読み取りは防ぎません。
 
-対象外とする根拠は、この攻撃に必要な手間（rootfs へのアクセスと blob の退避）に対して、得られる利益が「月 5 枚の無料枠」であることです。
+> **対象としない:** アプリ専用領域への直接書き込みによる**利用痕跡の消去**。`protected/` の全 blob を削除し、`app.db` の `AppLifecycle` 行を `DELETE` すれば `PriorUseEvidence.indicatesPriorUse` が偽になり、**履歴・マイスタンプ・書き出し記録を保ったまま、無料枠 5 枚と一括トライアル 5 クレジットを任意の頻度で回復できます。** Jailbreak または再署名ビルドによるコンテナへの書き込みを要します。
+
+**完全に防ぐ構成は存在しません。** 痕跡は「真の初回起動と正当な再インストールでは存在せず、それ以外では存在する」必要があり、iOS でその条件を満たすのは**アプリコンテナ内だけ**です。一方コンテナ内は、本節が「差し替えの対象」と宣言した攻撃者の書き込み範囲そのものです。Keychain と iCloud はどちらも再インストール後に残って**正当な利用者を封鎖**し、DeviceCheck は自前サーバーを要するため仕様 14.5 に抵触します（7.2 に不可能性の導出）。
+
+**受容の根拠は手間ではありません。** この経路が保全するのは履歴・マイスタンプ・書き出し記録であり、**狙われる層（Free・「履歴を保存しない」設定・マイスタンプは有料機能のため不所持）にとって価値がゼロです。** 同じ利得は、ツールを要しない**アプリの再インストール**で得られ、それは仕様 14.5 が明示的に許容しています。**狙われる層にとって利得が同等であり、追加の手間だけが増える経路**を受容します。
+
+**失効した有料利用者には保全の価値が生じます。** Standard 期にマイスタンプを登録して Free へ降格した利用者の場合、再インストールでは**スタンプが全消失し、`canUseCustomStamps` が無いため二度と再登録できません**（6.2 / 7.5）。コンテナ書き込みならスタンプが残るため、**この層にとってはコンテナ書き込みが再インストールより厳密に多くの利得を与えます。** 差は再契約するまで永続します。
+
+**それでも受容します。** その層が得るのは無料枠 5 枚と一括トライアル 5 クレジットであり、**既に一度支払った利用者です。** 上記の不可能性により塞ぐ手段がなく、塞ごうとすれば正当な再インストール利用者を封鎖します。**根拠の適用範囲を正確に書いたうえで、判断は変えません。**
+
+**`PriorUseEvidence` の目的は、この経路を塞ぐことではありません。** 「ファイル削除だけで完結する経路」を消し、**DB への直接書き込みまで要求する水準へ引き上げること**です（7.2）。
+
+**ファイルの「差し替え」は対象とし、「読み取り」は対象外とします。** 差し替えは他人の権利や別素材の混入につながり、検出手段（`WorkingSourceBinding` の照合、`verifiedOutput` との突き合わせ）が既に設計に含まれています。読み取りは自分の成果物を早く得るだけであり、**取り返しのつかない損失も他者への影響もありません。**
+
+対象外とする根拠は、この攻撃に必要な手間（rootfs へのアクセスと blob の退避）に対して、得られる利益が「**無料枠 5 枚と一括トライアル 5 クレジット**」に限られることです。
 
 `lastObservedAt` の単調性は端末時刻の巻き戻しには有効ですが、台帳ごと差し替えられれば一緒に戻るため、リプレイには効きません。
 
@@ -3274,7 +3962,7 @@ Sentry Cocoa SDK は `Domain` が定義する `CrashReporter` プロトコルの
 | `GET /v1/config` | Free 月間書き出し数、一括処理上限、トライアルクレジット数、トリアージ閾値、履歴の容量上限、カスタムスタンプの保存解像度、有効なスタンプパック、広告表示頻度、**更新誘導**（`minimumSupportedVersion` / `recommendedVersion` / `appStoreID`。6.7）、障害中の機能停止フラグ |
 | `POST /v1/diagnostics` | 利用者が明示的に同意した場合のみ受信 |
 
-実装は Rust + Axum。`/v1/config` は静的 JSON と ETag による配信とします。
+実装は Rust + Axum。**`/v1/config` の配信方式**: 設定 envelope はサーバー内の静的 JSON から読み、応答は現在の `serverTime` を付けて動的に生成します。**HTTP キャッシュと ETag は使わず `Cache-Control: no-store`** とし、last-known-good はアプリ側で保持します（10.2）。毎回変わる `serverTime` を含む応答はキャッシュ可能にできません。
 
 ### 10.1 診断エンドポイント
 
@@ -3366,7 +4054,7 @@ struct KillSwitches: Sendable, Decodable, Equatable {
 }
 ```
 
-**フィールドを追加する場合は末尾へ足し、`schemaVersion` を上げます。** 符号化順は [正準スキーマ](canonical-schema.md) の 4.4 が正本です。
+**フィールドを追加する場合は末尾へ足し、`schemaVersion` を上げます。** 符号化順は [正準スキーマ](canonical-schema.md) の 4.5 が正本です。
 
 **`serverTime` を `RemoteConfigEnvelope` の外へ置きます。** 中に入れると取得のたびに payload が変わり、**同一 `configVersion` での内容差し替えを拒否する規則**（下記）が正常な再取得で発火します。`RemoteConfigState` として保存するのは `envelope` だけで、`serverTime` は信頼時刻として別に保存します（6.3）。
 
@@ -3433,6 +4121,16 @@ struct RemoteConfigState: Sendable {
 | --- | --- |
 | 信頼できる時刻がある | **その値** |
 | 無い | **`usageNow`**（単調。過去へ戻せない） |
+
+**時刻だけでは足りません。** `usageNow` も信頼時刻も**後退しないことしか保証せず、前進することを保証しません**（6.2）。通信を遮断して端末時計を据え置けば、`expiresAt` は永久に到来しません。**購入状態と同じ道具で、時刻に依存しない上限を併せて課します。**
+
+| 条件 | 判定 |
+| --- | --- |
+| `expiresAt` を過ぎている | **失効** |
+| **`UsageLedger.ledgerWritesSinceConfigFetch` >= 4000**（6.2） | **失効** |
+| 上記以外 | 有効 |
+
+**失効すると機能停止フラグ以外がバンドル既定値へ戻ります。** 上限に達した状態は「取得できていないまま台帳を 4000 回書いた」であり、**その設定を last-known-good として信頼し続ける根拠がありません。**
 
 失効の方向は利用者に不利ですが、**設定は失効してもバンドル既定値へ戻るだけで成果物を失いません。** 削除と違い取り返しがつくため、保守的に倒す方向が逆になります。
 

@@ -16,13 +16,13 @@
 | # | 名称 | 主モジュール | 内容 |
 | --- | --- | --- | --- |
 | 1 | プロジェクト基盤 | — | Xcode プロジェクトと SwiftPM ローカルパッケージの骨格、CI、SwiftLint、`swift test` の実行基盤 |
-| 2 | ドメイン層 | `Domain` | `QuotaPolicy`、`EntitlementResolver`、`BatchTriagePolicy`、`compileRenderDraft`、`ExportQueue` の状態機械、正準エンコーダ |
+| 2 | ドメイン層 | `Domain` | クォータ判定（`evaluate` / `rollPeriod`）、権限解決（`resolve` / `resolveCapabilities`）、トリアージ（`triage`）、`compileRenderDraft`、`ExportQueue` の状態機械、正準エンコーダ |
 | 3 | 永続化アダプタ | `Persistence` | GRDB と `app.db`、`ManagedFileStore`、`ProtectedBlobStore`、`CryptoKeyStore`、`UsageLedgerStore`、`ExportSagaStore`、`WorkingSourceStore`、`OutputDeliveryStore`、`HistoryDeletionStore` |
 | 4 | **書き出し Saga** | **`Application`** | `ExportCoordinator` / `StartupRecoveryCoordinator` / `OutputDeliveryCoordinator`、`ExportStartGate`、障害注入テスト基盤 |
 | 5 | プラットフォーム層 | `MediaKit` / `Rendering` / `App` / **`Application`** | 画像処理プロトコルの実装と適合テスト、選択の境界サービス、**`SourceImportCoordinator`（インポート／再選択／再接続／複製の 4 Saga）と `WorkingSourceVerifier`**、`ProtectedDataAvailability` |
 | 6 | 編集フロー UI | `App` | detect / effect / export / processing / done |
 | 7 | 課金と権限 | `Billing` | RevenueCat、Paywall、復元、`SubscriptionState` の読み込み失敗経路 |
-| 8 | 広告 | `Ads` | `AdPresenter`、`AdFrequencyPolicy` の適用 |
+| 8 | 広告 | `Ads` | `AdPresenter`、広告表示頻度の判定の適用 |
 | 9 | 一括処理とトリアージ | `Domain` / `App` | 選択分類、確認モード、キュー、一括設定プリセット |
 | 10 | 履歴・カスタムスタンプ・設定 | `Domain` / `Persistence` / `App` / **`Application`** | 寿命管理、**`HistoryDeletionCoordinator`（`Project` / `Batch` 削除、編集中の破棄）**、`ProjectStampAsset` の参照、容量表示 |
 | 11 | バックエンド | `server/` | Rust + Axum。リモート設定の検証規則を含む |
@@ -69,7 +69,7 @@
 | `OutputDeliveryStore`（[書き出し Saga](export-saga.md) の 0） | 受け渡し状態の遷移経路が決まらない |
 | 正準スキーマ | 署名バイト列が決まらない |
 
-**これらを「サブプロジェクト 2 の前半」として先に固める**のが要点です。`QuotaPolicy` や `BatchTriagePolicy` の実装は後半であり、`Persistence` はそれを待ちません。
+**これらを「サブプロジェクト 2 の前半」として先に固める**のが要点です。`evaluate` や `triage` の実装は後半であり、`Persistence` はそれを待ちません。
 
 | 関係 | 理由 |
 | --- | --- |
@@ -93,7 +93,7 @@
 | --- | --- |
 | `MediaKit` | `PickedPhotoLoader` / `FaceDetector` / `ImageEffectRenderer` / `ImageEncoder` / `MediaSaver` / `SharePresenter`（MainActor） |
 | `Rendering` | `StampRasterizer` |
-| `Persistence` | `ProtectedBlobStore`、`ManagedFileStore`、`UsageLedgerStore`、**`ExportSagaStore`**、GRDB、ファイル管理 |
+| `Persistence` | `ProtectedBlobStore`、`ManagedFileStore`、`UsageLedgerStore`、**`ExportSagaStore`**、`WorkingSourceStore`、`OutputDeliveryStore`、`HistoryDeletionStore`、GRDB、ファイル管理 |
 | `Persistence/Security` | `CryptoKeyStore` |
 | `Application` | `ExportStartGate` の実装、`ExportCoordinator` / `StartupRecoveryCoordinator` / `OutputDeliveryCoordinator`（サブプロジェクト 4）、`SourceImportCoordinator` / **`WorkingSourceVerifier`**（サブプロジェクト 5）、`HistoryDeletionCoordinator`（サブプロジェクト 10）。**コミット Saga・素材 Saga・削除 Saga の主体はここ** |
 | `Analytics` | `CrashReporter`、`AnalyticsEvent` の送信 |
