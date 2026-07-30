@@ -37,9 +37,7 @@ export function DoneScreen() {
         <span className="grid size-14 place-items-center rounded-full bg-primary/12 text-primary">
           {delivered ? <CheckCircle2 className="size-8" aria-hidden /> : <Sparkles className="size-8" aria-hidden />}
         </span>
-        <h1 className="font-rounded text-lg font-bold">
-          {delivered ? "保存しました" : "加工した写真ができました"}
-        </h1>
+        <h1 className="font-rounded text-lg font-bold">{delivered ? "保存しました" : "完成しました"}</h1>
         <p className="text-xs text-muted-foreground text-pretty">
           {hidden.length > 0 ? `${effectLabel}で${hidden.length}人の顔を隠しました` : "顔加工なしで書き出しました"}
         </p>
@@ -53,7 +51,6 @@ export function DoneScreen() {
         className="mx-auto aspect-square max-w-[280px]"
       />
 
-      {/* 生成が終わった時点で枠を消費しているので、受け渡しまで到達させる */}
       {!delivered ? (
         <div className="flex flex-col gap-2">
           <Button size="lg" className="h-13 w-full rounded-2xl font-bold" onClick={savePending}>

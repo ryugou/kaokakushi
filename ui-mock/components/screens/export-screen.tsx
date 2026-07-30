@@ -102,19 +102,17 @@ export function ExportScreen() {
           </div>
         ) : null}
 
-        {/* 24時間以内の再書き出しでは消費しないため、案内をクォータ判定で分ける */}
+        {/* 生成は消費しない。案内は完了操作の時点で何が起こるかを示す（ADR 0006） */}
         {skipFaces ? (
           <div className="flex items-start gap-2 rounded-2xl bg-chart-3/20 px-3 py-2.5">
             <AlertTriangle className="mt-0.5 size-4 shrink-0 text-foreground" aria-hidden />
             <p className="text-[11px] leading-relaxed text-foreground text-pretty">
               顔は検出されませんでした。
               {quotaDecision === "consume"
-                ? `このまま保存すると、今月の無料枠を1枚使用します（残り${remainingFree}枚）。`
-                : quotaDecision === "free-reexport"
-                  ? "24時間以内の再書き出しのため、無料枠は使用しません。"
-                  : quotaDecision === "blocked"
-                    ? "今月の無料保存を使い切りました。Standardなら1枚ずつ無制限で保存できます。"
-                    : "このまま保存すると、顔を隠さずに書き出します。"}
+                ? `完了すると、今月の無料枠を1枚使用します（残り${remainingFree}枚。完了までのやり直しは無料です）。`
+                : quotaDecision === "blocked"
+                  ? "今月の無料保存を使い切りました。Standardなら1枚ずつ無制限で保存できます。"
+                  : "このまま保存すると、顔を隠さずに書き出します。"}
             </p>
           </div>
         ) : null}
@@ -236,11 +234,9 @@ export function ExportScreen() {
         </Button>
         {plan === "free" ? (
           <p className="pt-2 text-center text-[11px] text-muted-foreground">
-            {quotaDecision === "free-reexport"
-              ? "24時間以内の再書き出しのため、無料枠は使用しません"
-              : quotaDecision === "blocked"
-                ? "今月の無料保存を使い切りました"
-                : `今月あと${remainingFree}枚保存できます`}
+            {quotaDecision === "blocked"
+              ? "今月の無料保存を使い切りました"
+              : `今月あと${remainingFree}枚保存できます`}
           </p>
         ) : null}
       </div>

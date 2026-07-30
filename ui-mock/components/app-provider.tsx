@@ -28,6 +28,7 @@ export type Screen =
   | "effect"
   | "export"
   | "processing"
+  | "confirm"
   | "done"
   | "pricing"
   | "batch"
@@ -98,8 +99,8 @@ export const SHARE_OUTCOME_LABELS: Record<ShareOutcome, string> = {
   failed: "失敗した",
 }
 
-/** いま書き出したときの無料枠の扱い */
-export type QuotaDecision = "unlimited" | "free-reexport" | "consume" | "blocked"
+/** 完了操作（settle）を行ったときの無料枠の扱い。生成時点では何も消費しない（ADR 0006） */
+export type QuotaDecision = "unlimited" | "consume" | "blocked"
 
 /**
  * 生成が終わった加工済み写真の状態。
@@ -117,6 +118,8 @@ export type PendingOutput = {
   kind: "single" | "batch"
   historyId: string
   usedTrial: boolean
+  /** 出力確認画面で「完了する」を押したか。true になった時点で枠が確定する（ADR 0006） */
+  settled: boolean
   records: OutputRecord[]
 }
 
@@ -213,12 +216,11 @@ export const HISTORY_LIMIT_MB = 200
 export const LATEST_VERSION = "1.2.0"
 
 /**
- * 起動時の更新判定。
- *
- * required は強制更新。ただし未保存の加工済み写真がある場合は、
- * 受け渡しの導線を先に出す（消費したのに受け取れない状態を作らない）。
+ * 起動時の更新判定。強制更新（全画面ブロック）は廃止した（ADR 0005）。
+ * 残るのは任意の更新推奨のみで、「後で」を選ぶとそのバージョンでは
+ * 再表示しない（skippedVersion）。
  */
-export type UpdateDecision = "none" | "recommended" | "required"
+export type UpdateDecision = "none" | "recommended"
 
 export const PLAN_LABELS: Record<Plan, string> = {
   free: "Free",
@@ -294,6 +296,10 @@ type AppContextValue = {
   canExportSingle: boolean
   quotaDecision: QuotaDecision
   completeSingleExport: () => void
+  /** 出力確認画面「完了する」。枠を確定し done へ遷移する */
+  completePending: () => void
+  /** 出力確認画面「やり直す」。出力を破棄し、同じ写真のまま effect へ戻る */
+  redoPending: () => void
 
   /** 変更せず再書き出しするモード（降格後の既存作品） */
   reexportOf: SingleHistoryItem | null
@@ -388,6 +394,10 @@ type AppContextValue = {
   resumeBatch: () => void
   cancelBatch: () => void
   retryBatchErrors: () => void
+  /** 出力確認に相当するバッチの完了操作。枠を確定するが画面遷移はしない（結果一覧に留まる） */
+  completeBatch: () => void
+  /** 完了前だけ有効。1枚を破棄してキューに戻す（何も消費していないため無料） */
+  redoBatchItem: (mediaId: string) => void
   resetBatch: () => void
   /** 検出結果を保ったまま設定へ戻る */
   backToSetup: () => void
@@ -446,6 +456,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [discardPromptOpen, setDiscardPromptOpen] = React.useState(false)
   const [recoveryOpen, setRecoveryOpen] = React.useState(false)
   const intentRef = React.useRef<PendingIntent>(null)
+  /**
+   * バッチの実行（startBatchDetection）ごとに一意な識別子。
+   * historyId に含めることで、doneCount/errorCount が偶然一致した
+   * 無関係なバッチ同士で履歴エントリが衝突・上書きされるのを防ぐ（Critical対応）。
+   * redoBatchItem/retryBatchErrors による同一バッチ内の再処理ではインクリメントしない。
+   */
+  const batchRunIdRef = React.useRef(0)
+  /**
+   * 同一バッチ実行（batchRunIdRef.current が変わらない間）で確定した historyId。
+   * retryBatchErrors は失敗分を成功させるため doneItems.length/errorCount が
+   * 必ず変化し、これらから毎回 historyId を再計算すると dedup
+   * （prev.some((h) => h.id === historyId)）が常に false になり、古い
+   * unsaved:true のエントリが残置され続ける（Warning対応）。
+   * 最初に確定した値をこの ref に保持し、以後の summary useEffect 再実行では
+   * 再計算せずこの値を使い回すことで、redoBatchItem/retryBatchErrors のどちらの
+   * 経路でも同一バッチ内では historyId が変わらないようにする。
+   * startBatchDetection で新しいバッチ実行が始まるたびに null へリセットする。
+   */
+  const batchHistoryIdRef = React.useRef<string | null>(null)
 
   const [batchStage, setBatchStage] = React.useState<BatchStage>("setup")
   const [batchMode, setBatchMode] = React.useState<BatchMode>("auto")
@@ -456,11 +485,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [gridConfirmed, setGridConfirmed] = React.useState(false)
   const [reachedEnd, setReachedEnd] = React.useState(false)
   const [reviewedIds, setReviewedIds] = React.useState<string[]>([])
-  /** すでに枠を消費した元写真。同じ写真の再書き出しでは二重に消費しない */
-  const [chargedIds, setChargedIds] = React.useState<string[]>([])
-  const [trialChargedIds, setTrialChargedIds] = React.useState<string[]>([])
+  /**
+   * トライアルクレジットの消費数。成果物単位で加算するだけで、素材の同一性は
+   * 参照しない（ADR 0006）。同じ写真でも新しいバッチ実行での成功は新規消費になる。
+   */
+  const [trialCreditsConsumed, setTrialCreditsConsumed] = React.useState(0)
   // 残クレジットは保存せず台帳から導出する。正を1つにして不一致を防ぐ
-  const trialCredits = Math.max(0, TRIAL_CREDITS - trialChargedIds.length)
+  const trialCredits = Math.max(0, TRIAL_CREDITS - trialCreditsConsumed)
 
   const media = mediaId ? findMedia(mediaId) : null
   const faces = React.useMemo(
@@ -481,25 +512,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const canUsePremiumStamps = effectivePlan === "standard" || effectivePlan === "pro"
   const canUseCustomStamps = effectivePlan === "standard" || effectivePlan === "pro"
   const canBatchFull = effectivePlan === "pro"
-  // クレジット0でも、消費済み台帳に写真があれば再処理できる
-  const canBatchTrial = trialCredits > 0 || trialChargedIds.length > 0
+  // 判定は残クレジットのみ。処理済み分類は作らない（ADR 0006）
+  const canBatchTrial = trialCredits > 0
   const hasAds = effectivePlan === "free"
   // トライアルは「総枚数5枚まで」「新規写真は残クレジットまで」の2条件。
   // 総枚数だけで絞ると、残0枚のとき消費済みの写真すら選べなくなる。
   const batchMaxSelectable = canBatchFull ? BATCH_MAX_ITEMS : TRIAL_CREDITS
   const canExportSingle = effectivePlan !== "free" || remainingFree > 0
   /**
-   * いま書き出したときのクォータ判定。
-   * 24時間以内の同じ元写真は追加消費しないため、一律に「1枚使います」とは案内できない。
+   * 生成時点では何も消費しない（ADR 0006）。この判定は、完了操作（completePending）を
+   * 行ったときに何が起こるかを示す。完了前のやり直し（redoPending）は回数・時間の制限
+   * なく無料で、再度書き出すときも同じ判定をやり直すだけである。
    */
   const quotaDecision: QuotaDecision =
-    effectivePlan !== "free"
-      ? "unlimited"
-      : media && chargedIds.includes(media.id)
-        ? "free-reexport"
-        : remainingFree <= 0
-          ? "blocked"
-          : "consume"
+    effectivePlan !== "free" ? "unlimited" : remainingFree <= 0 ? "blocked" : "consume"
   // 有料スタンプで作った既存作品は、Freeでも閲覧と再書き出しはできるが変更はできない
   const lockedEdit = effectivePlan === "free" && reexportOf?.paidFeature !== undefined
   const freeSpaceMb = lowStorage ? DEVICE_FREE_MB.low : DEVICE_FREE_MB.normal
@@ -616,19 +642,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const skipFaces = faces.length === 0
 
   /**
-   * 加工済み出力の生成が完了した時点で1枚ぶん消費する。
-   * 同じ元写真を24時間以内に再書き出しても追加消費しない（仕様 14.3）。
+   * 加工済み出力の生成。ADR 0006 により、生成は何も消費しない。
+   * 消費は出力確認画面での完了操作（completePending）で初めて発生する。
    */
   const completeSingleExport = React.useCallback(() => {
     if (!media) return
-    // ExportGrant はプランを問わず作る。有料中に作らないと、降格後に
-    // 24時間以内でも FreeReexport にならず「降格は判定に影響しない」と矛盾する
-    const hasGrant = chargedIds.includes(media.id)
-    if (effectivePlan === "free" && !hasGrant) {
-      setRemainingFree((n) => Math.max(0, n - 1))
-    }
-    // firstSuccessAt は更新しない。更新すると24時間の窓が延び続ける
-    if (!hasGrant) setChargedIds((prev) => [...prev, media.id])
 
     const label =
       effect.type === "stamp"
@@ -653,9 +671,42 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       kind: "single",
       historyId,
       usedTrial: false,
+      settled: false,
       records: [{ mediaId: media.id, state: "generated" }],
     })
-  }, [allStamps, chargedIds, effect, hidden.length, history.length, media, plan, reexportOf, retention])
+  }, [allStamps, effect, hidden.length, history.length, media, reexportOf, retention])
+
+  /**
+   * 出力確認画面「完了する」。ここで初めて枠を消費し確定する（ADR 0006）。
+   * すでに何らかの理由で settled 済みなら二重に消費・確定させない。
+   */
+  const completePending = React.useCallback(() => {
+    setPendingOutput((current) => {
+      if (!current || current.settled) return current
+      if (effectivePlan === "free") {
+        setRemainingFree((n) => Math.max(0, n - 1))
+      }
+      return { ...current, settled: true }
+    })
+    go("done")
+  }, [effectivePlan, go])
+
+  /**
+   * 出力確認画面「やり直す」。生成しただけの出力・履歴エントリを破棄し、
+   * 同じ写真・同じ設定のまま編集画面へ戻る。まだ何も消費していないため、
+   * 追加消費なく何度でもやり直せる（ADR 0006）。
+   * 完了前の破棄なので、受け渡し済み（delivered）の記録はそもそも存在しない。
+   */
+  const redoPending = React.useCallback(() => {
+    setPendingOutput((current) => {
+      if (!current) return current
+      if (retention !== "none") {
+        setHistory((prev) => prev.filter((h) => h.id !== current.historyId))
+      }
+      return null
+    })
+    go("effect")
+  }, [go, retention])
 
   /* -------------------------------------------------------------- */
   /* 未保存の加工済み写真                                             */
@@ -671,6 +722,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
    * 「32枚中20枚だけ保存できた」という部分成功を再現する。
    */
   const markDelivered = React.useCallback(() => {
+    // 完了（settled）前の受け渡しは ADR 0006 違反。UI 側は完了前に保存・共有ボタンを
+    // 出さない設計だが、ここでも状態側の二重防御として弾く（m2）。
+    if (!pendingOutput || !pendingOutput.settled) return
     setPendingOutput((current) => {
       if (!current) return current
       const pending = current.records.filter((r) => r.state === "generated")
@@ -694,18 +748,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const intent = intentRef.current
     intentRef.current = null
     if (intent) intent.run()
-  }, [lowStorage])
+  }, [lowStorage, pendingOutput])
 
   const savePending = React.useCallback(() => markDelivered(), [markDelivered])
   // 共有シートを開いただけでは成功ではない。Completed のときだけ Delivered にする
   const sharePending = React.useCallback(() => {
+    // markDelivered 側にもガードはあるが、未完了で共有シートの結果分岐に
+    // 入ること自体を防ぐため、ここでも settled を確認する（m2）。
+    if (!pendingOutput || !pendingOutput.settled) return
     if (shareOutcome !== "completed") {
       setUnsavedPromptOpen(false)
       setRecoveryOpen(false)
       return
     }
     markDelivered()
-  }, [markDelivered, shareOutcome])
+  }, [markDelivered, pendingOutput, shareOutcome])
 
   const discardPending = React.useCallback(() => {
     setPendingOutput((current) => {
@@ -746,19 +803,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const closeDiscard = React.useCallback(() => setDiscardPromptOpen(false), [])
   const closeRecovery = React.useCallback(() => setRecoveryOpen(false), [])
 
+  /** デモ用。トライアルクレジットの消費数を直接指定する */
+  const setTrialConsumed = React.useCallback((n: number) => {
+    setTrialCreditsConsumed(Math.max(0, n))
+  }, [])
+
   /**
    * 異常終了後の起動を再現する。
    * 受け渡し済みの出力は一時ファイルを消すだけで、復旧案内は出さない。
    * すでに保存できているのに「保存していない」と伝えるのは事実と異なるため。
    */
-  const setTrialConsumed = React.useCallback((n: number) => {
-    setTrialChargedIds((prev) => {
-      const next = prev.slice(0, n)
-      while (next.length < n) next.push(`demo-${next.length}`)
-      return next
-    })
-  }, [])
-
   const simulateCrash = React.useCallback(() => {
     setStack(["home"])
     setPendingOutput((current) => {
@@ -978,20 +1032,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           setUpgrade({ reason: canBatchFull ? "batch-limit" : "batch-size" })
           return prev
         }
-        // 条件2: 消費済み台帳にない写真の枚数が残クレジットを超えないこと
-        if (!canBatchFull && !trialChargedIds.includes(id)) {
-          const freshSelected = prev.filter((x) => !trialChargedIds.includes(x)).length
-          if (freshSelected >= trialCredits) {
-            // 新しい写真が残クレジットを超えた。総枚数上限(batch-size)とは原因が異なる
-            setUpgrade({ reason: "batch-credit" })
-            return prev
-          }
+        // 条件2: 選択枚数が残クレジットを超えないこと（処理済み分類は作らない。ADR 0006）
+        if (!canBatchFull && prev.length >= trialCredits) {
+          // 総枚数上限(batch-size)とは原因が異なる
+          setUpgrade({ reason: "batch-credit" })
+          return prev
         }
         onSelectionAdded(id)
         return [...prev, id]
       })
     },
-    [batchMaxSelectable, canBatchFull, onSelectionAdded, onSelectionRemoved, trialChargedIds, trialCredits],
+    [batchMaxSelectable, canBatchFull, onSelectionAdded, onSelectionRemoved, trialCredits],
   )
 
   const clearBatchSelection = React.useCallback(() => {
@@ -1001,6 +1052,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [dropOverview])
 
   const startBatchDetection = React.useCallback(() => {
+    batchRunIdRef.current += 1
+    batchHistoryIdRef.current = null
     setBatchItems(
       batchSelection.map((id) => ({
         mediaId: id,
@@ -1016,6 +1069,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setBatchStage("detecting")
     setGridConfirmed(false)
     setReachedEnd(false)
+    // 新しいバッチの生成サイクルが始まる瞬間。すでに全件受け渡し済み（または元々空）の
+    // 残留 pendingOutput は破棄する。未受け渡し（generatedCount > 0）の場合は
+    // unsavedBatch バナーが「検出する」ボタンを無効化しこの関数まで到達しない設計のため、
+    // ここに来た時点で残っているのは解決済みの残留物だけ。破棄しないと、無関係な
+    // 次バッチの summary useEffect が古い pendingOutput.settled を読んでしまう（Critical対応）。
+    setPendingOutput((current) =>
+      current && current.kind === "batch" && generatedCount(current) === 0 ? null : current,
+    )
   }, [batchSelection])
 
   // 検出とサムネイル生成を順に終わらせる
@@ -1175,7 +1236,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     return () => window.clearTimeout(timer)
   }, [batchStage, batchRunning, batchItems])
 
-  // 書き出しが終わったら、成功枚数ぶんを消費して未保存出力にする
+  // 書き出しが終わったら未保存出力にする。ADR 0006 により生成は何も消費しない。
+  // 消費は完了操作（completeBatch）で確定対象の枚数分だけ発生する。
   const summaryHandled = React.useRef(false)
   React.useEffect(() => {
     if (batchStage !== "summary" || summaryHandled.current) return
@@ -1186,25 +1248,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (doneItems.length === 0) return
 
     const usedTrial = !canBatchFull
-    if (usedTrial) {
-      // 同じ元写真を再書き出ししてもクレジットは二重に消費しない
-      const fresh = doneItems.filter((i) => !trialChargedIds.includes(i.mediaId))
-      if (fresh.length > 0) {
-        setTrialChargedIds((prev) => [...prev, ...fresh.map((i) => i.mediaId)])
-      }
-      setBatchTrialUsed(true)
-    }
+    if (usedTrial) setBatchTrialUsed(true)
 
-    // ExportGrant はプランを問わず作る。Free の枠を減らすのは grant がない写真だけ
-    const withoutGrant = doneItems.filter((i) => !chargedIds.includes(i.mediaId))
-    if (withoutGrant.length > 0) {
-      if (effectivePlan === "free") {
-        setRemainingFree((n) => Math.max(0, n - withoutGrant.length))
-      }
-      setChargedIds((prev) => [...prev, ...withoutGrant.map((i) => i.mediaId)])
-    }
-
-    const historyId = `batch-${doneItems.length}-${errorCount}`
+    // batchHistoryIdRef に確定値があれば使い回す。retryBatchErrors 経由の再実行では
+    // doneItems.length/errorCount が変化するため、ここで毎回計算し直すと dedup が
+    // 効かなくなる（Warning対応）。ref が null（＝このバッチ実行で初めて到達）のときだけ
+    // 新規に計算して確定させる。
+    const historyId = batchHistoryIdRef.current ?? `batch-${batchRunIdRef.current}-${doneItems.length}-${errorCount}`
+    batchHistoryIdRef.current = historyId
     const entry: BatchHistoryItem = {
       id: historyId,
       type: "batch",
@@ -1217,14 +1268,26 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       errorCount,
       unsaved: true,
     }
-    if (retention !== "none") setHistory((prev) => [entry, ...prev])
-    setPendingOutput({
+    if (retention !== "none") {
+      // historyId は batchHistoryIdRef により同一バッチ実行内で不変なので、
+      // redoBatchItem/retryBatchErrors のどちらで summary useEffect が再実行されても
+      // 常に既存エントリを更新する側（上書き）に入り、history に同一 id が重複しない。
+      setHistory((prev) =>
+        prev.some((h) => h.id === historyId) ? prev.map((h) => (h.id === historyId ? entry : h)) : [entry, ...prev],
+      )
+    }
+    setPendingOutput((current) => ({
       kind: "batch",
       historyId,
       usedTrial,
+      // すでに completeBatch() 済み（settled: true）のバッチが retryBatchErrors /
+      // redoBatchItem 経由でこの effect を再度通ることがある。ここで false に
+      // リテラル固定すると、確定済みの完了状態を誤って巻き戻してしまう（回帰）。
+      // 直前の pendingOutput が同じ batch なら settled を引き継ぐ
+      settled: current?.kind === "batch" ? current.settled : false,
       records: doneItems.map((i) => ({ mediaId: i.mediaId, state: "generated" as OutputState })),
-    })
-  }, [batchItems, batchStage, canBatchFull, chargedIds, effect, plan, retention, trialChargedIds])
+    }))
+  }, [batchItems, batchStage, canBatchFull, effect, retention])
 
   const pauseBatch = React.useCallback(() => setBatchRunning(false), [])
   const resumeBatch = React.useCallback(() => setBatchRunning(true), [])
@@ -1240,6 +1303,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const retryBatchErrors = React.useCallback(() => {
+    // redoBatchItem と対称のガード。completeBatch() 済み（settled: true）のバッチに
+    // 対して retry でキューへ再投入すると、summary useEffect が再実行され、
+    // 確定済みの history エントリ（unsaved: false）と pendingOutput.records
+    // （delivered 済み分を含む）を doneItems ベースで丸ごと巻き戻してしまう
+    // （ADR 0006「完了操作が枠を確定する」への違反）。settled 後は無効化する。
+    if (pendingOutput?.kind === "batch" && pendingOutput.settled) return
     summaryHandled.current = false
     setBatchItems((prev) =>
       prev.map((item) =>
@@ -1248,7 +1317,45 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     )
     setBatchStage("queue")
     setBatchRunning(true)
-  }, [])
+  }, [pendingOutput])
+
+  /**
+   * バッチの出力確認に相当する完了操作（ADR 0006）。ここで初めて、確定対象の
+   * 枚数分だけを消費する。結果一覧（SummaryStage）に留まったまま枠を確定し、
+   * 画面遷移はしない。
+   */
+  const completeBatch = React.useCallback(() => {
+    setPendingOutput((current) => {
+      if (!current || current.kind !== "batch" || current.settled) return current
+      const count = current.records.length
+      if (count > 0) {
+        if (current.usedTrial) {
+          setTrialCreditsConsumed((n) => n + count)
+        } else if (effectivePlan === "free") {
+          setRemainingFree((n) => Math.max(0, n - count))
+        }
+      }
+      return { ...current, settled: true }
+    })
+  }, [effectivePlan])
+
+  /**
+   * 完了前だけ有効なやり直し。該当写真をキューへ戻し、書き出しキューの
+   * useEffect にもう一度処理させる。完了操作（completeBatch）までは何も
+   * 消費していないため、追加の消費なく何度でもやり直せる（ADR 0006）。
+   */
+  const redoBatchItem = React.useCallback(
+    (mediaId: string) => {
+      if (!pendingOutput || pendingOutput.kind !== "batch" || pendingOutput.settled) return
+      setBatchItems((prev) =>
+        prev.map((item) => (item.mediaId === mediaId ? { ...item, status: "waiting" as BatchItemStatus } : item)),
+      )
+      summaryHandled.current = false
+      setBatchStage("queue")
+      setBatchRunning(true)
+    },
+    [pendingOutput],
+  )
 
   /**
    * 確認段階から設定段階へ戻る。検出結果は保持し、再検出しない。
@@ -1311,6 +1418,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     canExportSingle,
     quotaDecision,
     completeSingleExport,
+    completePending,
+    redoPending,
     reexportOf,
     startReexport,
     startLockedView,
@@ -1387,6 +1496,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     resumeBatch,
     cancelBatch,
     retryBatchErrors,
+    completeBatch,
+    redoBatchItem,
     resetBatch,
     backToSetup,
     backToReview,

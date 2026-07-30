@@ -14,6 +14,7 @@ import { DetectScreen } from "@/components/screens/detect-screen"
 import { EffectScreen } from "@/components/screens/effect-screen"
 import { ExportScreen } from "@/components/screens/export-screen"
 import { ProcessingScreen } from "@/components/screens/processing-screen"
+import { OutputConfirmScreen } from "@/components/screens/output-confirm-screen"
 import { DoneScreen } from "@/components/screens/done-screen"
 import { HistoryScreen } from "@/components/screens/history-screen"
 import { StampsScreen } from "@/components/screens/stamps-screen"
@@ -48,6 +49,7 @@ function AppShellInner() {
         {screen === "effect" ? <EffectScreen /> : null}
         {screen === "export" ? <ExportScreen /> : null}
         {screen === "processing" ? <ProcessingScreen /> : null}
+        {screen === "confirm" ? <OutputConfirmScreen /> : null}
         {screen === "done" ? <DoneScreen /> : null}
         {screen === "history" ? <HistoryScreen /> : null}
         {screen === "stamps" ? <StampsScreen /> : null}
