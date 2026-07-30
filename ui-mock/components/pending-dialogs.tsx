@@ -39,12 +39,12 @@ export function UnsavedOutputDialog() {
             <AlertTriangle className="size-5" aria-hidden />
           </span>
           <DialogTitle className="font-rounded text-lg leading-snug text-pretty">
-            {pendingLabel(count)}
+            {count > 1 ? `完了していない写真が${count}枚あります` : "完了していない写真があります"}
           </DialogTitle>
           <DialogDescription className="leading-relaxed">
             {canKeepForLater
-              ? "保存または共有すると受け渡しが完了します。あとで保存する場合は履歴から再開できます。"
-              : "履歴を保存しない設定のため、あとから開くことはできません。"}
+              ? "破棄するとやり直しは無料ですが、この出力は失われます。あとで保存する場合は履歴から再開できます。"
+              : "破棄するとやり直しは無料ですが、この出力は失われます。履歴を保存しない設定のため、あとから開くことはできません。"}
           </DialogDescription>
         </DialogHeader>
 

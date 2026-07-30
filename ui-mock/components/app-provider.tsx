@@ -28,6 +28,7 @@ export type Screen =
   | "effect"
   | "export"
   | "processing"
+  | "confirm"
   | "done"
   | "pricing"
   | "batch"
@@ -99,7 +100,7 @@ export const SHARE_OUTCOME_LABELS: Record<ShareOutcome, string> = {
 }
 
 /** いま書き出したときの無料枠の扱い */
-export type QuotaDecision = "unlimited" | "free-reexport" | "consume" | "blocked"
+export type QuotaDecision = "unlimited" | "reissue" | "consume" | "blocked"
 
 /**
  * 生成が終わった加工済み写真の状態。
@@ -117,6 +118,8 @@ export type PendingOutput = {
   kind: "single" | "batch"
   historyId: string
   usedTrial: boolean
+  /** 出力確認画面で「完了する」を押したか。true になった時点で枠が確定する（ADR 0006） */
+  settled: boolean
   records: OutputRecord[]
 }
 
@@ -213,12 +216,11 @@ export const HISTORY_LIMIT_MB = 200
 export const LATEST_VERSION = "1.2.0"
 
 /**
- * 起動時の更新判定。
- *
- * required は強制更新。ただし未保存の加工済み写真がある場合は、
- * 受け渡しの導線を先に出す（消費したのに受け取れない状態を作らない）。
+ * 起動時の更新判定。強制更新（全画面ブロック）は廃止した（ADR 0005）。
+ * 残るのは任意の更新推奨のみで、「後で」を選ぶとそのバージョンでは
+ * 再表示しない（skippedVersion）。
  */
-export type UpdateDecision = "none" | "recommended" | "required"
+export type UpdateDecision = "none" | "recommended"
 
 export const PLAN_LABELS: Record<Plan, string> = {
   free: "Free",
@@ -294,6 +296,10 @@ type AppContextValue = {
   canExportSingle: boolean
   quotaDecision: QuotaDecision
   completeSingleExport: () => void
+  /** 出力確認画面「完了する」。枠を確定し done へ遷移する */
+  completePending: () => void
+  /** 出力確認画面「やり直す」。出力を破棄し、同じ写真のまま effect へ戻る */
+  redoPending: () => void
 
   /** 変更せず再書き出しするモード（降格後の既存作品） */
   reexportOf: SingleHistoryItem | null
@@ -431,6 +437,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [effect, setEffect] = React.useState<EffectConfig>(DEFAULT_EFFECT)
   const [exportSettings, setExportSettings] = React.useState<ExportSettings>(DEFAULT_EXPORT)
   const [reexportOf, setReexportOf] = React.useState<SingleHistoryItem | null>(null)
+  /**
+   * 「やり直す」（redoPending）が発行した、追加消費なしの権利。
+   * この mediaId と一致する間だけ次の書き出しが reissue になる（ADR 0006）。
+   * 新しい編集セッションを開始したら必ず破棄する（別写真への漏れ出しを防ぐ）。
+   */
+  const [reissueMediaId, setReissueMediaId] = React.useState<string | null>(null)
 
   const [upgrade, setUpgrade] = React.useState<UpgradeState>(null)
   const [history, setHistory] = React.useState<HistoryItem[]>(HISTORY)
@@ -487,16 +499,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // トライアルは「総枚数5枚まで」「新規写真は残クレジットまで」の2条件。
   // 総枚数だけで絞ると、残0枚のとき消費済みの写真すら選べなくなる。
   const batchMaxSelectable = canBatchFull ? BATCH_MAX_ITEMS : TRIAL_CREDITS
-  const canExportSingle = effectivePlan !== "free" || remainingFree > 0
+  // 出力確認画面「やり直す」が発行した権利。この写真の次の書き出しだけ無料（ADR 0006）
+  const isReissueEligible = media !== null && reissueMediaId === media.id
+  const canExportSingle = effectivePlan !== "free" || remainingFree > 0 || isReissueEligible
   /**
    * いま書き出したときのクォータ判定。
-   * 24時間以内の同じ元写真は追加消費しないため、一律に「1枚使います」とは案内できない。
+   * reissue（やり直し）は redoPending() 経由のときだけ成立し、時間や回数の制限はない。
+   * それ以外（同じ写真の単なる再選択、完了済みプロジェクトの再書き出しを含む）は新規消費とする（ADR 0006）。
    */
   const quotaDecision: QuotaDecision =
     effectivePlan !== "free"
       ? "unlimited"
-      : media && chargedIds.includes(media.id)
-        ? "free-reexport"
+      : isReissueEligible
+        ? "reissue"
         : remainingFree <= 0
           ? "blocked"
           : "consume"
@@ -547,6 +562,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     // 検出した顔はすべて「隠す」で初期化する
     setHidden(item.faces.map((f) => f.id))
     setReexportOf(null)
+    setReissueMediaId(null)
     setStack((prev) => [...prev, "detect"])
   }, [])
 
@@ -557,6 +573,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setHidden(source.faces.map((f) => f.id))
     setEffect(item.effect)
     setReexportOf(item)
+    setReissueMediaId(null)
     setStack((prev) => [...prev, target])
   }, [])
 
@@ -584,6 +601,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setHidden(source.faces.map((f) => f.id))
     setEffect({ ...item.effect, type: replacement, stampId: "circle" })
     setReexportOf(null)
+    setReissueMediaId(null)
     setStack((prev) => [...prev, "effect"])
   }, [])
 
@@ -617,18 +635,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   /**
    * 加工済み出力の生成が完了した時点で1枚ぶん消費する。
-   * 同じ元写真を24時間以内に再書き出しても追加消費しない（仕様 14.3）。
+   * 例外は reissue（redoPending 経由の同一写真の次回書き出し）のときだけ（ADR 0006）。
+   * 完了済みプロジェクトの再書き出し等、それ以外は素材が同じでも新規消費とする。
    */
   const completeSingleExport = React.useCallback(() => {
     if (!media) return
-    // ExportGrant はプランを問わず作る。有料中に作らないと、降格後に
-    // 24時間以内でも FreeReexport にならず「降格は判定に影響しない」と矛盾する
-    const hasGrant = chargedIds.includes(media.id)
-    if (effectivePlan === "free" && !hasGrant) {
+    const isReissue = reissueMediaId === media.id
+    if (effectivePlan === "free" && !isReissue) {
       setRemainingFree((n) => Math.max(0, n - 1))
     }
-    // firstSuccessAt は更新しない。更新すると24時間の窓が延び続ける
-    if (!hasGrant) setChargedIds((prev) => [...prev, media.id])
+    setReissueMediaId(null)
+    // chargedIds は一括処理側の突合にのみ使う台帳。単体の消費判定はもう参照しない
+    setChargedIds((prev) => (prev.includes(media.id) ? prev : [...prev, media.id]))
 
     const label =
       effect.type === "stamp"
@@ -653,9 +671,36 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       kind: "single",
       historyId,
       usedTrial: false,
+      settled: false,
       records: [{ mediaId: media.id, state: "generated" }],
     })
-  }, [allStamps, chargedIds, effect, hidden.length, history.length, media, plan, reexportOf, retention])
+  }, [allStamps, effect, effectivePlan, hidden.length, history.length, media, reexportOf, reissueMediaId, retention])
+
+  /**
+   * 出力確認画面「完了する」。ここで初めて枠が確定する（ADR 0006）。
+   * すでに何らかの理由で settled 済みなら二重に確定させない。
+   */
+  const completePending = React.useCallback(() => {
+    setPendingOutput((current) => (current && !current.settled ? { ...current, settled: true } : current))
+    go("done")
+  }, [go])
+
+  /**
+   * 出力確認画面「やり直す」。生成しただけの出力・履歴エントリを破棄し、
+   * 同じ写真・同じ設定のまま編集画面へ戻る。次の書き出しは reissue（追加消費なし）にする。
+   * 完了前の破棄なので、受け渡し済み（delivered）の記録はそもそも存在しない。
+   */
+  const redoPending = React.useCallback(() => {
+    setPendingOutput((current) => {
+      if (!current) return current
+      if (retention !== "none") {
+        setHistory((prev) => prev.filter((h) => h.id !== current.historyId))
+      }
+      return null
+    })
+    if (media) setReissueMediaId(media.id)
+    go("effect")
+  }, [go, media, retention])
 
   /* -------------------------------------------------------------- */
   /* 未保存の加工済み写真                                             */
@@ -1222,6 +1267,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       kind: "batch",
       historyId,
       usedTrial,
+      // 一括処理には出力確認画面（confirm）を経由する完了操作がまだない。
+      // settled は型上必須のフィールドとして false を置くだけで、この kind では読まれない
+      settled: false,
       records: doneItems.map((i) => ({ mediaId: i.mediaId, state: "generated" as OutputState })),
     })
   }, [batchItems, batchStage, canBatchFull, chargedIds, effect, plan, retention, trialChargedIds])
@@ -1311,6 +1359,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     canExportSingle,
     quotaDecision,
     completeSingleExport,
+    completePending,
+    redoPending,
     reexportOf,
     startReexport,
     startLockedView,

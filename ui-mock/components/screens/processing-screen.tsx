@@ -27,7 +27,7 @@ export function ProcessingScreen() {
     if (progress < 100 || doneRef.current) return
     doneRef.current = true
     completeSingleExport()
-    const t = window.setTimeout(() => go("done"), 500)
+    const t = window.setTimeout(() => go("confirm"), 500)
     return () => window.clearTimeout(t)
   }, [progress, completeSingleExport, go])
 
