@@ -20,7 +20,7 @@
 | 廃止するもの | 置き換え |
 | --- | --- |
 | HMAC 署名付き台帳（`UsageLedger` / `SubscriptionState` / `ExportCommit` / `TrustedTimeState`）、HKDF 鍵導出、Keychain 鍵分離 | 平文で `app.db` に保存する |
-| 正準バイト表現（canonical-schema.md）とゴールデンバイトテスト | 文書ごと廃止 |
+| 署名対象 payload の正準バイト表現とゴールデンバイトテスト | 廃止。canonical-schema.md は機能基盤のハッシュ定義（`contentFingerprint`・設定ハッシュ・`StampAssetHash` と、その入力となる基本型符号化）のみへ縮小する |
 | 信頼時刻（`TrustedTimeState` / 鮮度上限 / `TrustedUTCMonth` / 月次整合ロック / 時計改ざん検出） | 端末の UTC 年月を使う |
 | `PriorUseEvidence` / `AppLifecycle` 痕跡検出 | 廃止 |
 | `unverifiedLedgerWrites` / `ledgerWritesSinceConfigFetch` カウンタ | RevenueCat SDK の標準キャッシュ挙動に任せる |

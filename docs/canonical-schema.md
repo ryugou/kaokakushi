@@ -1,160 +1,23 @@
-# 正準バイト表現と署名スキーマ
+# ハッシュと正準符号化
 
 | 項目 | 内容 |
 | --- | --- |
-| 目的 | HMAC 署名の対象となる全型について、バイト列を一意に定める |
-| 読者 | `Persistence` の実装者、署名まわりのテスト作成者 |
-| 正本の範囲 | 符号化規則、型ごとのフィールド順、`enum` の固定番号、署名対象 payload の定義 |
-| 関連 | [アーキテクチャ設計](architecture.md)（署名の原則）、[書き出し Saga](export-saga.md)（`ExportCommit` の意味論）、[テスト計画](test-plan.md)（ゴールデンテスト） |
+| 目的 | 機能基盤として使うハッシュ（素材同一性・設定変更検出）の入力バイト表現を一意に定める |
+| 読者 | `Persistence` の実装者、ハッシュまわりのテスト作成者 |
+| 正本の範囲 | 符号化規則、ハッシュ入力に使う `enum` の固定番号、`contentFingerprint` / 設定ハッシュ 2 種 / `StampAssetHash` / `providerAssetKeyHash` の定義 |
+| 関連 | [アーキテクチャ設計](architecture.md)、[画像処理](image-pipeline.md)（`RenderSpec` の型宣言）、[書き出し Saga](export-saga.md)（設定ハッシュの利用箇所）、[テスト計画](test-plan.md)（ゴールデンテスト） |
 
-**この文書がバイト表現の唯一の正本です。** 他の文書は型の意味を定義し、バイト表現には言及しません。
+**この文書がハッシュ入力バイト表現の唯一の正本です。** 他の文書は型の意味を定義し、バイト表現には言及しません。
 
 ---
 
 ## 1. 原則
 
-`JSONEncoder` や binary plist を正準形として使いません。集合と配列の順序、`Date` の表現、辞書のキー順が実装とバージョンに依存し、**同じ意味の値から別の署名が出れば正規の起動が `integrityFailure` になります。**
+`JSONEncoder` や binary plist を正準形として使いません。集合と配列の順序、`Date` の表現、辞書のキー順が実装とバージョンに依存し、**同じ意味の値から別のハッシュが出れば、同一素材の判定や「変更せず再書き出し」の判定を誤ります。**
 
-```swift
-enum PayloadType: UInt32, Sendable {
-    case usageLedger = 1
-    case subscriptionState = 2
-    case exportCommit = 3
-    case remoteConfigState = 4
-    case trustedTimeState = 5
-}
-```
+対象は `contentFingerprint` / `StampAssetHash` / `ProjectSettingsHash` / `PreviewRenderHash` / `providerAssetKeyHash` の 5 種（5 章）。基本型の符号化規則は 2 章です。
 
-`ProtectedPayload`（`canonicalBodyBytes()` を含む）の型宣言は [アーキテクチャ設計](architecture.md) の 7.2 が正本です。
-
-##### 署名の式
-
-**`payloadType` と `schemaVersion` を本体バイト列へ含めるのか、署名時に前置きするのかを一意に決めます。** 両方の読み方ができると、実装ごとに別の署名が出ます。
-
-```
-payloadBody = 型固有フィールドだけの正準バイト列
-
-signedBytes = BE32(payloadType) || BE32(schemaVersion) || payloadBody
-
-signature   = HMAC-SHA256(derivedKey, signedBytes)
-```
-
-| 項目 | 規則 |
-| --- | --- |
-| `payloadBody` | 型固有フィールドのみ。**先頭に `payloadType` / `schemaVersion` を含めない** |
-| 前置き | **署名の直前に 1 回だけ**行う。`payloadBody` へは残さない |
-| `BE32` | ビッグエンディアンの `UInt32`。長さ前置きしない |
-| メソッド名 | **`canonicalBodyBytes()`**。`canonicalBytes()` では「どちらを指すか」が読めない |
-
-##### 保存形式
-
-**blob ファイルの外部形式も固定します。** 各領域の境界が決まらなければ、読み出し側が復元できません。
-
-```
-blob = BE32(payloadType)
-    || BE32(schemaVersion)
-    || BE64(payloadBody.length)
-    || payloadBody
-    || signature          // 32 バイト固定
-```
-
-| 項目 | 規則 |
-| --- | --- |
-| 全体長 | `4 + 4 + 8 + length + 32` バイト |
-| 長さの検査 | ファイルサイズと `length` が一致しなければ**破損として扱う**（署名検証まで進めない） |
-| `payloadType` の検査 | 読み出そうとしている `ProtectedBlobKey` の型と一致しなければ破損 |
-| **破損の分類** | **`integrityFailure`**（下表） |
-| 検証 | 先頭 `4 + 4 + 8` のうち**長さフィールドを除いた 8 バイト**と `payloadBody` を連結して `signedBytes` を再構築する |
-
-**長さフィールドは署名対象に入りません。** ファイル形式の都合であり、値そのものではないためです。
-
-##### 読み込み結果への写像
-
-**「破損」を `ProtectedLoadResult` のどの case へ写すかを定めます**（[アーキテクチャ設計](architecture.md) の 7.2）。
-
-| 事象 | `ProtectedLoadResult` |
-| --- | --- |
-| ファイルが存在しない | `missing` |
-| **ファイルを開けない・読み切れない（I/O エラー）** | **`temporarilyUnavailable`** |
-| **ファイルは存在するが先頭 `4 + 4 + 8` バイトを読めない**（ヘッダ長未満） | **`integrityFailure`** |
-| **ファイルは読み切れたが、長さ・`payloadType` がヘッダと不整合** | **`integrityFailure`** |
-| 鍵を供給できない | **観測で分ける**（[アーキテクチャ設計](architecture.md) の 7.2） |
-| ファイルは読み切れたが HMAC 不一致 | `integrityFailure` |
-| ファイルは読み切れたが `schemaVersion` が未知 | `unsupportedSchema(version:)` |
-
-**切り分けの基準は「ファイルを読み切れたか」であり、「署名検証まで到達したか」ではありません。** `temporarilyUnavailable` は鍵ストアやファイルシステムの一時障害用（同 7.2）で、末尾 1 バイトの切り詰めのように読み切れた内容の破損はこの基準を誤ると一時障害側へ倒れ、`UsageLedger` の `unverifiedLedgerWrites` が上限値へ設定されず `transact` も走らないため、[アーキテクチャ設計](architecture.md) の 6.2 で塞いだ前進源が 1 バイトの改変で永久に止まります。
-
-- HMAC の対象は **`signature` 自身を除く全永続フィールド**
-- `ExportCommit` の insert / update の**たびに再署名する**
-- `UsageLedgerStore.transact` の保存時にも必ず再署名する
-- 検証はバイト列の**定数時間比較**で行う
-- マイグレーション時は旧形式で検証してから新形式で再署名する
-
-**`payloadType` を含めないと、種別をまたいだ付け替えを検出できません。** 5 種のデータが同じ鍵で署名されているため、有効な `SubscriptionState` の blob を `UsageLedger` の保存先へ置いても検証を通ります。
-
-##### `schemaVersion` を上げる条件
-
-**追加は末尾のみ**とし、既存フィールドの順序を変えません。そのうえで、**バイト列が変わる変更はすべて `schemaVersion` を上げます。**
-
-| 変更 | `schemaVersion` |
-| --- | --- |
-| **末尾へのフィールド追加** | **上げる**（旧バイト列では新フィールドを復元できない） |
-| 既存フィールドの順序変更 | **上げる。** 旧バージョンのデコーダを残す |
-| `enum` への `case` 追加（**末尾の番号**で） | 上げない（既存値のバイト列が変わらない） |
-| `enum` の既存 `case` の番号変更 | **上げる。** ただし原則として行わない（3 章） |
-| コメントや説明の変更 | 上げない |
-
-**末尾追加でも上げ、`schemaVersion` で分岐して旧版は既定値を補って読み込んだうえで新版として再署名します**（1 章のマイグレーション規則）。
-
-**リリース前の変更では上げません。** v1 の出荷までは `schemaVersion` 1 のまま設計を変更できます。**上げる義務が生じるのは、その版の blob が利用者の端末に存在しうる時点からです。**
-
----
-
-## 1.1 暗号アルゴリズムと鍵
-
-**アルゴリズムを名前とビット長で固定します。** 「HMAC」「HKDF」だけでは実装が一意に定まりません。
-
-| 項目 | 値 |
-| --- | --- |
-| 署名 | **HMAC-SHA256** |
-| 署名長 | **32 バイト固定** |
-| 鍵導出 | **HKDF-SHA256**（RFC 5869。extract → expand の両段） |
-| マスター鍵 | **256 bit（32 バイト）**。`SecRandomCopyBytes` で生成し Keychain へ保存 |
-| 派生鍵の長さ | **32 バイト** |
-| HKDF の `salt` | **空（長さ 0）** |
-| HKDF の `info` | 用途ごとの派生ラベルの UTF-8 バイト列 |
-| 検証 | バイト列の**定数時間比較**（`timingsafe_bcmp` 相当） |
-
-**`salt` を空にするのは、`SecRandomCopyBytes` が生成するマスター鍵が既に一様乱数であり、salt を足しても強度は上がらず保存先の問題だけが増えるためです。**
-
-派生ラベルです。
-
-| 用途 | `info`（UTF-8） |
-| --- | --- |
-| 台帳・購入状態・コミット・リモート設定の署名 | `payload-signing-v1` |
-| `providerAssetKeyHash` の HMAC 用派生鍵 | `source-provider-key-v1` |
-
-**2 つを分けるのは性質が違うためで、一方は値の秘匿、他方は完全性の保証が目的であり、同じ鍵では運用（ローテーション等）が波及します。**
-
-##### `providerAssetKeyHash`
-
-| 項目 | 規約 |
-| --- | --- |
-| アルゴリズム | **HMAC-SHA256**（鍵は `source-provider-key-v1` の派生鍵） |
-| 入力 | `PHAsset.localIdentifier` の UTF-8 バイト列 |
-| 出力形式 | **32 バイトを小文字 16 進の 64 文字へ**（`String` として保持する） |
-
-**16 進固定にするのは、`SourceAlias.provider(String)` として台帳へ入り、正準化で UTF-8 バイト列として符号化されるためです。** Base64 や大文字混在を許すと、同じ入力から別の alias ができます。
-
-##### 時刻の丸め
-
-| 項目 | 規約 |
-| --- | --- |
-| 表現 | UTC epoch milliseconds の `Int64` |
-| 丸め | **floor**（ミリ秒未満を切り捨てる） |
-| 負の値 | 1970 年より前も floor（`-0.5ms` は `-1`） |
-
-**floor に固定するのは `Date` の内部表現が `Double` 秒であるためで、丸め方向が実装依存だと同じ `Date` から別のバイト列が出ます（`round` は境界で振れるため不採用）。**
+**スキーマを変える場合は、各ハッシュのドメイン分離子（`-v2` 等）を上げます。** 番号管理の仕組みは持たず、分離子の文字列そのものがバージョンを表します（5 章）。
 
 ---
 
@@ -177,22 +40,13 @@ blob = BE32(payloadType)
 
 ### 2.1 ordered と unordered の分類
 
-**順序に意味を持つ配列が存在します。** 一律にソートすると `RenderSpec.regions` の描画順を変え、署名のための正準化が意味を持つデータを壊します。
+**順序に意味を持つ配列は、ソートせず元の順序を保持します。** `ProjectSettingsHash` / `PreviewRenderHash` の `regions`（`RenderRegionSpec` の配列）が対象で、一律にソートすると `RenderSpec` の描画順を変え、正準化が意味を持つデータを壊します。
 
-| 分類 | 対象 |
-| --- | --- |
-| unordered | `consumedExportIDs`、`sourceRecords`、`grants`、`trialEntries`、`trialReservations`、`sourceLeases`、`pendingExportedSettingsEntries`、`exportedSettingsEntries`、`projectSourceSnapshots`、`workingSourceBindings`、`SourceRecord.aliases`、`RemoteConfig.enabledStampPacks` |
-| ordered | `RenderSpec.regions`、`ReviewIssueID.affectedFaceTrackIDs` |
-
-`affectedFaceTrackIDs` は「辞書順にソート済み」として構築されますが、それは**構築時の規則**であり、正準化がソートするのではありません。順序は値の一部です。
-
-**`FaceTrackID` は `UUID` なので、文字列化の表現に依存しない順序を定めます。**
+**unordered な集合に `UUID` を含む場合は、次の規則で辞書順に比較してからソートします。**
 
 > `UUID` の 16 バイトを**符号なしバイト列として辞書順**に比較する。
 
-大文字小文字やハイフンの有無は順序へ影響しません。unordered collection のソートにも同じ規則を使います。
-
-**分類は型に付けます。** unordered な集合は Swift の `Set` として宣言し、`Array` はすべて ordered として扱うのが原則です。`grants` などが `Array` なのは要素が `Hashable` でないためであり、この場合は**エンコーダ側に unordered として明示的に登録します。**
+大文字小文字やハイフンの有無は順序へ影響しません。
 
 ### 2.2 識別子
 
@@ -205,242 +59,7 @@ blob = BE32(payloadType)
 
 ---
 
-## 3. `enum` の固定番号
-
-**`case` の宣言順に依存させません。** `case` を追加した時点で既存の全署名が変わるためです。
-
-### `SourceAlias`
-
-| case | 番号 | 連想値 |
-| --- | --- | --- |
-| `provider` | 1 | `String`（小文字 16 進 64 文字） |
-| `content` | 2 | **32 バイト固定長**（`ContentFingerprint`） |
-
-### `SourceRepresentation`
-
-| case | 番号 |
-| --- | --- |
-| `original` | 1 |
-| `transcoded` | 2 |
-
-### `MonthlyIntegrityLock`
-
-| case | 番号 | 連想値 |
-| --- | --- | --- |
-| `none` | 1 | — |
-| `lockedUntilTrustedMonthAfter` | 2 | `TrustedUTCMonth` |
-| `lockedUntilReinstall` | 3 | — |
-
-### `ExportCommitState`
-
-| case | 番号 |
-| --- | --- |
-| `prepared` | 1 |
-| `fileVerified` | 2 |
-| `finalizing` | 3 |
-| `accountingCommitted` | 4 |
-| `readyToPublish` | 5 |
-| `published` | 6 |
-| `rollingBack` | 7 |
-
-**`rollingBack` を末尾（7）へ置きます。** `published` を 6 のまま維持することが要点です。`rollingBack` を 6 へ挿入して `published` を 7 へずらすと、**既存の `published` 行（`state = 6` として署名済み）がバイト列を変えずに `rollingBack` としてデコードされます。** HMAC は通過するため検出できず、5.3 が「ロールバックの手順 1 から再実行する」を適用して**公開済み・会計確定済みの書き出しから消費・grant・トライアルを払い戻し、出力ファイルを削除します。**
-
-**`case` の追加は常に末尾の番号で行います**（1 章の「追加は末尾のみ」）。宣言順は可読性のために `published` の前へ置いてよく、**番号だけが不変です。**
-
-### `ExportAccountingMode`
-
-| case | 番号 | 連想値 |
-| --- | --- | --- |
-| `paidUnlimited` | 1 | — |
-| `freeMonthlyConsume` | 2 | — |
-| `freeMonthlyReexport` | 3 | — |
-| `batchTrial` | 4 | `consumesTrialCredit: Bool` |
-
-### `GrantAction`
-
-| case | 番号 | 連想値 |
-| --- | --- | --- |
-| `ensure` | 1 | `sourceID` → `firstSuccessAt` |
-| `preserveAuthorized` | 2 | `sourceID` → `firstSuccessAt` |
-
-### `Plan`
-
-| case | 番号 |
-| --- | --- |
-| `free` | 1 |
-| `standard` | 2 |
-| `pro` | 3 |
-
-### `ImageFormat`
-
-| case | 番号 |
-| --- | --- |
-| `jpeg` | 1 |
-| `heic` | 2 |
-| `png` | 3 |
-
-### `PlanStatus`
-
-| case | 番号 |
-| --- | --- |
-| `active` | 1 |
-| `grace` | 2 |
-| `pending` | 3 |
-| `expired` | 4 |
-| `revoked` | 5 |
-
-### `ManagedFileKind`
-
-`UInt32` の生値を型定義そのものが持ちます（`output = 1` 〜 `protectedBlob = 7`）。
-
-### `ProtectedPayload.blobKeyRawValue`
-
-**内部ファイル名の決定に使うため、値を固定します。**
-
-| 型 | 値 |
-| --- | --- |
-| `UsageLedger` | **1** |
-| `SubscriptionState` | **2** |
-| `RemoteConfigState` | **3** |
-| `TrustedTimeState` | **4** |
-
-この対応もゴールデンテストの対象です（6 章）。
-
----
-
-## 4. 署名対象 payload
-
-### 4.1 `UsageLedger`（`schemaVersion` 1）
-
-| 順 | フィールド | 型 |
-| --- | --- | --- |
-| 1 | `period` | `YearMonth` |
-| 2 | `consumedExportIDs` | unordered set of `ExportID` |
-| 3 | `sourceRecords` | unordered collection of `SourceRecord` |
-| 4 | `grants` | unordered collection of `GrantEntry` |
-| 5 | `trialEntries` | unordered collection of `TrialEntry` |
-| 6 | `trialReservations` | unordered collection of `TrialReservation` |
-| 7 | `sourceLeases` | unordered collection of `SourceLease` |
-| 8 | `pendingExportedSettingsEntries` | unordered collection of `ExportedSettingsEntry` |
-| 9 | `exportedSettingsEntries` | unordered collection of `ExportedSettingsEntry` |
-| 10 | `projectSourceSnapshots` | unordered collection of `ProjectSourceSnapshot` |
-| 11 | `workingSourceBindings` | unordered collection of `WorkingSourceBinding` |
-| 12 | `lastObservedAt` | `Date` |
-| 13 | `monthlyIntegrityLock` | `MonthlyIntegrityLock` |
-| 14 | `lastTrustedMonth` | `TrustedUTCMonth?` |
-| 15 | `trialIntegrityLocked` | `Bool` |
-| 16 | `ledgerTimeZone` | `LedgerTimeZone`（`identifier` の `String`） |
-| 17 | `unverifiedLedgerWrites` | `Int32`（BE32、符号付き） |
-| 18 | `ledgerWritesSinceConfigFetch` | `Int32`（BE32、符号付き） |
-
-要素型のフィールド順です。
-
-| 型 | 順 |
-| --- | --- |
-| `YearMonth` / `TrustedUTCMonth` | `year`（`Int32`）→ `month`（`Int32`）。**実型も `Int32`** |
-| `SourceRecord` | `sourceID` → `aliases`（unordered） |
-| `GrantEntry` | `sourceID` → `firstSuccessAt` → `ownerExportID` |
-| `TrialEntry` | `sourceID` → `ownerExportID` |
-| `TrialReservation` | `sourceID` → `exportID` |
-| `SourceLease` | `sourceID` → `exportID` → `accountingMode` |
-| `ExportedSettingsEntry` | `projectID` → `settingsHash`（32 バイト固定）→ `exportedAt` → `ownerExportID` |
-| `ProjectSourceSnapshot` | `projectID` → `identity` → `representation` → `capture` → `libraryCreationDate` → `registeredAt` |
-| `WorkingSourceBinding` | `projectID` → `sourceFile` → `normalizedFileSHA256`（32 バイト固定長） → `byteSize`（`Int64`） |
-| `SourceIdentity` | `providerAssetKeyHash`（`String?`）→ `contentFingerprint`（32 バイト固定） |
-| `OriginalCaptureMetadata` | `dateTimeOriginal` → `subSecTimeOriginal` → `offsetTimeOriginal` → `utcMillis`（すべて `Optional`） |
-
-`pendingExportedSettingsEntries` / `exportedSettingsEntries` / `projectSourceSnapshots` は **`projectID` ごとに 1 件**、`workingSourceBindings` は **`projectID` ごとに 0 件または 1 件**です。台帳の検証時に重複が無いことを確認します。
-
-台帳修復時は、この 4 集合をすべて**空**にします（[アーキテクチャ設計](architecture.md) の 6.3）。
-
-### 4.2 `SubscriptionState`（`schemaVersion` 1）
-
-型定義は [アーキテクチャ設計](architecture.md) の 6.2 が正本です。ここには順序だけを置きます。
-
-| 順 | フィールド | 型 |
-| --- | --- | --- |
-| 1 | `entitlement` | `Entitlement`（下記） |
-| 2 | `willRenew` | `Bool` |
-| 3 | `fetchedAt` | `Date` |
-| 4 | `lastRequestDate` | `Date` |
-
-`Entitlement` の順は `plan` → `status` → `expiresAt` → `lastVerifiedAt` → `isSandbox` です。
-
-**`fetchedAt` / `lastVerifiedAt` / `lastRequestDate` は 3 つとも別の値です。** `fetchedAt` はキャッシュを書いた時刻、`lastVerifiedAt` は権限を検証できた時刻、**`lastRequestDate` は RevenueCat のサーバーが応答を生成した時刻**（`CustomerInfo.requestDate`）です。**3 つ目だけが「サーバーと本当に往復したか」を表します**（[アーキテクチャ設計](architecture.md) の 6.2）。SDK がキャッシュを返した場合、前 2 つは動かせても `lastRequestDate` は動きません。
-
-### 4.3 `ExportCommit`（`schemaVersion` 1）
-
-| 順 | フィールド | 型 |
-| --- | --- | --- |
-| 1 | `exportID` | `ExportID` |
-| 2 | `projectID` | `ProjectID` |
-| 3 | `batchID` | `BatchID?` |
-| 4 | `sourceID` | `SourceID` |
-| 5 | `outputFile` | `OutputFileRef?`（`prepared` では `nil`） |
-| 6 | `authorization` | `ExportAuthorization` |
-| 7 | `verifiedOutput` | `VerifiedOutput?` |
-| 8 | `finalizedAt` | `Date?` |
-| 9 | `finalizedPeriod` | `YearMonth?` |
-| 10 | `intent` | `AccountingIntent?` |
-| 11 | `applied` | `AccountingApplied?` |
-| 12 | `state` | `ExportCommitState` |
-| 13 | `delivery` | `OutputDeliveryDescriptor` |
-
-ネストした型のフィールド順です。
-
-| 型 | 順 |
-| --- | --- |
-| `ExportAuthorization` | `entitlementSnapshot`（`Entitlement`）→ `accountingMode` → `authorizedAt` → `authorizedGrant` |
-| `AuthorizedGrant` | `sourceID` → `firstSuccessAt` |
-| `VerifiedOutput` | `byteSize`（`Int64`）→ `sha256`（32 バイト固定長。長さ前置きしない） |
-| `AccountingIntent` | `consumeExportID` → `grantAction` → `trialSourceIDToEnsure` → `settingsEntryToApply` |
-| `AccountingApplied` | `consumedInserted` → `grantInsertedByThisExport` → `trialInsertedByThisExport` → `pendingSettingsEntryInserted` |
-| `OutputDeliveryDescriptor` | `format`（`UInt32`）→ `suggestedCreationDate`（`Date?`） |
-
-`sha256` を固定長にするのは、長さが常に 32 バイトであり前置きが冗長なためです。他の `Data` は長さ前置きを維持します。
-
-### 4.4 `TrustedTimeState`（`schemaVersion` 1）
-
-型定義は [アーキテクチャ設計](architecture.md) の 6.3 が正本です。
-
-| 順 | フィールド | 型 |
-| --- | --- | --- |
-| 1 | `trustedEpochMillis` | `Int64` |
-| 2 | `observedAtUsageNow` | `Date` |
-| 3 | `source` | `TrustedTimeSource` |
-
-`TrustedTimeSource` の固定番号です。
-
-| case | 番号 |
-| --- | --- |
-| `remoteConfig` | 1 |
-| `revenueCat` | 2 |
-
-### 4.5 `RemoteConfigState`（`schemaVersion` 1）
-
-| 順 | フィールド | 型 |
-| --- | --- | --- |
-| 1 | `highestAcceptedVersion` | `Int64` |
-| 2 | `acceptedPayloadDigest` | 32 バイト固定長 |
-| 3 | `lastKnownGood` | `RemoteConfigEnvelope` |
-
-`RemoteConfigEnvelope` の順は `schemaVersion`（`Int32`）→ `configVersion`（`Int64`）→ `issuedAt` → `expiresAt` → `payload` です。
-
-`RemoteConfig` / `UpdateConfig` / `AppVersion` / `KillSwitches` の型宣言は [アーキテクチャ設計](architecture.md) の 10.2 が正本です。ここではその符号化順だけを固定します。**フィールドを追加する場合は末尾へ足し、`schemaVersion` を上げます。**
-
-| 型 | 順 |
-| --- | --- |
-| `RemoteConfig` | 上の宣言順（`freeMonthlyExportLimit` から `killSwitches` まで） |
-| `UpdateConfig` | `minimumSupportedVersion` → `recommendedVersion` → `appStoreID` |
-| `AppVersion` | `major` → `minor` → `patch` |
-| `KillSwitches` | `disableBatchProcessing` → `disableCustomStampImport` → `disableDiagnosticsUpload` |
-| `enabledStampPacks` | unordered。各要素を UTF-8 で符号化しバイト順にソート |
-
----
-
 ## 5. `contentFingerprint` とプロジェクト設定ハッシュ
-
-**署名用エンコーダと共用しません。** 用途が違えばスキーマ変更のタイミングも違い、片方の変更がもう片方の署名を壊します。
 
 ### 5.1 `contentFingerprint`
 
@@ -538,7 +157,7 @@ contentFingerprint = SHA-256( "content-fingerprint-v2" || fullFileBytes )
 
 バッチの `overviewConfirmed` も同様です。**再起動後は一覧の確認からやり直します。**
 
-##### `ProjectSettingsHash` に含めるフィールドと順序（`schemaVersion` 1）
+##### `ProjectSettingsHash` に含めるフィールドと順序（`project-settings-v1`）
 
 | 順 | フィールド | 型 |
 | --- | --- | --- |
@@ -577,7 +196,7 @@ contentFingerprint = SHA-256( "content-fingerprint-v2" || fullFileBytes )
 
 `MetadataPolicy` は `removeLocation` → `removeDeviceInfo` → `removeSoftwareInfo` → `keepCaptureDate` の 4 つの `Bool` です。
 
-##### `PreviewRenderHash` に含めるフィールドと順序（`schemaVersion` 1）
+##### `PreviewRenderHash` に含めるフィールドと順序（`preview-render-v1`）
 
 | 順 | フィールド |
 | --- | --- |
@@ -610,7 +229,7 @@ contentFingerprint = SHA-256( "content-fingerprint-v2" || fullFileBytes )
 | 浮動小数 | **IEEE 754 の 64 ビット `Double.bitPattern`**。`Float` へ丸めない。`-0.0` は `+0.0` へ |
 | 欠損値 | 長さ 0 のフィールドとして明示する |
 | `regions` | ordered。順序を保持する |
-| フィールド追加 | **末尾のみ。** 出力へ影響する設定を追加したら必ずここへ加え、`schemaVersion` を上げる |
+| フィールド追加 | **末尾のみ。** 出力へ影響する設定を追加したら必ずここへ加え、ドメイン分離子（`-v2`）を上げる |
 
 **32 ビット `Float` へ丸めると `0.1500000000000000` と `0.1500000059604645` が同じハッシュになり、設定を変えたのに無料の再書き出しとして通ります。**
 
@@ -630,18 +249,34 @@ PreviewRenderHash =
 | --- | --- |
 | ドメイン分離子 | 上記文字列の UTF-8 バイト列。長さ前置きしない |
 | `canonical…Bytes` | 上表のフィールドを 2 章の符号化規則で順に連結したもの |
-| 先頭の `payloadType` / `schemaVersion` | **付けない。** これらは署名対象 payload の規約であり、ハッシュ入力ではない |
 | 出力 | **32 バイト固定** |
 | スキーマ変更 | 分離子を `-v2` へ上げる |
 
 **`contentFingerprint` と同じ式ではありません。** あちらの入力はファイルの全バイトであり、長さ前置きも構造化された符号化もありません。**「同じ」と書くと、実装がどちらかの規則をもう一方へ持ち込みます。**
 
-各 `schemaVersion` について、既知の `RenderSpec` と `ExportSetting` から生成したゴールデンバイト列を、**2 種類のハッシュそれぞれについて**テストへ埋め込みます。
+既知の `RenderSpec` と `ExportSetting` から生成したゴールデンバイト列を、**2 種類のハッシュそれぞれについて**テストへ埋め込みます。
+
+### 5.3 `providerAssetKeyHash`
+
+**鍵を使わない SHA-256 で計算します。** `SourceAlias.provider` の照合に使う値だけを求めます。
+
+```
+providerAssetKeyHash = SHA-256( "source-provider-v1" || BE32(providerKind) || localIdentifier )
+```
+
+| 項目 | 規則 |
+| --- | --- |
+| ドメイン分離子 | `"source-provider-v1"` の UTF-8 バイト列を先頭へ置く |
+| `providerKind` | 提供元を表す固定 `UInt32`（2 章の enum 符号化）。現状 `phAsset = 1` の 1 種のみ |
+| `localIdentifier` | `PHAsset.localIdentifier` の UTF-8 バイト列（末尾まで。長さ前置きしない） |
+| 出力形式 | **32 バイトを小文字 16 進の 64 文字へ**（`String` として `SourceAlias.provider` へ保持する） |
+
+**`providerKind` を挟むのは、将来別の提供元を追加したとき同じ生識別子文字列でもハッシュが衝突しないようにするためです。** 16 進固定にするのは、Base64 や大文字混在を許すと同じ入力から別の alias ができるためです。
 
 ---
 
 ## 6. ゴールデンテスト
 
-各 `schemaVersion` について、固定の canonical bytes と HMAC 値をテストへ埋め込みます。**リファクタリングで正準形が変わると既存利用者の台帳がすべて `integrityFailure` になり、単体テストで気づけなければリリース後に発覚します。**
+各ハッシュ（`contentFingerprint` / `StampAssetHash` / `ProjectSettingsHash` / `PreviewRenderHash` / `providerAssetKeyHash`）について、既知の入力から生成した固定バイト列と出力値をテストへ埋め込みます。符号化ロジックが意図せず変わったときに検出するためです。
 
-検証項目は [テスト計画](test-plan.md) の 2.7 にあります。
+検証項目は [テスト計画](test-plan.md) にあります。
