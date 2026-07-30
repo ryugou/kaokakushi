@@ -135,7 +135,7 @@ kaokakushi/
 │   ├── MediaKit/            Vision / Image I/O / Core Image / PhotoKit
 │   ├── Billing/             RevenueCat ラッパと権限解決
 │   ├── Ads/                 AdPresenter（Google Mobile Ads）
-│   └── Analytics/           イベント定義と送信（Sentry のみへ送る。9.1）
+│   └── Analytics/           `CrashReporter` の実装（Sentry のみへ送る。9.1）
 │
 └── ui-mock/                 Next.js による UI モック（参照専用）
 ```
@@ -206,7 +206,7 @@ Swift 6 の strict concurrency を有効にします。
 | 対象 | 隔離 |
 | --- | --- |
 | `Domain` の値型 | `Sendable`。判定関数はすべて純粋関数 |
-| `ExportSagaStore` / `OutputDeliveryStore`（[書き出し Saga](export-saga.md)） | `Domain` は**プロトコル**。呼び出しは `ExportCoordinator` の直列実行キュー 1 本を経由する（4.2。専用の待機キュー・ゲートは持たない） |
+| `ExportSagaStore` / `OutputDeliveryStore`（[書き出し Saga](export-saga.md)） | `Domain` は**プロトコル**。呼び出しは全 Coordinator が共有するグローバル直列キュー 1 本を経由する（4.2。専用の待機キュー・ゲートは持たない） |
 | `Application` の Coordinator | `actor` |
 | `SharePresenter` / `AdPresenter` | **`@MainActor`**（UIKit を操作する） |
 | UI の状態オブジェクト | `@MainActor` |
@@ -214,15 +214,15 @@ Swift 6 の strict concurrency を有効にします。
 
 ### 4.2 排他区間の実装規則
 
-**`actor` は再入可能であり、単独では「読み取りから保存完了まで」の論理的クリティカルセクションを保持できない**（`await` で中断すると同じ actor のメソッドへ別の呼び出しが入り、FIFO も保証されない）。**書き出しと台帳の更新は、単純な直列実行キュー 1 本（v1 は並列数 1）で直列化する**（ADR 0005）。同時に処理する項目は常に 1 件とし、次の項目はキューの前が完了してから着手する。
+**`actor` は再入可能であり、単独では「読み取りから保存完了まで」の論理的クリティカルセクションを保持できない**（`await` で中断すると同じ actor のメソッドへ別の呼び出しが入り、FIFO も保証されない）。**変更を伴うすべての操作（書き出し・受け渡し状態の更新・素材の選択替え・履歴削除）は、単一のグローバル直列キュー 1 本（v1 は並列数 1）で直列化する**（ADR 0005）。同時に処理する項目は常に 1 件とし、次の項目はキューの前が完了してから着手する。**読み取りとプレビュー描画はキューを経由しない**（変更を伴わないため直列化の対象外）。
 
-**キャンセル**は「キュー投入前」と「キューから取り出して処理を開始する直前」の 2 箇所で `Task.checkCancellation()` を確認する。確定境界（[書き出し Saga](export-saga.md) の手順 4）より前でのキャンセルは、`ExportJob` 行の削除という一律の後始末で足りる（同 4 章）。手順 4 完了後は `CancellationError` を投げず、出力確認画面での明示的な操作（やり直す／完了）として扱う（同 4 章、ADR 0006）。`CancellationError` は業務エラーとして扱わず、Sentry へは送らない（9.1）。
+**キャンセル**は「キュー投入前」と「キューから取り出して処理を開始する直前」の 2 箇所で `Task.checkCancellation()` を確認する。**生成（書き出し）は何も消費しないため、キャンセルはどの時点でも `ExportJob` 行の削除という一律の後始末で足りる**（ADR 0006）。生成後の出力確認画面での「やり直す」「完了」は明示的な操作であり `CancellationError` としては扱わない（[書き出し Saga](export-saga.md) が正本）。`CancellationError` は業務エラーとして扱わず、Sentry へは送らない（9.1）。
 
 ### 4.3 Application 層
 
 次の処理は `Domain`（純粋 Swift）にも `App`（SwiftUI）にも置けません。
 
-- 書き出しの手順 0〜4（[書き出し Saga](export-saga.md)）と中断時の後始末
+- 書き出しの手順、完了操作、中断時の後始末（[書き出し Saga](export-saga.md)）
 - 起動時復旧
 - DB・台帳・ファイルの協調、ゲートの取得と解放
 - 出力の受け渡し
@@ -231,7 +231,7 @@ Swift 6 の strict concurrency を有効にします。
 
 ```swift
 // Application — Domain のプロトコルだけを使う
-actor ExportCoordinator { }            // 手順 0〜4、中断時の後始末（[書き出し Saga](export-saga.md)）
+actor ExportCoordinator { }            // 書き出しの手順、完了操作、中断時の後始末（[書き出し Saga](export-saga.md)）
 actor StartupRecoveryCoordinator { }   // 起動時復旧（[書き出し Saga](export-saga.md)）
 actor OutputDeliveryCoordinator { }    // MediaSaver / SharePresenter の呼び出しと状態遷移
 actor SourceImportCoordinator { }      // インポート / 再選択 / 再接続 / 複製（[画像処理](image-pipeline.md)）
@@ -240,27 +240,17 @@ actor HistoryDeletionCoordinator { }   // Project / Batch 削除、編集中の�
 
 ##### 排他の単位
 
-**`actor` であることを排他の根拠にしない**（4.2）。Coordinator ごとに、何を単位として直列化するかを明示する。
+**`actor` であることを排他の根拠にしない**（4.2）。**すべての変更系 Coordinator が、単一のグローバル直列キュー（4.2）を共有する。** exportID 別・projectID 別の個別キューや、複数ロックの取得順序規則は持たない（キューが 1 本しかないため、複数キューを跨ぐ取得によるデッドロックはそもそも起こらない。ADR 0005）。
 
-| Coordinator | 排他の単位 | 実装 |
-| --- | --- | --- |
-| `ExportCoordinator` | **アプリ全体で 1 件**（v1） | 直列実行キュー 1 本（[書き出し Saga](export-saga.md) の 1.7。専用ゲートは持たない） |
-| `OutputDeliveryCoordinator` | **`exportID` ごと** | 明示的な待機キュー（[書き出し Saga](export-saga.md) の 7.0） |
-| `SourceImportCoordinator` | **`projectID` ごと**（新規インポートは新しい `projectID` なので競合しない） | 明示的な待機キュー |
-| `HistoryDeletionCoordinator` | **アプリ全体で 1 件。** 加えて**削除対象の各 `projectID` の待機キューを取得する**（下記） | 明示的な待機キュー |
-| `StartupRecoveryCoordinator` | 起動時に 1 回のみ。**完了まで他のすべてを開始させない** | 起動シーケンス |
-
-**`SourceImportCoordinator` を `projectID` で直列化する**（同じ `Project` への再選択と再接続の並行は `WorkingSourceRecord` の主キー衝突または正規化ファイルの孤児化を招く）。実体の存在確認と `WorkingSourceRecord` の破棄（[画像処理](image-pipeline.md)）も同じ待機キューで直列化する。プレビュー描画・再検出・書き出し手順 1 が実体を開いている間に `replaceWorkingSource` や破棄が走ると開いている実体が削除対象になるため、読み取りだけでも実体の寿命に対する排他としてこの待機キューを通す。
-
-**`HistoryDeletionCoordinator` を全体で直列化する**（削除は複数の `Project` を跨ぐため `projectID` 単位の排他では `Batch` 削除を保護できない）。**加えて削除対象の各 `projectID` の待機キューも取得する。** 全体キューだけでは進行中の再検出・素材操作と排他されず、再検出が `FaceTrack` を書き換える途中に同じ `Project` が削除されると外部キー違反になる（プレビュー描画中は `ExportJob` が存在せず 7.5 の絶対保護も効かない）。
-
-| 規則 | 内容 |
+| Coordinator | 役割 |
 | --- | --- |
-| 取得の順序 | **`projectID` の昇順に固定する。** 順序は **`UUID` の 16 バイトを符号なしバイト列として辞書順**（[正準スキーマ](canonical-schema.md) の 2.1 が `FaceTrackID` に定めるのと同じ規則）。`Batch` 削除で複数取得するため、順序が一意でないとデッドロックしうる |
-| 取得の位置 | **DB トランザクションへ入る前。** 全体キューを取得したあと |
-| 解放 | `defer` で必ず行う |
+| `ExportCoordinator` | 書き出しの手順、中断時の後始末（[書き出し Saga](export-saga.md)） |
+| `OutputDeliveryCoordinator` | `MediaSaver` / `SharePresenter` の呼び出しと状態遷移 |
+| `SourceImportCoordinator` | インポート / 再選択 / 再接続 / 複製（[画像処理](image-pipeline.md)） |
+| `HistoryDeletionCoordinator` | `Project` / `Batch` 削除、編集中の破棄（7.5） |
+| `StartupRecoveryCoordinator` | 起動時に 1 回のみ実行し、**完了まで他のすべてを開始させない** |
 
-**`ExportCoordinator` の直列実行キューと `HistoryDeletionCoordinator` の全体キューは共有しない**（2 つの全体キューを跨ぐ取得はデッドロックの発生源になる）。整合は `canDeleteHistoryUnit` が非終端の `ExportJob` および未削除の `OutputRecord` を絶対保護として同一 DB トランザクション内で見ることで成立する（7.5）。**書き出しと削除は互いに排他ではなく**、判定と削除を同一 DB トランザクションへ閉じることで整合する。`DatabaseQueue` がトランザクションを直列化するため判定と挿入は交差しない。
+**整合は `canDeleteHistoryUnit` が非終端の `ExportJob` および未削除の `OutputRecord` を絶対保護として同一 DB トランザクション内で見ることで成立する**（7.5）。判定と削除を同一 DB トランザクションへ閉じることで整合する。`DatabaseQueue` がトランザクションを直列化するため判定と挿入は交差しない。
 
 **`Application` が直接 `import` してはいけないもの**を明示する。
 
@@ -399,22 +389,11 @@ enum ReviewStatus: Sendable { case unreviewed, reviewed }        // 利用者の
 
 検出ステータスは利用者の操作で変わらない。確認ステータスはアプリの判断で変わらない。
 
-##### 認可時に検出ステータスを再導出する
+##### 書き出し認可での確認
 
-**どちらも未署名の `app.db` にあり、書き換えれば `requiresUserReview`（6.4）が全件 `false` を返し個別確認なしで書き出せてしまう。** 再導出により防ぐ。
+**書き出し認可は、保存済みの `DetectionStatus` / `ReviewStatus` / `ReviewDecision` をそのまま信頼する**（ADR 0005）。認可時に検査するのは、確認済みプレビューが現在の設定と一致すること（`PreviewConfirmation`。[書き出し Saga](export-saga.md) の 1.1）と、`reviewRequired` かつ `unreviewed` の写真が残っていないことの 2 点のみ。不成立なら開始しない。
 
-| 規則 | 内容 |
-| --- | --- |
-| `DetectionStatus` | **書き出し認可の内側で `triage` を再実行して再導出する。** 保存値を根拠にしない |
-| `ReviewDecision` の完全性 | 再導出した `[ReviewIssue]` のすべてに `ReviewResolution` が記録されていることを**認可時に再検査する** |
-| 再導出の入力 | 保存済みの `FaceTrack` と `detectionRevision`。**検出をやり直すのではなく `triage` だけを再実行する** |
-| 不成立なら | 開始しない（[書き出し Saga](export-saga.md) の 1.1） |
-
-**`triage` は純粋関数のため再実行費用は無視できる**（顔数に比例するのみで Vision 呼び出しを伴わない）。保存値は表示高速化のキャッシュとして扱い、認可の根拠にしない。
-
-**`ReviewStatus` の書き換えは再導出だけでは防げない**（`reviewRequired` を再導出しても `reviewed` が立っていれば通る）。**`ReviewDecision` の完全性を再検査し、`ReviewIssueID` ごとの判断が実際に記録されていることを要求する。** 偽造には `ReviewIssueID` ごとに `ReviewDecision` 行を作る必要があり、`noFaceDetected` では「顔を隠さず保存する」明示選択（`unmaskedExportConfirmed`）の記録と等価になる。この規則は 10.3「リモート設定で変更できないこと」に対応し、確認画面を DB 直接改変からも守る。
-
-##### 再導出の入力
+##### `triage` の入力
 
 `triage` は `DetectionResult` を受け取ります（上記）。その材料を `FaceTrack` が列として持ちます。
 
@@ -427,23 +406,6 @@ enum ReviewStatus: Sendable { case unreviewed, reviewed }        // 利用者の
 | **`detectionPixelSize`**（`Project` の列） | 検出時の寸法。`isSmallFace` の根拠 |
 
 **検出品質の列を `FaceTrack` へ持たせる**（持たせないと `triage` を再実行できず再導出が成立しない）。
-
-##### `FaceTrack` の改変は防げないが、倒れる向きが逆になる
-
-**`FaceTrack` も未署名であり、検出品質の列の書き換えや偽の顔行の挿入で `triage` の結果を変えられる。署名では防がない**（顔の集合は編集操作で頻繁に変わり、署名対象にすると編集のたびに台帳更新が要る）。改変で得られる利得は次の通り。
-
-| 改変 | `triage` の結果 | 帰結 |
-| --- | --- | --- |
-| `isSmallFace` / `confidence` / 角度を書き換える | その警告が消える | 自分の写真について確認を省ける |
-| **偽の顔行を挿入して `noFaceDetected` を消す** | 空集合になる | **偽領域が無害な場所を隠し、実際の顔は露出したまま書き出される** |
-| 顔行を削除する | その顔の警告が消える | **その顔が加工対象から外れ、露出する** |
-| 顔行を追加する（正規の手動領域） | 警告が増える | 確認が増える |
-
-**いずれも「自分の写真を自分の判断で確認せずに書き出す」ことに帰着し、無料枠も有料機能も増えず露出するのは改変者本人の写真であるため、対象としない**（`unmaskedExportConfirmed` という正規の代替経路が既にあるため。9.2）。
-
-**それでも `DetectionStatus` / `ReviewStatus` の再導出は行う。** 攻撃者の利得は同じでも、トラストバウンダリを「検出結果そのもの」まで押し下げる意味がある——`DetectionStatus` 1 列だけの書き換えは偶発的な不整合（バグ・移行失敗）でも起こりうるが、検出品質の列や顔行の整合を保ちながらの偽造は明確に意図した操作だけであり、再導出は前者を通さない。
-
-**顔行を削除して露出させる方向はそもそも防ぐ対象ではない**（「取り返しがつかない方向へ倒さない」はアプリの既定挙動の規則であり、利用者が自分の意思で自分の写真を露出させる操作は禁じない）。
 
 ##### 要確認への対応
 
@@ -487,7 +449,7 @@ struct ReviewDecision: Sendable, Equatable {
 
 **この節は単体処理に限る**（一括処理の顔 0 件は `noFaceDetected` と勘定の規則に従う。[書き出し Saga](export-saga.md)）。利用不可にはせず、手動で隠す範囲を追加する / 縦横比変更やメタデータ削除だけを行う / 編集を終了する、から選べるようにする。
 
-加工なしの書き出しも仕様 14.2 の定義では消費対象。不意打ちを避けるため書き出し前に明示するが、**文言は `MonthlyQuotaDecision`（6.3）と reissue の判定で分岐させる**（一律「枠を使う」は reissue のやり直しで誤案内になる。`unlimited` では無料枠に言及しない）。
+加工なしの書き出しも仕様 14.2 の定義では消費対象。不意打ちを避けるため完了操作の前に明示する（消費は完了操作で確定するため。6.3）。**`MonthlyQuotaDecision`（6.3）が `unlimited` の場合は無料枠に言及しない。**
 
 ### 6.2 能力と課金状態
 
@@ -547,7 +509,6 @@ struct SubscriptionState: Sendable, Equatable {
 | --- | --- |
 | 能力の付与 | **本番と同じ。** サンドボックスでも `ResolvedCapabilities` を制限しない（TestFlight と審査で有料機能を検証できなくなる） |
 | `Entitlement` への伝搬 | **`isSandbox` を `Entitlement` と `SubscriptionState` へ持たせる** |
-| 分析・診断 | **`PlanKind` の区分値として送る**（9.1 の `sandbox`）。本番の集計へ混ぜない |
 
 要件は 3 点。
 
@@ -732,14 +693,14 @@ Free 範囲のプロジェクトとは、モザイク・ぼかし・黒塗り・
 
 ##### 比較対象を台帳へ持つ
 
-**現在の設定ハッシュと比べる対象「最後に正常書き出しした設定」は、台帳（`ExportedSettingsEntry`。6.3）へ持たせる**（書き出しの確定と同じトランザクション境界で更新するため）。**台帳への反映は書き出しの確定（単一トランザクション）で直接行う**（確定前の値を根拠にしてしまう経路が無い。ADR 0005）。
+**現在の設定ハッシュと比べる対象「最後に正常書き出しした設定」は、台帳（`ExportedSettingsEntry`。6.3）へ持たせる**（完了操作と同じトランザクション境界で更新するため）。**台帳への反映は完了操作（単一トランザクション）で直接行う**（確定前の値を根拠にしてしまう経路が無い。ADR 0005、ADR 0006）。
 
 | 契機 | 操作 |
 | --- | --- |
-| 公開の確定 | **`exportedSettingsEntries` へ直接書き込む**（手順 4。[書き出し Saga](export-saga.md)） |
+| 完了操作の確定 | **`exportedSettingsEntries` へ直接書き込む**（[書き出し Saga](export-saga.md)が正本） |
 | `Project` の削除 | **`Project` 削除 Saga**（DB 確定後）で削除する（7.5） |
 
-**免除条件（確定記録の存在・設定の一致・対象・適用範囲）の正本は [書き出し Saga](export-saga.md) の 1.3。** ADR 0006 により、素材の同一性は判定条件に含めない（対象は「同一 `Project`」であることのみ）。要素数は `Project` 数と同じく有界であり、`Project` が消えた entry は削除 Saga が回収する。**降格の事実自体はクォータ判定に影響しない。**
+**免除条件（確定記録の存在・設定の一致・対象・適用範囲）の正本は [書き出し Saga](export-saga.md)。** 免除の対象は**降格後の有料スタンプ能力要件のみであり、月間枠は免除しない**（クォータは別途評価する。6.3）。ADR 0006 により、素材の同一性は判定条件に含めない（対象は「同一 `Project`」であることのみ）。要素数は `Project` 数と同じく有界であり、`Project` が消えた entry は削除 Saga が回収する。**降格の事実自体はクォータ判定に影響しない。**
 
 ##### 広告表示頻度
 
@@ -793,16 +754,13 @@ struct ExportedSettingsEntry: Sendable, Equatable {
 
 ##### 判定
 
+**消費は生成時ではなく、完了操作の単一トランザクションで行う**（ADR 0006）。生成（書き出し）は出力ファイルと確認用の `OutputRecord` を作るだけで、枠・クレジットは一切消費しない。認可時に評価するのは「消費できるか」だけであり、この関数自体は台帳を更新しない。
+
 ```swift
 enum MonthlyQuotaDecision: Sendable, Equatable {
-    case unlimited          // Standard / Pro
-    case consume            // 1 消費する
+    case unlimited        // Standard / Pro
+    case consumable        // Free。残り枠がある
     case blocked(limit: Int)
-}
-
-struct MonthlyQuotaEvaluation: Sendable {
-    let decision: MonthlyQuotaDecision
-    let updatedLedger: UsageLedger   // 月次更新を含む
 }
 
 func evaluateMonthlyQuota(
@@ -811,19 +769,17 @@ func evaluateMonthlyQuota(
     monthlyLimit: Int,               // 設定定数の freeMonthlyExportLimit（10 章）
     usageNow: Date,                  // 端末の現在時刻
     deviceTimeZone: TimeZone
-) -> MonthlyQuotaEvaluation
+) -> MonthlyQuotaDecision
 ```
-
-**時刻は端末の現在時刻・現在タイムゾーンをそのまま使う**（ADR 0005。月をまたいだかは端末の現在の年月と `period` の比較だけで決める）。`evaluateMonthlyQuota` は内部で `rollPeriod` を呼ぶ。**判定結果だけでなく更新後の台帳も返す**（判定だけでは月次更新を永続化できない）。**`monthlyLimit` を引数で受け取る**（上限は設定定数で変わるため `Domain` の定数にできない。10 章）。
 
 判定順序。
 
-1. 期間更新（`rollPeriod`）を適用する
-2. `access == .unlimited` なら `unlimited`
-3. `consumed >= limit` なら `blocked(limit: limit)`
-4. それ以外は `consume`
+1. `access == .unlimited` なら `unlimited`
+2. 端末の現在の年月が `ledger.period` と異なれば、消費数を 0 とみなして判定する（実際の period 更新と消費の計上は完了操作でまとめて行う。下記）
+3. （1.の消費数、または `ledger.consumed`）が `monthlyLimit` 未満なら `consumable`
+4. それ以外は `blocked(limit: monthlyLimit)`
 
-**有料プランで `unlimited` を返す場合も手順 1 は必ず実施する**（月次更新を止めると、降格した瞬間に古い状態から判定が始まる）。**実際に採用する会計モード（`ExportAccountingMode`。`reissue` 判定を含む）の組み立ては [書き出し Saga](export-saga.md) の 1.4／1.5 が正本。** ここで定義するのは月間枠だけを見る `Domain` の純粋関数に限る。
+**`monthlyLimit` を引数で受け取る**（上限は設定定数で変わるため `Domain` の定数にできない。10 章）。**実際に採用する会計モード（`ExportAccountingMode`）の組み立ては [書き出し Saga](export-saga.md) が正本。** ここで定義するのは月間枠だけを見る `Domain` の純粋関数に限る。
 
 ##### 時間の扱い
 
@@ -832,7 +788,7 @@ func evaluateMonthlyQuota(
 ```swift
 func rollPeriod(_ ledger: UsageLedger, now: Date, deviceTimeZone: TimeZone) -> UsageLedger {
     let current = YearMonth(from: now, in: deviceTimeZone)
-    if current > ledger.period {
+    if current != ledger.period {
         return ledger.with(period: current, consumedExportIDs: [])
     } else {
         return ledger
@@ -840,7 +796,7 @@ func rollPeriod(_ ledger: UsageLedger, now: Date, deviceTimeZone: TimeZone) -> U
 }
 ```
 
-**月初にリセットするのは `consumedExportIDs` だけ**（`trialConsumedExportIDs` は月をまたいで保持する。トライアルクレジットに月次の期限は無い）。**`period` は後退させない**（`current > ledger.period` のときだけ更新する）。
+**月初にリセットするのは `consumedExportIDs` だけ**（`trialConsumedExportIDs` は月をまたいで保持する。トライアルクレジットに月次の期限は無い）。**`period` は端末の現在の年月と一致しない場合、前進・後退を問わず切り替える**（`current != ledger.period`。ADR 0006）。実際の切り替えと消費の計上は完了操作の単一トランザクションで行う。
 
 ##### 一括処理トライアル
 
@@ -848,9 +804,11 @@ Free および Standard の利用者が Pro の中核である一括処理を一
 
 **回数制ではなくクレジット制とする。**
 
-- **確定した成果物ごとに 1 クレジットを消費する**（素材の同一性は問わない。ADR 0006）。**`reissue`（完了前のやり直し）は追加消費しない**（[書き出し Saga](export-saga.md) の 1.5）
+- **確定した成果物ごとに 1 クレジットを消費する**（素材の同一性は問わない。ADR 0006）。消費は完了操作（単一トランザクション）で行う
 - 使い切るまで有効
 - Pro へ加入済みの場合は消費しない
+
+**完了前のやり直しは、まだ何も消費していないため免除・返還という概念自体が存在しない**（ADR 0006）。出力ファイルと確認用の `OutputRecord` を削除するだけで、回数の制限は無い。
 
 **残クレジット数は保存せず、台帳から導出する。**
 
@@ -859,7 +817,7 @@ Free および Standard の利用者が Pro の中核である一括処理を一
 let remainingCredits = max(0, policy.trialCreditCount - usageLedger.trialConsumedExportIDs.count)
 ```
 
-**クランプ後の値を使う**（`BatchPolicySnapshot` は `app.db` の平文行であり、読み出し直後に hard max〈5〉と最小値〈0〉へ丸める。6.4）。残数と台帳の両方を保存すると異常終了時に不整合な状態が生じるため導出とし、正を 1 つにする。**消費は書き出しの確定（export-saga 手順 4。単一トランザクション）で計上する**（v1 は直列キュー 1 本〈並列数 1〉のため認可の競合が構造的に起きない。ADR 0005、ADR 0006）。
+**クランプ後の値を使う**（`BatchPolicySnapshot` は `app.db` の平文行であり、読み出し直後に hard max〈5〉と最小値〈0〉へ丸める。6.4）。残数と台帳の両方を保存すると異常終了時に不整合な状態が生じるため導出とし、正を 1 つにする。
 
 **トライアルクレジットに期限は設けない**（使い切るまで有効。端末内処理のため繰り返しても限界原価が発生せず、期限を設けるとその境界の説明が要り試用導線として複雑になる）。**トライアルで解放するのは「一括処理という操作方式」だけ**（エフェクト・スタンプの利用範囲は `ResolvedCapabilities` をそのまま参照し、一括処理へ入ったことで能力を書き換えない。追加スタンプまで一時解放すると Standard の価値が曖昧になる）。
 
@@ -1033,7 +991,6 @@ case .oneByOne:
 
 ```swift
 struct BatchPolicySnapshot: Sendable, Equatable {
-    let configVersion: Int64
     let kind: BatchKind            // クランプ先を決める（下記）
     let batchSizeLimit: Int32
     let trialCreditCount: Int32
@@ -1066,7 +1023,7 @@ enum BatchKind: Sendable, Hashable {
 | `batchSizeLimit`（`kind == .trial`） | `trialBatchSizeLimit` の hard max **5** / 最小 1 |
 | `trialCreditCount` | hard max **5** / 最小 0 |
 | `concurrencyLimit` | `batchConcurrencyLimit` の hard max **1**（v1）/ 最小 1 |
-| `configVersion` / `kind` | **クランプの対象外**（記録用の値であり上限を持たない） |
+| `kind` | **クランプの対象外**（記録用の値であり上限を持たない） |
 
 | 規則 | 内容 |
 | --- | --- |
@@ -1111,7 +1068,6 @@ struct ProjectID:   Sendable, Hashable { let rawValue: UUID }
 struct BatchID:     Sendable, Hashable { let rawValue: UUID }
 struct ExportID:    Sendable, Hashable { let rawValue: UUID }
 struct RegionID:    Sendable, Hashable { let rawValue: UUID }
-struct SourceID:    Sendable, Hashable { let rawValue: UUID }   // WorkingSourceRecord の識別子（画像処理）
 struct FaceTrackID: Sendable, Hashable { let rawValue: UUID }
 
 /// 認可用。出力へ影響する全設定の正準ハッシュ（正準スキーマ 5.2）
@@ -1139,6 +1095,17 @@ struct StampAssetHash: Sendable, Hashable { let bytes: Data }        // 32 バ�
 起動時に新しいバージョンがあれば App Store へ誘導する。**判定は純粋関数に閉じる**（提示条件・審査への配慮は [運用](operations.md) が正本）。**更新誘導は常に任意の推奨とする**（ADR 0005）。
 
 ```swift
+/// メジャー・マイナー・パッチの数値の組で比較する（文字列比較はしない）
+struct AppVersion: Sendable, Hashable, Comparable {
+    let major: Int32
+    let minor: Int32
+    let patch: Int32
+
+    static func < (lhs: AppVersion, rhs: AppVersion) -> Bool {
+        (lhs.major, lhs.minor, lhs.patch) < (rhs.major, rhs.minor, rhs.patch)
+    }
+}
+
 enum UpdateDecision: Sendable, Equatable {
     case none
     case recommended(AppVersion)   // 任意。スキップできる
@@ -1158,7 +1125,7 @@ func evaluateUpdate(
 3. `usageNow - lastPromptedAt < 24h` なら `.none`（1 日 1 回まで）
 4. それ以外は **`.recommended`**
 
-**取得元は iTunes Lookup API**（`https://itunes.apple.com/lookup?id=...`）。**取得失敗時は `.none`**（App Store 側の一時障害を誘導表示の抑制側へ倒す）。`AppVersion` は数値の組で比較する（[正準スキーマ](canonical-schema.md)）。**文字列比較は使わない**（`"1.10.0" < "1.9.0"` が文字列としては真になり新しいバージョンを古いと判定する）。
+**取得元は iTunes Lookup API**（`https://itunes.apple.com/lookup?id=...`）。**取得失敗時は `.none`**（App Store 側の一時障害を誘導表示の抑制側へ倒す）。**文字列比較は使わない**（`"1.10.0" < "1.9.0"` が文字列としては真になり新しいバージョンを古いと判定する）。
 
 判定は起動時復旧の完了後に行う（[書き出し Saga](export-saga.md) が正本）。`skippedVersion` と `lastPromptedAt` は `UserDefaults` に置く。
 
@@ -1174,7 +1141,7 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 
 | テーブル | 備考 |
 | --- | --- |
-| `Project` | 仕様 19.1。`projectRevision`（下記）、`detectionRevision`、`detectionPixelSize`、再編集用の `ProjectSourceLocator` を持つ（[画像処理](image-pipeline.md)）。**ここにのみ平文の `localIdentifier` が存在する** |
+| `Project` | 仕様 19.1。`projectRevision`（下記）、`detectionRevision`、`detectionPixelSize`、再編集用の `ProjectSourceLocator` を持つ（[画像処理](image-pipeline.md)）。**ここにのみ平文の `localIdentifier` が存在する**。素材の撮影日時・取得経路（`OriginalCaptureMetadata` / `SourceRepresentation` / `libraryCreationDate`。7.5）も直接持つ |
 | `FaceTrack` | 仕様 19.2。手動領域は `createdManually = true`。**検出品質の列（`confidence` / `yawDegrees` / `pitchDegrees` / `rollDegrees` / `isSmallFace`）も持つ**（6.1 の再導出に要る） |
 | `EffectSetting` | 仕様 19.4 |
 | `ExportSetting` | 仕様 19.5 |
@@ -1186,8 +1153,8 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `BatchPreset` | 一括設定プリセット |
 | `DeliveryAttempt` | 写真ライブラリ保存の試行中を表す。`previousState` を持つ（[書き出し Saga](export-saga.md) が正本） |
 | `UnknownLibrarySave` | 保存結果が不明のまま `delivered` を維持したことの記録 |
-| `ExportJob` | 書き出しの実行中状態（`running` / `completed`。[書き出し Saga](export-saga.md) が正本） |
-| `OutputRecord` | 写真ごとの出力状態。`exportID` で `ExportJob` と対応づける |
+| `ExportJob` | 書き出しの進行中を表す（状態列を持たず、行の存在そのものが進行中を示す。完了操作または破棄で削除する。[書き出し Saga](export-saga.md) が正本） |
+| `OutputRecord` | 写真ごとの出力状態。`exportID` で書き出しと対応づける |
 | `ExportQueueItem` | 一括処理のキュー状態（6.4） |
 | `WorkingSourceRecord` | 処理用にアプリ領域へ複製した元素材（[画像処理](image-pipeline.md)） |
 | `PendingFileDeletion` | 参照 0 になった実体の削除候補（7.5） |
@@ -1234,7 +1201,7 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | --- | --- |
 | `ExportJob.exportID` | **PRIMARY KEY** |
 | `OutputRecord.exportID` | **PRIMARY KEY** |
-| `OutputRecord.projectID` | **部分 UNIQUE**（`state != discarded` の行のみ。非終端の出力は 1 プロジェクトにつき 1 件。7.5） |
+| `OutputRecord.projectID` | **部分 UNIQUE**（`settledAt IS NULL` の行のみ。未確定の出力は 1 プロジェクトにつき 1 件。7.5） |
 | `WorkingSourceRecord.projectID` | **PRIMARY KEY** |
 | `PendingFileDeletion(kind, fileID)` | **UNIQUE** |
 | `ProjectStampAsset(projectID, assetHash)` | **UNIQUE** |
@@ -1266,7 +1233,7 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `UnknownLibrarySave.exportID` | `OutputRecord` | CASCADE |
 | `DeliveryAttempt.exportID` | `OutputRecord` | CASCADE |
 
-**`batchID` を `SET NULL` にするのはバッチ履歴を消しても出力と書き出し記録を残すため**（バッチは集約単位であり個々の出力の存在条件ではない）。宣言していない参照は `PRAGMA foreign_key_check` で検出できないため、上の表が外部キーの全体であり新しい参照は必ずこの表へ加える。**`RESTRICT` は削除可否の判定（7.5）を DB 側でも二重に担保する**（アプリ側判定を通り抜けた削除は制約違反として失敗する）。**「1 プロジェクトにつき非終端の出力は 1 件」は `OutputRecord.projectID` の部分 UNIQUE インデックス（`WHERE state != 'discarded'`）で表現できる**（SQLite の部分インデックスを使う。開始ゲートを別途持たない。[書き出し Saga](export-saga.md) の 3 章）。中断・失敗は `ExportJob` 行を削除して終わるため再試行という概念は無く、次の開始は常に新しい `exportID` を発行する（同 4 章）。
+**`batchID` を `SET NULL` にするのはバッチ履歴を消しても出力と書き出し記録を残すため**（バッチは集約単位であり個々の出力の存在条件ではない）。宣言していない参照は `PRAGMA foreign_key_check` で検出できないため、上の表が外部キーの全体であり新しい参照は必ずこの表へ加える。**`RESTRICT` は削除可否の判定（7.5）を DB 側でも二重に担保する**（アプリ側判定を通り抜けた削除は制約違反として失敗する）。**「未確定の出力は 1 プロジェクトにつき 1 件」は `OutputRecord.projectID` の部分 UNIQUE インデックス（`WHERE settledAt IS NULL`）で表現できる**（SQLite の部分インデックスを使う。開始ゲートを別途持たない）。中断・失敗は `ExportJob` 行を削除して終わるため再試行という概念は無く、次の開始は常に新しい `exportID` を発行する（[書き出し Saga](export-saga.md) が正本）。
 
 ##### 接続と journal
 
@@ -1290,15 +1257,7 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 
 ##### 耐久性の水準
 
-**保証の強さを段階で書き分ける**（SQLite の `synchronous = EXTRA` は rollback journal に対する追加の同期であり、ハードウェアを含むあらゆる条件での絶対的な電源断保証ではない。Apple の `F_FULLFSYNC` も同様）。
-
-| 障害 | 保証の水準 | 根拠 |
-| --- | --- | --- |
-| **プロセス強制終了**（`_exit` / SIGKILL / jetsam） | **保証する** | 単一トランザクションの確定境界（手順 4）と起動時復旧 |
-| **OS クラッシュ・電源断** | **best effort の耐久性** | `synchronous = EXTRA`、ファイルと親ディレクトリの同期 |
-| 復帰後の整合 | **回復する** | 起動時復旧（`running` の一律削除・孤児ファイル GC。[書き出し Saga](export-saga.md) の 5 章） |
-
-要点は「書き込みが必ず届く」ことではなく「どこで切れても整合を回復できる」こと（会計は手順 4 でしか確定しないため、それより前で失われた書き出しは会計への影響なくやり直せる）。v1 では出力ファイルについてもファイルと親ディレクトリを同期する（台帳と出力の整合が崩れると不変条件が壊れるため DB と同じ水準に揃える）。**同期方式（`F_FULLFSYNC` か通常の `fsync` か）は実機計測後に決める**（12 章）。
+**SQLite の標準設定（`synchronous = EXTRA`）にそのまま任せる。** 個別の耐久性保証や電源断対策は追加しない。整合の回復は起動時復旧が担う（未確定の `ExportJob` / `OutputRecord` の削除と孤児ファイルの GC。[書き出し Saga](export-saga.md) が正本）。会計は完了操作でしか確定しないため、それより前に中断した書き出しは会計への影響なくやり直せる。
 
 ### 7.2 台帳・購入状態の保存
 
@@ -1357,7 +1316,7 @@ struct PendingFileDeletion: Sendable {
 | --- | --- |
 | 1 | **最終ファイルと同じディレクトリ内に**一時ファイルを作る |
 | 2 | **書き込み前に** `isExcludedFromBackup` と `FileProtectionType` を設定し、読み返して確認する |
-| 3 | データを書き、ファイルと親ディレクトリを同期する |
+| 3 | データを書く |
 | 4 | atomic rename / `replaceItemAt` で最終 URL へ移す |
 | 5 | **最終 URL へ属性を再設定する** |
 | 6 | 属性を**読み返して検証する** |
@@ -1457,7 +1416,7 @@ tmp/raster/
 | 履歴サムネイル（`thumbnails/`） | `.complete` |
 | **`db/` の `app.db` と journal** | **`.complete`** |
 
-**アプリ全体の既定を `.complete` にする**（設定漏れが「保護が弱い」方向へ倒れないため。rollback journal と一時 DB ファイルは自動生成されるためディレクトリの既定保護クラスで覆う）。**DB を下げる理由はない**（起動時復旧の最初の手順は「保護データが利用可能になるまで待つ」でありその後に DB を開く。[書き出し Saga](export-saga.md) の起動時復旧。v1 は `BGProcessingTask` を使わずフォアグラウンド継続前提のためロック中に DB を開く必要が無い）。`app.db` には写真ライブラリの平文 `localIdentifier`・顔領域・編集内容が入り、これらを `.completeUntilFirstUserAuthentication` に置く理由は実行モデル上残っていない。**ロック中の復旧を要件にする場合は手順 −4 より前に DB を開く別設計が必要**（両立不可。実行時状態のみ別 DB へ切り出す案もあるが v1 では採らない）。
+**アプリ全体の既定を `.complete` にする**（設定漏れが「保護が弱い」方向へ倒れないため。rollback journal と一時 DB ファイルは自動生成されるためディレクトリの既定保護クラスで覆う）。**DB を下げる理由はない**（起動時復旧はまず「保護データが利用可能になるまで待つ」、その後に DB を開く。[書き出し Saga](export-saga.md) の起動時復旧。v1 は `BGProcessingTask` を使わずフォアグラウンド継続前提のためロック中に DB を開く必要が無い）。`app.db` には写真ライブラリの平文 `localIdentifier`・顔領域・編集内容が入り、これらを `.completeUntilFirstUserAuthentication` に置く理由は実行モデル上残っていない。**ロック中の復旧を要件にする場合は、起動時復旧より前に DB を開く別設計が必要**（両立不可。実行時状態のみ別 DB へ切り出す案もあるが v1 では採らない）。
 
 ##### ロック中のアクセス
 
@@ -1556,17 +1515,17 @@ protocol ProtectedDataAvailability: Sendable {
 | 単体処理 | 直近 1 プロジェクト |
 | 一括処理 | 直近 1 バッチと、そのバッチに属する全プロジェクト（最大 50 件） |
 
-一括処理で「直近 1 プロジェクト」だけを保持すると、バッチ内の残り 49 枚が失われ再編集が成立しない。保持の目的は無料枠の再書き出しだけではなく編集のやり直し全般であるため**プランを問わず同一の扱いとする**（期間は仕様 14.3 の無償再書き出しの窓と一致させる）。
+一括処理で「直近 1 プロジェクト」だけを保持すると、バッチ内の残り 49 枚が失われ再編集が成立しない。保持の目的は編集のやり直し全般であるため**プランを問わず同一の扱いとする**（期間は `WorkingSourceRecord` の保持期間と一致させる。処理用ファイル自体が 24 時間で消えるため）。
 
 ##### 未受け渡し出力の状態
 
-消費は出力生成の完了で確定するため（[書き出し Saga](export-saga.md) が正本）、生成直後の失敗や異常終了で利用者が成果物を失う経路は作らない。ただし保持は無期限ではなく **24 時間で削除する。**
+**消費は完了操作（単一トランザクション）で確定するため、生成そのものは何も消費しない**（ADR 0006）。**完了前（`settledAt == nil`）の出力は永続保護しない。** アプリの再起動やフローからの離脱で破棄する（消費していないため損失は操作の手間だけ。起動時復旧が未確定の `OutputRecord` を削除する）。**24 時間の保持規則は完了済みで未受け渡しの出力にのみ適用する。**
 
 ```swift
-enum OutputState: Sendable, Equatable { case generated, deliveryUnknown, delivered, discarded }
+enum OutputState: Sendable, Equatable { case generated, deliveryUnknown, delivered }
 
 extension OutputRecord {
-    /// 受け取れていない可能性がある。判定はすべてこの述語を使う
+    /// 受け取れていない可能性がある。判定はすべてこの述語を使う（settledAt != nil が前提）
     var isUndelivered: Bool {
         state == .generated || state == .deliveryUnknown
     }
@@ -1575,14 +1534,13 @@ extension OutputRecord {
 
 | 状態 | DB 列値 | 意味 | 保持する期間 |
 | --- | --- | --- | --- |
-| `generated` | 1 | 生成済み。受け渡しは未成功 | 明示的に破棄するまで、または 24 時間経過するまで |
-| `deliveryUnknown` | 2 | 写真ライブラリ保存の結果が不明（[書き出し Saga](export-saga.md) の 7.0） | 同上 |
+| `generated` | 1 | 生成済み。受け渡しは未成功 | `settledAt == nil` の間は保護しない。完了後は明示的に破棄するまで、または 24 時間経過するまで |
+| `deliveryUnknown` | 2 | 写真ライブラリ保存の結果が不明（[書き出し Saga](export-saga.md)） | 完了済みの出力のみ到達する。同上 |
 | `delivered` | 3 | 保存または共有が 1 回以上成功した | **完了画面を離れるまで** |
-| `discarded` | 4 | 生成後の破棄、または実体喪失（下記） | **実体ファイルは直ちに削除する。行は保持し、次回 finalize での置換削除または履歴削除の通常サイクルで消える**（[書き出し Saga](export-saga.md) の 1.5・6 章。ADR 0006） |
 
-**`OutputRecord` は `settledAt: Date?` を持つ**（生成直後は `nil`。出力確認画面での明示的な完了操作で確定する。[書き出し Saga](export-saga.md) の 7 章が正本）。**`discarded` は物理削除ではなく状態遷移とする**（`settledAt == nil` の `discarded` 行は、同一 `Project` の次回書き出しが追加消費なしの `reissue` になるかどうかの判定根拠になる。行を消すと判定できない。ADR 0006）。**`OutputRecord.projectID` の一意性は非終端（`discarded` 以外）の行に限る**（部分 UNIQUE。7.1）。
+**`OutputRecord` は `settledAt: Date?` を持つ**（生成直後は `nil`。出力確認画面での明示的な完了操作で、消費・`ExportRecord` 作成などと同一トランザクションで確定する。[書き出し Saga](export-saga.md) が正本）。**保存・共有および 24 時間保持の対象は `settledAt != nil` の行に限る**（未確定の出力は受け渡しへ進めない。8 章）。**`OutputRecord.projectID` の一意性は未確定（`settledAt IS NULL`）の行に限る**（部分 UNIQUE。7.1）。
 
-**列値を固定するのは `case` の宣言順に依存させないため**（`OutputState` は署名対象外だが DB 列としてスキーマ移行をまたぐ）。**`delivered` は後退させない**（受け渡しは複数回・任意順序で行え、一度成立した事実を `deliveryUnknown` で打ち消すと共有成功済みの出力が未受け渡しへ戻ってしまう。[書き出し Saga](export-saga.md) の 7.0）。**`isUndelivered` を次のすべてで使う**（個別に `state == .generated` と書くと `deliveryUnknown` だけが残った状態で判定を素通りする）。
+**列値を固定するのは `case` の宣言順に依存させないため**（`OutputState` は署名対象外だが DB 列としてスキーマ移行をまたぐ）。**`delivered` は後退させない**（受け渡しは複数回・任意順序で行え、一度成立した事実を `deliveryUnknown` で打ち消すと共有成功済みの出力が未受け渡しへ戻ってしまう）。**`isUndelivered` を次のすべてで使う**（個別に `state == .generated` と書くと `deliveryUnknown` だけが残った状態で判定を素通りする）。
 
 - 完了画面の離脱確認と未保存件数の集計
 - 起動時復旧の案内
@@ -1590,25 +1548,25 @@ extension OutputRecord {
 - 新しい加工の開始禁止
 - 24 時間の保持
 
-**保存や共有が 1 回成功しても、その場では削除しない**（何度実行しても追加消費しないため、1 回目でファイルを消すと共有後に写真ライブラリへも保存する操作が成立しなくなる）。**状態は写真ごとの出力レコードに保持し、バッチ単位では持たない**（一括処理は部分成功が起こり、32 枚中 20 枚保存・12 枚容量不足という状態は 1 つの状態では表現できない。バッチの状態は各 `OutputRecord` から集計導出する）。一括保存が部分的に成功した場合、既に `delivered` の写真は再保存せず `isUndelivered` の写真だけを再試行する（`deliveryUnknown` は自動再試行の対象外。[書き出し Saga](export-saga.md) の 7.0）。
+**保存や共有が 1 回成功しても、その場では削除しない**（何度実行しても追加消費しないため、1 回目でファイルを消すと共有後に写真ライブラリへも保存する操作が成立しなくなる）。**状態は写真ごとの出力レコードに保持し、バッチ単位では持たない**（一括処理は部分成功が起こり、32 枚中 20 枚保存・12 枚容量不足という状態は 1 つの状態では表現できない。バッチの状態は各 `OutputRecord` から集計導出する）。一括保存が部分的に成功した場合、既に `delivered` の写真は再保存せず `isUndelivered` の写真だけを再試行する（`deliveryUnknown` は自動再試行の対象外）。
 
-**`isUndelivered` の出力が 1 枚以上残った状態で完了画面を離れようとした場合、確認を表示する**（判定はその残数で行い文言にも枚数を含める）。
+**完了済みで未受け渡しの出力が 1 枚以上残った状態で完了画面を離れようとした場合、確認を表示する**（判定はその残数で行い文言にも枚数を含める）。**完了前（`settledAt == nil`）の出力は確認なしで破棄する**（何も消費していないため。ADR 0006）。
 
-| 履歴の設定 | 提示する選択肢 |
+| 履歴の設定 | 提示する選択肢（完了済み・未受け渡しのみ） |
 | --- | --- |
 | 保存する | あとで保存 / 破棄 / 戻る。あとで保存は履歴に未保存として残り、24 時間以内は再開できる |
 | 保存しない | 破棄 / 戻る |
 
-異常終了後の起動時も、写真ごとの状態で分けます。
+異常終了後の起動時も、出力ごとの状態で分けます。
 
 | 状態 | 起動時の動作 |
 | --- | --- |
-| `generated` / `deliveryUnknown` | **復旧案内の対象に含める**（枚数は `isUndelivered` の数。バッチ総枚数ではない） |
+| `settledAt == nil`（未確定） | **行と実体ファイルを削除する**（消費していないため復旧の必要がない。ADR 0006） |
+| `settledAt != nil` かつ `generated` / `deliveryUnknown` | **復旧案内の対象に含める**（枚数は `isUndelivered` の数。バッチ総枚数ではない） |
 | **`delivered` かつ `UnknownLibrarySave` あり** | **削除しない。** 「写真ライブラリへの保存結果が不明」として提示する |
 | `delivered`（注記なし） | 一時ファイルを削除し、**復旧案内の対象に含めない** |
-| `discarded` | 残存ファイルを削除する |
 
-`DeliveryAttempt` が残っている出力は、この判定の前に `previousState` に従って解決する（[書き出し Saga](export-saga.md) の 7.0。`previousState` が `delivered` なら `delivered` を維持し `UnknownLibrarySave` を記録する）。**注記のある `delivered` 出力は削除しない**（削除すると再試行ファイルが消え `OutputRecord` の CASCADE で注記も消え、追加した仕組みが 1 回の起動で無効になる）。**`UnknownLibrarySave` は別テーブル**（`OutputRecord` にフラグを持たせず集約型で結合する）。
+`DeliveryAttempt` が残っている出力は、この判定の前に `previousState` に従って解決する（[書き出し Saga](export-saga.md)。`previousState` が `delivered` なら `delivered` を維持し `UnknownLibrarySave` を記録する）。**注記のある `delivered` 出力は削除しない**（削除すると再試行ファイルが消え `OutputRecord` の CASCADE で注記も消え、追加した仕組みが 1 回の起動で無効になる）。**`UnknownLibrarySave` は別テーブル**（`OutputRecord` にフラグを持たせず集約型で結合する）。
 
 ```swift
 /// OutputRecord と UnknownLibrarySave を結合した読み取り用の値
@@ -1662,7 +1620,6 @@ enum OverridableProtection: Sendable, Hashable {
     case favorite
     case beingEdited
     case workingSource
-    case reexportWindow
 }
 
 /// 同一 DB トランザクション内で読み取った参照状況
@@ -1671,10 +1628,9 @@ struct DeletionContext: Sendable {
     let isFavorite: Bool
     let isBeingEdited: Bool
     let hasNonTerminalQueueItem: Bool
-    let hasUndeliveredOutputRecord: Bool   // isUndelivered のみ。delivered / discarded は保護しない
+    let hasUndeliveredOutputRecord: Bool   // isUndelivered のみ。delivered は保護しない
     let hasRunningExportJob: Bool
     let hasWorkingSourceRecord: Bool
-    let isWithinReexportWindow: Bool   // 24 時間のやり直し保証
 }
 
 func canDeleteHistoryUnit(
@@ -1693,7 +1649,6 @@ func canDeleteHistoryUnit(
 | **利用者が上書きできる** | お気に入り | 利用者が明示的に保護した履歴が消える |
 | 同上 | 編集中のプロジェクト | 編集画面が参照先を失う |
 | 同上 | `WorkingSourceRecord`（[画像処理](image-pipeline.md)） | 処理用の元素材が消え、キューを復元できない |
-| 同上 | 24 時間のやり直し保証 | やり直しができなくなる |
 
 **絶対保護は 3 つだけ**（いずれも「消すと復旧できない」か「利用者がまだ受け取っていない」ため確認を出しても意味がない）。残りは利用者の明示操作で上書きできる。**契機ごとに扱いを変える**（「閲覧と削除は常に可能」という原則〈6.2〉と自動削除の安全性を両立させるため）。
 
@@ -1710,7 +1665,6 @@ func canDeleteHistoryUnit(
 | お気に入り | 保護した履歴であること |
 | 編集中 | 編集内容が失われること |
 | `WorkingSourceRecord` | 処理用の素材も削除されること |
-| 24 時間のやり直し保証 | **無料のやり直しができなくなり、次回は枠を消費すること** |
 
 **判定と削除は同一トランザクション内で行う**（別にすると判定と削除の間に新しい参照が生まれる。外部キーの `RESTRICT`〈7.1〉が二重防御として働く）。写真ライブラリへ保存済みの加工済み画像は削除されない（設定画面と削除確認の両方に明示する）。
 
@@ -1721,7 +1675,7 @@ func canDeleteHistoryUnit(
 | 順 | 操作 |
 | --- | --- |
 | 1 | `canDeleteHistoryUnit` が真であることを確認する |
-| 2 | **同一 DB トランザクション**で `Project` と関連行（`ExportRecord` / `OutputRecord`〈`discarded` を含む全状態〉/ キュー項目 / `WorkingSourceRecord` / 検出・レビュー結果 / `ProjectStampAsset` / 履歴サムネイル / `ExportedSettingsEntry`）を削除し、実体を `PendingFileDeletion` へ積む |
+| 2 | **同一 DB トランザクション**で `Project` と関連行（`ExportRecord` / `OutputRecord` / キュー項目 / `WorkingSourceRecord` / 検出・レビュー結果 / `ProjectStampAsset` / 履歴サムネイル / `ExportedSettingsEntry`）を削除し、実体を `PendingFileDeletion` へ積む |
 | 3 | `PendingFileDeletion` に従って実体を削除する |
 
 中断すればトランザクションはロールバックされ削除は成立しない（他の `app.db` 更新と同じ）。手順 2 と 3 の間で中断した場合は、`PendingFileDeletion` の起動時 GC が実体を回収する。
@@ -1778,24 +1732,17 @@ enum AbsoluteProtection: Sendable, Hashable {
 
 ##### 出力の削除経路
 
-**性質の異なる 2 つの経路がある**（discard 遷移は `settledAt` を根拠に残す必要があり、物理削除とは異なる。ADR 0006）。
-
-| 経路 | 対象 | `OutputRecord` への操作 |
-| --- | --- | --- |
-| **discard 遷移** | 利用者による破棄、`isUndelivered` の 24 時間経過、壊れた出力の復元不能（[書き出し Saga](export-saga.md) の 6 章・7 章） | `discarded` へ**更新する**（`settledAt` は変更せず保持する） |
-| **物理削除** | `delivered` での完了画面離脱、`Project` / `Batch` の削除、次回 finalize による置換（[書き出し Saga](export-saga.md) の 3 章） | 行を**削除する** |
-
-いずれの経路も「ファイルを消す」だけでは孤児が残るため、DB 操作とファイル削除を同じ手順に統一する。
+**「ファイルを消す」だけでは `OutputRecord` が孤児になるため、すべての出力削除を単一の経路へ統一する。**
 
 | 順 | 操作 |
 | --- | --- |
-| 1 | DB トランザクションで `OutputRecord` を更新（discard 遷移）または削除（物理削除）する |
+| 1 | DB トランザクションで `OutputRecord` を削除する |
 | 2 | **同じトランザクション内で** `PendingFileDeletion` を追加する |
 | 3 | DB のコミット後にファイルを削除する |
 | 4 | 成功したら `PendingFileDeletion` の行を削除する |
 | 5 | 失敗したら起動時 GC で再試行する |
 
-**すべての入口で同じ順序を使う。** **失っても復旧できないほうを避ける**（ファイルを先に消して DB が失敗するとレコードだけが残り実体を指せない。DB を先に更新すれば残るのは孤児ファイルだけで GC が回収する）。**discard 遷移で行を消さない**（`settledAt == nil` の `discarded` 行は次回書き出しの `reissue` 判定根拠になる。行そのものは次回 finalize での置換削除、または `Project` / `Batch` 削除に伴う通常の履歴削除サイクルで消える）。
+対象は完了前（`settledAt == nil`）の破棄・起動時復旧、`delivered` での完了画面離脱、`isUndelivered`（完了済み）の 24 時間経過、壊れた出力の復元不能、`Project` / `Batch` の削除のすべて（**入口ごとに別の順序を実装しない**）。**失っても復旧できないほうを避ける**（ファイルを先に消して DB が失敗するとレコードだけが残り実体を指せない。DB を先に更新すれば残るのは孤児ファイルだけで GC が回収する）。
 
 ##### `ExportRecord` と履歴の削除
 
@@ -1966,6 +1913,8 @@ struct OutputMetadata: Sendable, Equatable {
 
 **`utcMillis` は `offsetTimeOriginal` がある場合にだけ入り、無い場合は `nil`（端末のタイムゾーンで補完しない。正準スキーマ 5.1.1）。** ローカル表記をそのまま持つのは出力 EXIF へ書き戻すため（UTC 変換後の再構築は往復誤差が出る）。**`representation` が `transcoded`（取得経路が元データを返さなかった）でも取得を拒否しない**（取得できた表現からそのまま処理する。9.1 の診断区分値としてのみ記録する）。
 
+**`Project` は `capture: OriginalCaptureMetadata?` / `sourceRepresentation: SourceRepresentation` / `libraryCreationDate: Date?`（`PHAsset.creationDate` 由来。取得できる場合のみ）を直接フィールドとして持つ**（7.1。素材ごとの中間 snapshot は持たない）。
+
 **`ImageEncoder` はこの型だけを受け取る**（[画像処理](image-pipeline.md)。元のメタデータ辞書を渡せる形だとコピー削除実装が可能になってしまう）。**保存後に読み返し、許可されていない namespace とキーが 1 つも無いことを検査する**（失敗した出力は完成扱いにせず [書き出し Saga](export-saga.md) のファイル検証失敗として扱う）。**カスタムスタンプも同じ方針で再エンコードする**（取り込み時の縮小・変換で元のメタデータを捨てる。実体がアプリ内に残る以上、位置情報を保持する理由が無い）。
 
 **`PHAsset.creationDate` は `Optional`。** 優先順位を定める。
@@ -1988,16 +1937,16 @@ struct OutputMetadata: Sendable, Equatable {
 
 **正本は [書き出し Saga](export-saga.md) です。** 状態遷移、認可、中断時の後始末、起動時復旧の手順をここへ複製しません。書き出しは直列キュー 1 本（v1 は並列数 1）で処理するため、同一素材の並行実行は構造的に起きません（4.2、4.3。ADR 0005）。
 
-**会計・出力の公開・ジョブの完了は単一の DB トランザクション（手順 4）で原子的に確定します**（ADR 0005 により台帳・`OutputRecord` とも `app.db` の平文行になったため。ファイルシステムと DB を跨ぐ補償や永続的なコミットジャーナルは持ちません）。それより前の中断は `ExportJob` 行の削除という一律の後始末で足ります（[書き出し Saga](export-saga.md) の 4 章）。
+**生成（書き出し）は出力ファイルと確認用の `OutputRecord` を作るだけで、枠・クレジットは一切消費しません。** 消費・`settledAt` の確定・`ExportRecord` の作成・確定記録の更新・`WorkingSourceRecord` の削除・書き出しジョブの削除は、出力確認画面での**明示的な完了操作**による単一の DB トランザクションでまとめて行います（ADR 0006）。ファイルシステムと DB を跨ぐ補償や永続的なコミットジャーナルは持ちません。それより前の中断は、完了前の出力を永続保護しない一律の後始末で足ります（[書き出し Saga](export-saga.md)）。
 
 本書の他の章が依存する不変条件だけを示します。
 
 | 不変条件 | 内容 |
 | --- | --- |
-| **確定境界** | 会計の計上と成果物の公開は手順 4（単一トランザクション）ただ 1 点。それ以前は成果物を公開しない |
-| **枠の確定** | 計上とは別に、出力確認画面での明示的な完了操作（`settledAt`）で枠を確定する。完了前の破棄は追加消費なしの `reissue` として次の書き出しへ引き継がれる（ADR 0006） |
-| **未受け渡し出力の保護** | 保存前に消えない。更新誘導より受け渡しを優先する（ADR 0005） |
-| **復旧の開始条件** | 起動時復旧（`running` の一律削除・孤児ファイル GC）を終えるまで新しい書き出しを開始しない |
+| **確定境界** | 会計の計上・枠の確定・成果物の公開はすべて完了操作の単一トランザクションただ 1 点。それ以前は何も消費せず、成果物も公開しない |
+| **完了前の出力** | 永続保護しない。アプリの再起動・フローからの離脱で破棄する（消費していないため損失は操作の手間だけ。ADR 0006） |
+| **未受け渡し出力の保護**（完了済み） | 保存前に消えない。更新誘導より受け渡しを優先する（ADR 0005） |
+| **復旧の開始条件** | 起動時復旧（未確定の `ExportJob` / `OutputRecord` の一律削除・孤児ファイル GC）を終えるまで新しい書き出しを開始しない |
 
 `ExportJob` / `ExportAuthorization` / `ExportAccountingMode` / `OutputRecord` の型定義も [書き出し Saga](export-saga.md) が正本です。
 
@@ -2005,144 +1954,11 @@ struct OutputMetadata: Sendable, Equatable {
 
 ## 9. セキュリティとプライバシー
 
-### 9.1 ログ・分析・診断
+### 9.1 ログ・診断
 
-**イベント名とフィールド名を、どちらも閉じた集合にします。**
-
-```swift
-struct ExportCompletedFields: Sendable {
-    let faceCountBucket: FaceCountBucket
-    let resolutionBucket: ResolutionBucket
-    let planKind: PlanKind
-    let accountingMode: ExportAccountingMode
-}
-
-struct ExportFailedFields: Sendable {
-    let errorCode: AppErrorCode
-    let retryCount: Int
-    let sourceRepresentation: SourceRepresentation
-}
-
-enum AnalyticsEvent: Sendable {
-    case appLaunched(LaunchFields)
-    case photoSelected(PhotoSelectedFields)
-    case detectionCompleted(DetectionFields)
-    case reviewCompleted(ReviewFields)
-    case exportStarted(ExportStartedFields)
-    case exportCompleted(ExportCompletedFields)
-    case exportFailed(ExportFailedFields)
-    case deliveryCompleted(DeliveryFields)
-    case batchStarted(BatchFields)
-    case batchCompleted(BatchFields)
-    case paywallShown(PaywallFields)
-    case purchaseCompleted(PurchaseFields)
-    case recoveryPerformed(RecoveryFields)
-}
-
-func log(_ event: AnalyticsEvent)   // log(String) も log(code:fields:) も存在しない
-```
-
-列挙が閉じていなければ実装時に文字列イベントが混ざるため、上記が v1 の全 `case` であり追加はこの列挙の変更として行う。フィールド型も同じ理由で閉じ、**`String` と `Date` を 1 つも持たない。**
+**端末外への送信先は Sentry のみとする**（ADR 0005）。送信するのは**クラッシュと未分類例外（`UNKNOWN_ERROR`）のみ**（Sentry 無料枠超過を防ぎプライバシー面でも正しい。スパイク保護とサンプリングを有効化する）。**独立した分析イベントの送信基盤は持たない**（ADR 0005）。既知のエラーは即座には送らず、**パンくず（breadcrumb）として記録し、後続のクラッシュに付随した場合にのみ送信する。**
 
 ```swift
-struct LaunchFields: Sendable {
-    let planKind: PlanKind
-    let recoveryPerformed: Bool
-    let coldStart: Bool
-}
-
-struct PhotoSelectedFields: Sendable {
-    let sourceRepresentation: SourceRepresentation
-    let resolutionBucket: ResolutionBucket
-    let hasProviderIdentifier: Bool
-    let isBatch: Bool
-}
-
-struct DetectionFields: Sendable {
-    let faceCountBucket: FaceCountBucket
-    let resolutionBucket: ResolutionBucket
-    let issueReasons: Set<ReviewReason>
-    let isRedetection: Bool
-}
-
-struct ReviewFields: Sendable {
-    let faceCountBucket: FaceCountBucket
-    let issueReasons: Set<ReviewReason>
-    let usedBulkResolution: Bool
-}
-
-struct ExportStartedFields: Sendable {
-    let accountingMode: ExportAccountingMode
-    let planKind: PlanKind
-    let isBatch: Bool
-}
-
-struct DeliveryFields: Sendable {
-    let planKind: PlanKind
-    let viaPhotoLibrary: Bool        // false なら OS 共有
-    let wasRetry: Bool
-}
-
-struct BatchFields: Sendable {
-    let sizeBucket: BatchSizeBucket
-    let planKind: PlanKind
-    let failureCountBucket: FaceCountBucket   // 件数区分を共用する
-}
-
-enum BatchSizeBucket: Int32, Sendable, Hashable {
-    case upTo5 = 0, upTo10 = 1, upTo25 = 2, upTo50 = 3
-}
-
-struct PaywallFields: Sendable {
-    let reason: UpgradeReason        // 商品判断の分類
-    let planKind: PlanKind
-}
-
-struct PurchaseFields: Sendable {
-    let purchasedPlan: PurchasedPlan   // 購入した等級。Plan をそのまま送らない
-    let isRestore: Bool
-}
-
-/// 購入イベント専用の区分値。有料 2 種のみで、free を表現できない
-enum PurchasedPlan: Int32, Sendable, Hashable {
-    case standard = 0
-    case pro = 1
-}
-
-struct RecoveryFields: Sendable {
-    let jobState: ExportJobState?
-    let outcome: RecoveryOutcome
-}
-
-enum RecoveryOutcome: Int32, Sendable, Hashable {
-    case completed = 0, rolledBack = 1, blocked = 2, noop = 3
-}
-```
-
-**`UpgradeReason` は [商品判断](product-decisions.md) の分類をそのまま使う**（分析専用の別分類だと Paywall の表示理由と集計が食い違う）。
-
-区分値と誤り分類。**いずれも `Int32` の wire 値を固定する。**
-
-```swift
-enum FaceCountBucket: Int32, Sendable, Hashable {
-    case zero = 0, one = 1, twoToThree = 2, fourToTen = 3, elevenOrMore = 4
-}
-
-enum ResolutionBucket: Int32, Sendable, Hashable {
-    case upTo2MP = 0, upTo8MP = 1, upTo16MP = 2, upTo32MP = 3, above32MP = 4
-}
-
-/// 課金区分。Plan と status を潰した分析用の値。Plan をそのまま送らない
-enum PlanKind: Int32, Sendable, Hashable {
-    case free = 0, standardActive = 1, standardPending = 2
-    case sandbox = 6
-    case proActive = 3, proPending = 4, expired = 5
-}
-
-enum OsKind: Int32, Sendable, Hashable {
-    case ios = 0
-}
-
 /// 仕様 26.1 の誤り分類。自由文字列を使わない
 enum AppErrorCode: Int32, Sendable, Hashable {
     case unknown = 0
@@ -2169,18 +1985,9 @@ enum AppErrorCode: Int32, Sendable, Hashable {
 
 **`AppErrorCode` を `Domain` に置く**（`ExportQueueFailure` と診断の両方が使うため一方の層に置くと依存が逆流する）。**この列挙が全体。値の欠番はそのまま維持し詰め直さない**（将来の追加に備える。ADR 0005）。
 
-| 要素 | 表現 |
-| --- | --- |
-| イベント名 | **`enum` の `case`。** 文字列ではない |
-| フィールド名 | **`struct` のプロパティ名。** 辞書のキーではない |
-| フィールド値 | 列挙値・区分値・数値のみ |
-| 送信時の文字列化 | **アダプタ層で `case` から固定文字列へ写す。** 呼び出し側は文字列に触れない |
-
-**値だけを制約しても不十分**（イベント名を `String`、フィールドを `[String: 値]` の辞書にすると、機密情報の置き場所が値からイベント名や辞書キーへ移るだけ。モジュール境界で自由な辞書を受け取らない。1 か所でも通せばそこが全制約の抜け道になる）。これにより仕様 22.5 が禁じるファイル名・パス・顔座標・EXIF・ユーザー入力文字列が型として渡せなくなる（6.5 のドメイン識別子と `ProjectSourceLocator` も `CustomStringConvertible` に適合させず文字列補間としても入らない）。顔数や解像度は仕様 22.3 の粗い区分値としてのみフィールドになる。新しいイベント追加は `case` 追加と `struct` 定義を伴い、**この手間が任意文字列を追加しにくくする仕組みそのもの。**
-
 ##### エラー型と握りつぶしの禁止
 
-`AppErrorCode`（上記の 24 case）を持つ `AppError` を定義し、各要素は**再試行可否と診断フィールド**を持つ（仕様 26.2 の再試行可否は型の上で表現し実行時判断に委ねない）。
+`AppErrorCode` を持つ `AppError` を定義し、各要素は**再試行可否と診断フィールド**を持つ（仕様 26.2 の再試行可否は型の上で表現し実行時判断に委ねない）。
 
 ```swift
 struct AppError: Error, Sendable, Equatable {
@@ -2190,11 +1997,9 @@ struct AppError: Error, Sendable, Equatable {
 }
 ```
 
-**利用者向けメッセージは `AppError` が持たない**（文言は `App` 層が `code` から解決する。`Domain` に文言を持たせるとローカライズ・文言変更のたびにドメイン層が変わる）。すべての `catch` 節で `AppError` へ変換のうえ `log` を通すことを規約とし、`try?` による握りつぶしは lint で禁止する（`do / catch` または `Result` で明示的に扱う）。
+**利用者向けメッセージは `AppError` が持たない**（文言は `App` 層が `code` から解決する。`Domain` に文言を持たせるとローカライズ・文言変更のたびにドメイン層が変わる）。すべての `catch` 節で `AppError` へ変換し `CrashReporter.addBreadcrumb` を通すことを規約とし、`try?` による握りつぶしは lint で禁止する（`do / catch` または `Result` で明示的に扱う）。
 
 ##### クラッシュ解析
-
-**v1 は端末外への送信先を Sentry のみとする**（ADR 0005）。Sentry へ送信するのは**クラッシュと未分類例外（`UNKNOWN_ERROR`）のみ**（想定内のエラーは Sentry へ送らず分析イベントの区分値として計測する。Sentry 無料枠超過を防ぎプライバシー面でも正しい。スパイク保護とサンプリングを有効化する）。Sentry Cocoa SDK は `Domain` が定義する `CrashReporter` プロトコルの背後に配置し送信前フィルタをこの実装へ集約する。
 
 ```swift
 // Domain — クラッシュ報告。送信前フィルタは実装側の責務
@@ -2205,11 +2010,9 @@ protocol CrashReporter: Sendable {
     /// 利用者が診断送信の可否を変更した
     func setEnabled(_ enabled: Bool)
 
-    /// 復旧エラーなど、クラッシュを伴わない異常
-    func recordHandledError(_ code: AppErrorCode, context: CrashContext)
-
-    /// パンくず。自由文字列を受け取らない
-    func addBreadcrumb(_ event: AnalyticsEvent)
+    /// 既知エラーの発生をパンくずとして記録する。自由文字列を受け取らない。
+    /// 送信されるのは後続でクラッシュが発生した場合のみ
+    func addBreadcrumb(_ code: AppErrorCode)
 }
 
 /// クラッシュ報告に添える文脈。識別子と自由文字列を持たない
@@ -2220,9 +2023,7 @@ struct CrashContext: Sendable, Equatable {
 }
 ```
 
-**`CrashContext` に `ProjectID` などを入れない**（識別子をログ経路へ渡せない規約を型で守る）。
-
-**型付き分析イベントによる制約が効くのはアプリ自身が書くログだけ**（Sentry は `Logger` を通らず、例外メッセージ・スタックトレース中のファイルパス・breadcrumbs・HTTP リクエスト URL とヘッダ・UI 階層やセッション記録・端末情報を独自に収集する）。`CrashReporter` の実装契約として制約を明記する。
+**`CrashContext` に `ProjectID` などを入れない**（識別子をログ経路へ渡せない規約を型で守る）。Sentry Cocoa SDK は `Domain` が定義するこのプロトコルの背後に配置し、送信前フィルタをこの実装へ集約する。**Sentry は `Logger` を通らず、例外メッセージ・スタックトレース中のファイルパス・breadcrumbs・HTTP リクエスト URL とヘッダ・UI 階層やセッション記録・端末情報を独自に収集する**ため、実装契約として制約を明記する。
 
 | 制約 | 内容 |
 | --- | --- |
@@ -2232,20 +2033,9 @@ struct CrashContext: Sendable, Equatable {
 | 利用者入力 | カスタムスタンプ名などの入力値を送らない |
 | 添付 | 画像、添付ファイル、画面キャプチャを**送らない** |
 | セッション記録 | UI 階層の収集とセッションリプレイを**有効化しない** |
-| breadcrumbs | SDK の自動記録を無効化し、**列挙済みのイベントだけ**を手動で記録する |
+| breadcrumbs | SDK の自動記録を無効化し、**`addBreadcrumb` で記録した `AppErrorCode` だけ**を送信対象にする |
 
-例外メッセージを型名とコードへ置き換えるのは、メッセージが最も混入しやすい経路のため（ファイル入出力の例外は既定でパスを本文に含む）。
-
-##### 送信経路ごとの保証
-
-仕様 28.3 の禁止項目（元ファイル名、ファイルパス、写真ライブラリ ID、正確な顔座標、画像ハッシュ、SNS アカウント名、カスタムスタンプ画像、写真・動画の内容、音声内容）は、経路ごとに保証の根拠が異なる。
-
-| 送信経路 | 保証 |
-| --- | --- |
-| **アプリが明示的に送る分析イベント** | 型付き `AnalyticsEvent` により、禁止データを**型として渡せない** |
-| **クラッシュ解析（Sentry）** | `CrashReporter` の送信前フィルタと許可リストを**別途適用する** |
-
-**端末外への送信経路は上記 2 つのみ**（ADR 0005）。**型付き分析イベントだけではクラッシュ解析側を防げません。**
+例外メッセージを型名とコードへ置き換えるのは、メッセージが最も混入しやすい経路のため（ファイル入出力の例外は既定でパスを本文に含む）。**仕様 28.3 の禁止項目**（元ファイル名、ファイルパス、写真ライブラリ ID、正確な顔座標、画像ハッシュ、SNS アカウント名、カスタムスタンプ画像、写真・動画の内容、音声内容）は、この送信前フィルタと許可リストで担保する。**端末外への送信経路は Sentry のみ**（ADR 0005）。
 
 ### 9.2 脅威モデル
 
@@ -2256,8 +2046,9 @@ struct CrashContext: Sendable, Equatable {
 | **対象としない（受容）** | `app.db` の直接書き換えによる無料枠・トライアルの回復 | ADR 0005。防御コストが守る価値（無料書き出し数枚）に見合わない |
 | **対象としない（受容）** | 端末時計の操作による月間枠の前倒し取得 | 検出にはサーバー照合が要るが自前バックエンドを持たない |
 | **対象としない（受容）** | 処理用ファイルの差し替え（存在確認のみのため検出しない） | 実害は自分の書き出し内容が変わる程度であり他者への影響が無い |
+| **対象としない（受容）** | `FaceTrack`（検出品質・顔行）の直接書き換えによる `triage` 結果の操作 | 自分の写真を自分の判断で確認せずに書き出すことに帰着し、露出するのは改変者本人の写真のみ |
 | **対象とする** | 未加工出力（`outputs/`）の保護、`.complete` によるロック中解析対策 | 7.4。プライバシー境界として維持する |
-| **対象とする** | 未加工の顔画像を端末外へ送信しないこと | 9.1 の型付き分析イベントとクラッシュ解析の送信前フィルタで担保する |
+| **対象とする** | 未加工の顔画像を端末外へ送信しないこと | 9.1 のクラッシュ解析の送信前フィルタで担保する（端末外への送信経路は Sentry のみ） |
 | **対象外** | CDN・自前バックエンドの侵害 | v1 は自前バックエンドを持たない（ADR 0005） |
 
 **画面スナップショット**: OS のタスクスイッチャに編集中の未加工画面が残るため、フォアグラウンドから外れる際にプライバシーオーバーレイを表示する（`scenePhase` が `.inactive` へ遷移した時点）。スクリーンショットの全面禁止は採らない（利用者自身の記録手段を塞ぐため）。
@@ -2339,5 +2130,4 @@ v1 のリリース範囲、動画の扱い、課金訴求の分類、利用者�
 | カスタムスタンプの保存解像度 | 長辺 1,024px は暫定。顔が大きく写る素材での見え方を実機で確認（7.5） | v1 実機検証時 |
 | トライアルのクレジット数 | 5 枚は暫定。転換率を見て調整可能な設定値とする | リリース後 |
 | 一括処理の同時並列数を 2 へ引き上げるか | v1 は 1 固定。引き上げには二段階ゲートの実装と実機計測が要る | v2 検討時 |
-| ファイル同期の方式 | `F_FULLFSYNC` と通常の `fsync` の所要時間差を実機計測し、耐久性とのつり合いで決定（7.1） | v1 実機検証時 |
 | 再確認しきい値 | `usageNow - generatedAt` の許容差 5 分は暫定。書き出し完了までの実測時間から確定（[書き出し Saga](export-saga.md)） | v1 実機検証時 |
