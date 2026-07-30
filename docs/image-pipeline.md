@@ -924,7 +924,7 @@ struct WorkingSourceRecord: Sendable {
 
 ##### インポート Saga
 
-**ADR 0005 により署名台帳が無くなり、ファイルシステムと単一の `app.db` トランザクションだけの手順になります。** 取り込みファイルは bridge がすでに物質化済み（選択手順 3）であり、Saga はそれを作り直しません。
+**ファイルシステムと単一の `app.db` トランザクションだけで完結する手順です。** 取り込みファイルは bridge がすでに物質化済み（選択手順 3）であり、Saga はそれを作り直しません。
 
 1. `PickedPhotoInput.importedFile` の所有権を受け取り、EXIF を読む
 2. 向きを正規化した原寸ファイルを作成し `working/` へ書き込む
@@ -935,7 +935,7 @@ struct WorkingSourceRecord: Sendable {
 
 ##### 素材スナップショットを保存する
 
-**ADR 0005 により署名を廃止し、`ProjectSourceSnapshot` は `app.db` へ平文で保存します。** **ADR 0006 により素材同一性の識別は持たず**、再編集用の参照（`ProjectSourceLocator`）と撮影メタデータ（`OriginalCaptureMetadata`）だけを持ちます。インポート Saga の手順 3 で `Project` 作成と同じトランザクションで保存し、`Project` の削除でのみ削除します。
+**`ProjectSourceSnapshot` は `app.db` へ平文で保存します。** 再編集用の参照（`ProjectSourceLocator`）と撮影メタデータ（`OriginalCaptureMetadata`）だけを持ちます。インポート Saga の手順 3 で `Project` 作成と同じトランザクションで保存し、`Project` の削除でのみ削除します。
 
 ##### 検出用の縮小画像の寿命
 
@@ -953,7 +953,7 @@ struct WorkingSourceRecord: Sendable {
 
 ##### 再選択後の Saga
 
-**`paused(.sourceReselectionRequired)` と履歴からの再編集は、どちらも「素材を選び直して既存 `Project` へ結び直す」操作です。** 通常のインポート Saga は新しい `Project` を作るため、既存 `Project` への結び付けにはそのまま使えません。**ADR 0006 により、選び直された写真は常に新しい素材として扱い、既存素材との同一性判定は行いません。**
+**`paused(.sourceReselectionRequired)` と履歴からの再編集は、どちらも「素材を選び直して既存 `Project` へ結び直す」操作です。** 通常のインポート Saga は新しい `Project` を作るため、既存 `Project` への結び付けにはそのまま使えません。**選び直された写真は常に新しい素材として扱います。**
 
 1. 向きを正規化した原寸ファイルを作成し、EXIF を読む
 2. 単一 DB トランザクションで、`WorkingSourceRecord` の置換または新規作成、`ProjectSourceSnapshot` の更新、`FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` の破棄、`detectionRevision` / `projectRevision` の増加を行う
@@ -968,13 +968,9 @@ struct WorkingSourceRecord: Sendable {
 
 完了後に顔検出をやり直し、新しい確認が完了するまで書き出しできません。**`PreviewConfirmation` は DB に無くセッション内の値のため**（[正準スキーマ](canonical-schema.md) の 5.2）、`detectionRevision` が増えた時点で不一致になり、破棄操作自体が不要です。
 
-##### 更新は単一トランザクションで完結する
-
-**ADR 0005 により署名台帳が `app.db` の平文行になり、この問題自体が消滅しました。** すべての更新は単一の DB トランザクションに閉じます（`createdAt` は保持期限の起点のため、置換・再接続のたびに更新します）。
-
 ##### 実装の所在
 
-**インポート・再選択・再接続・複製の 4 つの Saga は `Application` の `SourceImportCoordinator` が所有します。** いずれもファイルシステムと DB を協調させるため、`App` の境界サービスにも `Domain` にも置けません（[アーキテクチャ設計](architecture.md) の 4.3）。
+**インポート・再選択・再接続・複製の 4 つの Saga は `Application` の `SourceImportCoordinator` が所有します。** いずれもファイルシステムと DB を協調させるため、`App` の境界サービスにも `Domain` にも置けません（[アーキテクチャ設計](architecture.md) の 4.3）。**更新はすべて単一の DB トランザクションに閉じ、`createdAt` は保持期限の起点のため置換・再接続のたびに更新します。**
 
 ```swift
 // Domain — 永続化ポート
@@ -1025,31 +1021,11 @@ struct AttachWorkingSourceInput: Sendable {
 
 ##### 実体の存在確認
 
-**ADR 0005 により、実体の署名照合機構（`WorkingSourceBinding` と台帳との結び付け）を廃止します。** `WorkingSourceRecord`（`app.db` の平文行）がファイル参照とメタデータを持ち、実体を開くときは**ファイルの存在確認のみ**行います。存在しなければ `WorkingSourceRecord` を破棄し `paused(.sourceReselectionRequired)` へ遷移させ、再選択の導線を出します（起動時と書き出し開始時の 2 回確認します）。`FaceDetector` / `ImageEffectRenderer` は検証済みラッパを介さず、通常の `ImageSource`（上記「境界型」）を受け取ります（プロトコル宣言は上記「プロトコルのシグネチャ」）。
-
-##### 実体の削除
-
-**ADR 0005 により廃止。** `WorkingSourceBinding` を含む署名台帳が無くなり、`WorkingSourceRecord` は `app.db` の通常の行として単一トランザクションで削除します。
-
-##### 検証済み境界を通してのみ実体を開く
-
-**ADR 0005 により廃止。** 実体を開く前の確認は、上記「実体の存在確認」のみに簡素化されました。
-
-##### 検証と無効化を分ける
-
-**ADR 0005 により廃止。** 署名照合が無くなったため resolver と無効化処理の分離は不要になりました。実体が無ければ `SourceImportCoordinator` が `WorkingSourceRecord` を直接破棄します。
-
-##### 無効化は理由を受け取らず、内側で再判定する
-
-**ADR 0005 により廃止。** 陳腐化した理由による誤破棄を避けるための再判定機構は、署名照合の廃止に伴い不要になりました。
-
-##### 照合と読み取りを 1 つのスコープへ閉じる
-
-**ADR 0005 により廃止。** `mmap` による TOCTOU 対策（`withMappedBytes` / `OpenFileHandle` / `VerifiedWorkingSource` 系）は改ざん対抗機構の一部であり、実体の読み取りは通常の `ImageSource` 経由で行います。
+**`WorkingSourceRecord`（`app.db` の平文行）がファイル参照とメタデータを持ち、実体を開くときはファイルの存在確認のみ行います。** 存在しなければ `WorkingSourceRecord` を破棄し `paused(.sourceReselectionRequired)` へ遷移させ、再選択の導線を出します（起動時と書き出し開始時の 2 回確認します。破棄は `SourceImportCoordinator` が行います）。`FaceDetector` / `ImageEffectRenderer` は通常の `ImageSource`（上記「境界型」）を受け取ります（プロトコル宣言は上記「プロトコルのシグネチャ」）。
 
 ##### 照合に使ってよいもの・使ってはいけないもの
 
-**ADR 0005 により署名照合は廃止しましたが、次の運用ルールは機能として維持します。** バッチの一項目が別素材へ差し替わっても続行を許さず、新しい写真を処理したい場合は新しいバッチを作ります。検出結果も再利用しません。元素材のバイト列が同じでも正規化の実装が更新されていれば座標がずれるため、再選択・再接続はいずれも再検出を伴います。
+**次の運用ルールを維持します。** バッチの一項目が別素材へ差し替わっても続行を許さず、新しい写真を処理したい場合は新しいバッチを作ります。検出結果も再利用しません。元素材のバイト列が同じでも正規化の実装が更新されていれば座標がずれるため、再選択・再接続はいずれも再検出を伴います。
 
 ##### 未完了作業の保持期限
 
