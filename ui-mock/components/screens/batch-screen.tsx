@@ -164,7 +164,7 @@ function SetupStage() {
                 一括処理お試し：あと{trialCredits}枚
               </p>
               <p className="text-[11px] leading-relaxed text-accent-foreground/85 text-pretty">
-                月間の無料枠とは別枠です。書き出しに成功した枚数ぶんだけ減ります。
+                月間の無料枠とは別枠です。完了した枚数ぶんだけ減ります。
                 {plan === "free" ? "使えるかくし方はFreeのままです。" : null}
               </p>
             </div>
