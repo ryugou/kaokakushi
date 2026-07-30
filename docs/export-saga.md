@@ -62,6 +62,14 @@ protocol OutputDeliveryStore: Sendable {
 }
 
 struct ExportQueueItemID: Sendable, Hashable { let rawValue: UUID }
+/// 出力形式・画質・メタデータ設定。フィールドは `ProjectSettingsHash` の 5〜8 と一致する
+/// （正準バイト表現は [正準スキーマ](canonical-schema.md) の 5.2 が正本。ここでは Swift の型宣言だけを示す）
+struct ExportSetting: Sendable, Equatable {
+    let outputAspect: OutputAspect        // canonical-schema.md 5.2: original/square/fourFive/nineSixteen
+    let outputFormat: ImageFormat         // canonical-schema.md 5.2: jpeg/heic/png
+    let compressionQuality: Double
+    let metadataPolicy: MetadataPolicy    // canonical-schema.md 5.2: removeLocation/removeDeviceInfo/removeSoftwareInfo/keepCaptureDate の4つの Bool
+}
 /// 手順 0 の入力
 struct StartExportInput: Sendable {
     let projectID: ProjectID
