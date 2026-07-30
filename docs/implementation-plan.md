@@ -18,7 +18,7 @@
 | 1 | プロジェクト基盤 | — | Xcode プロジェクトと SwiftPM ローカルパッケージの骨格、CI、SwiftLint、`swift test` の実行基盤 |
 | 2 | ドメイン層 | `Domain` | クォータ判定（`evaluateMonthlyQuota` / `rollPeriod`）、権限解決（`resolveCapabilities`）、トリアージ（`triage`）、`compileRenderDraft` / `bindRasterAssets`、`ExportQueue` の状態機械、設定ハッシュの正準エンコーダ |
 | 3 | 永続化アダプタ | `Persistence` | GRDB と `app.db`、`ManagedFileStore`、`ExportSagaStore`、`OutputDeliveryStore`、`WorkingSourceStore`、`HistoryDeletionStore` |
-| 4 | 書き出しフロー | `Application` | `ExportCoordinator` / `StartupRecoveryCoordinator` / `OutputDeliveryCoordinator`、直列実行キュー、`settledAt` と reissue の勘定規則 |
+| 4 | 書き出しフロー | `Application` | `ExportCoordinator` / `StartupRecoveryCoordinator` / `OutputDeliveryCoordinator`、直列実行キュー、完了操作（settleExport / settleBatch）の勘定規則 |
 | 5 | プラットフォーム層 | `MediaKit` / `Rendering` / `App` / `Application` | 画像処理プロトコルの実装と適合テスト、選択の境界サービス、`SourceImportCoordinator`（インポート／再選択／再接続／複製の 4 Saga）、`ProtectedDataAvailability` |
 | 6 | 編集フロー UI | `App` | detect / effect / export / processing / **出力確認（confirm）** / done |
 | 7 | 課金と権限 | `Billing` | RevenueCat、Paywall、購入復元、`SubscriptionState` の読み込み失敗経路 |
@@ -59,7 +59,7 @@
 - 4 は 2 と 3 の両方を待ちます。ただし**偽ストアによる状態機械のテストは 3 を待ちません**（ポートが確定していれば偽実装で全経路を書けます）
 - 6 は 4 と 5 を待ちます（書き出しの開始と画像処理の両方を呼ぶため）
 
-**4 を独立させるのは、勘定の確定（単一トランザクション・settledAt・reissue）が本設計で最も密度が高いためです。** UI と並行で進めると不具合の切り分けができません。
+**4 を独立させるのは、勘定の確定（完了操作の単一トランザクション）が本設計で最も密度が高いためです。** UI と並行で進めると不具合の切り分けができません。
 
 ---
 
@@ -86,4 +86,4 @@
 | 確定済みの項目 | 内容 | 正本 |
 | --- | --- | --- |
 | 共有結果 `.unknown` 後の利用者操作 | 現在の状態を維持する。手動で `delivered` にする操作は設けない | [書き出し Saga](export-saga.md) の 7.0 |
-| 勘定の単位 | 完了した成果物。完了前のやり直しは reissue（追加消費なし） | [ADR 0006](adr/0006-accounting-per-delivered-output.md) |
+| 勘定の単位 | 完了した成果物。消費は完了操作で行い、完了前のやり直しは消費なし | [ADR 0006](adr/0006-accounting-per-delivered-output.md) |
