@@ -2,9 +2,9 @@
 
 | 項目 | 内容 |
 | --- | --- |
-| 目的 | 機能基盤として使うハッシュ（素材同一性・設定変更検出）の入力バイト表現を一意に定める |
+| 目的 | 確認用ハッシュ（設定変更検出・スタンプ重複排除）の入力バイト表現と、出力メタデータに使う撮影日時解釈を一意に定める |
 | 読者 | `Persistence` の実装者、ハッシュまわりのテスト作成者 |
-| 正本の範囲 | 符号化規則、ハッシュ入力に使う `enum` の固定番号、`contentFingerprint` / 設定ハッシュ 2 種 / `StampAssetHash` / `providerAssetKeyHash` の定義 |
+| 正本の範囲 | 符号化規則、ハッシュ入力に使う `enum` の固定番号、設定ハッシュ 2 種 / `StampAssetHash` の定義、EXIF 撮影日時の解釈 |
 | 関連 | [アーキテクチャ設計](architecture.md)、[画像処理](image-pipeline.md)（`RenderSpec` の型宣言）、[書き出し Saga](export-saga.md)（設定ハッシュの利用箇所）、[テスト計画](test-plan.md)（ゴールデンテスト） |
 
 **この文書がハッシュ入力バイト表現の唯一の正本です。** 他の文書は型の意味を定義し、バイト表現には言及しません。
@@ -13,9 +13,9 @@
 
 ## 1. 原則
 
-`JSONEncoder` や binary plist を正準形として使いません。集合と配列の順序、`Date` の表現、辞書のキー順が実装とバージョンに依存し、**同じ意味の値から別のハッシュが出れば、同一素材の判定や「変更せず再書き出し」の判定を誤ります。**
+`JSONEncoder` や binary plist を正準形として使いません。集合と配列の順序、`Date` の表現、辞書のキー順が実装とバージョンに依存し、**同じ意味の値から別のハッシュが出れば、「変更せず再書き出し」の判定やスタンプの重複排除を誤ります。**
 
-対象は `contentFingerprint` / `StampAssetHash` / `ProjectSettingsHash` / `PreviewRenderHash` / `providerAssetKeyHash` の 5 種（5 章）。基本型の符号化規則は 2 章です。
+対象は `StampAssetHash` / `ProjectSettingsHash` / `PreviewRenderHash` の 3 種（5 章）。基本型の符号化規則は 2 章です。
 
 **スキーマを変える場合は、各ハッシュのドメイン分離子（`-v2` 等）を上げます。** 番号管理の仕組みは持たず、分離子の文字列そのものがバージョンを表します（5 章）。
 
@@ -53,49 +53,15 @@
 | 型 | 符号化 |
 | --- | --- |
 | `ProjectID` / `BatchID` / `ExportID` / `RegionID` / `SourceID` / `ManagedFileID` | `UUID` の 16 バイト |
-| `ContentFingerprint` / `StampAssetHash` | **32 バイト固定長**（長さ前置きしない） |
+| `StampAssetHash` | **32 バイト固定長**（長さ前置きしない） |
 | `FaceTrackID` | `UUID` の 16 バイト |
 | `ManagedFileRef` および種別つき参照（`OutputFileRef` ほか） | `kind`（`UInt32`）→ `fileID`（16 バイト） |
 
 ---
 
-## 5. `contentFingerprint` とプロジェクト設定ハッシュ
+## 5. 確認用ハッシュと出力メタデータ
 
-### 5.1 `contentFingerprint`
-
-**ファイル全体の SHA-256 だけを入力にします。** 型宣言は [アーキテクチャ設計](architecture.md) の 6.6 が正本です。
-
-```
-contentFingerprint = SHA-256( "content-fingerprint-v2" || fullFileBytes )
-```
-
-| 項目 | 規則 |
-| --- | --- |
-| ドメイン分離子 | `"content-fingerprint-v2"` の UTF-8 バイト列を先頭へ置く |
-| 入力 | **ファイルの全バイト**（ストリームで逐次投入する） |
-| 出力 | **32 バイト固定**。文字列化しない |
-| 計算時点 | 物質化の直後、インポート Saga の中（[画像処理](image-pipeline.md)） |
-| 対象 | **取り込みファイル**（ピッカーが返した実データ）。正規化後の派生画像ではない |
-| 読み取り | `FileHandle` からのチャンク読み（1MB 程度）。ファイル全体をメモリへ載せない |
-
-**ファイルサイズと撮影日時を別途混ぜず、ドメイン分離子を先頭へ置きます。** 前者は全バイトに含まれるため識別能力が増えず EXIF パーサの差だけで fingerprint が変わる経路を作り、後者は他のハッシュ用途とのバイト列衝突を避けるためです（スキーマ変更時は `-v3` へ上げる）。
-
-##### 部分ハッシュを採らない
-
-先頭・末尾の 64KB だけを入力にすると、**中央部分だけが異なる 2 枚の写真が同一素材と判定されます。** 同じカメラの連写では先頭の EXIF ブロックと末尾のパディングが一致しやすく、ファイルサイズも近くなるため、**無料枠を回避する経路として現実的な難易度になります。**
-
-##### `StampAssetHash`
-
-| 項目 | 規約 |
-| --- | --- |
-| 対象 | **最終保存バイト列**（縮小・変換したあとの実体） |
-| アルゴリズム | SHA-256 |
-| 計算時点 | `ManagedFileStore` へ書く直前 |
-| 使う箇所 | `StampSource.custom` / `StampAsset` の主キー / `CustomStamp.assetHash` / `ProjectStampAsset.assetHash` |
-
-**この 4 か所で同じ型を共用し、対象は保存バイト列とします。** 片方だけ `String` にすると正準化の表現が揺れ、入力ファイルのバイト列では同じ画像の PNG/HEIC 取り込みで別実体になり、正規化済みピクセルではデコード実装差で値が揺れるため、ディスク上の唯一の表現である保存バイト列を採ります。
-
-### 5.1.1 EXIF 撮影日時の解釈
+### 5.1 EXIF 撮影日時の解釈
 
 **`DateTimeOriginal` だけでは UTC を決められません。** EXIF は日時・小数秒・UTC オフセットを別フィールドに持ちます。
 
@@ -118,7 +84,6 @@ contentFingerprint = SHA-256( "content-fingerprint-v2" || fullFileBytes )
 
 | 用途 | 扱い |
 | --- | --- |
-| `contentFingerprint` | **時刻を含めない**（5.1 で入力から外れている） |
 | 写真ライブラリ保存 | `PHAsset.creationDate` を優先し、無ければ `utcMillis`、それも無ければ `creationDate` を設定しない |
 | 出力 EXIF | **元のローカル日時とオフセットをそのまま保持する**（保持設定が ON の場合） |
 
@@ -252,31 +217,23 @@ PreviewRenderHash =
 | 出力 | **32 バイト固定** |
 | スキーマ変更 | 分離子を `-v2` へ上げる |
 
-**`contentFingerprint` と同じ式ではありません。** あちらの入力はファイルの全バイトであり、長さ前置きも構造化された符号化もありません。**「同じ」と書くと、実装がどちらかの規則をもう一方へ持ち込みます。**
-
 既知の `RenderSpec` と `ExportSetting` から生成したゴールデンバイト列を、**2 種類のハッシュそれぞれについて**テストへ埋め込みます。
 
-### 5.3 `providerAssetKeyHash`
+### 5.3 `StampAssetHash`
 
-**鍵を使わない SHA-256 で計算します。** `SourceAlias.provider` の照合に使う値だけを求めます。
-
-```
-providerAssetKeyHash = SHA-256( "source-provider-v1" || BE32(providerKind) || localIdentifier )
-```
-
-| 項目 | 規則 |
+| 項目 | 規約 |
 | --- | --- |
-| ドメイン分離子 | `"source-provider-v1"` の UTF-8 バイト列を先頭へ置く |
-| `providerKind` | 提供元を表す固定 `UInt32`（2 章の enum 符号化）。現状 `phAsset = 1` の 1 種のみ |
-| `localIdentifier` | `PHAsset.localIdentifier` の UTF-8 バイト列（末尾まで。長さ前置きしない） |
-| 出力形式 | **32 バイトを小文字 16 進の 64 文字へ**（`String` として `SourceAlias.provider` へ保持する） |
+| 対象 | **最終保存バイト列**（縮小・変換したあとの実体） |
+| アルゴリズム | SHA-256 |
+| 計算時点 | `ManagedFileStore` へ書く直前 |
+| 使う箇所 | `StampSource.custom` / `StampAsset` の主キー / `CustomStamp.assetHash` / `ProjectStampAsset.assetHash` |
 
-**`providerKind` を挟むのは、将来別の提供元を追加したとき同じ生識別子文字列でもハッシュが衝突しないようにするためです。** 16 進固定にするのは、Base64 や大文字混在を許すと同じ入力から別の alias ができるためです。
+**この 4 か所で同じ型を共用し、対象は保存バイト列とします。** 片方だけ `String` にすると正準化の表現が揺れ、入力ファイルのバイト列では同じ画像の PNG/HEIC 取り込みで別実体になり、正規化済みピクセルではデコード実装差で値が揺れるため、ディスク上の唯一の表現である保存バイト列を採ります。
 
 ---
 
 ## 6. ゴールデンテスト
 
-各ハッシュ（`contentFingerprint` / `StampAssetHash` / `ProjectSettingsHash` / `PreviewRenderHash` / `providerAssetKeyHash`）について、既知の入力から生成した固定バイト列と出力値をテストへ埋め込みます。符号化ロジックが意図せず変わったときに検出するためです。
+各ハッシュ（`StampAssetHash` / `ProjectSettingsHash` / `PreviewRenderHash`）について、既知の入力から生成した固定バイト列と出力値をテストへ埋め込みます。符号化ロジックが意図せず変わったときに検出するためです。
 
 検証項目は [テスト計画](test-plan.md) にあります。
