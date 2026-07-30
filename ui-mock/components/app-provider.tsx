@@ -394,6 +394,10 @@ type AppContextValue = {
   resumeBatch: () => void
   cancelBatch: () => void
   retryBatchErrors: () => void
+  /** 出力確認に相当するバッチの完了操作。枠を確定するが画面遷移はしない（結果一覧に留まる） */
+  completeBatch: () => void
+  /** 完了前だけ有効。1枚を破棄してキューに戻す（reissue。追加消費なし） */
+  redoBatchItem: (mediaId: string) => void
   resetBatch: () => void
   /** 検出結果を保ったまま設定へ戻る */
   backToSetup: () => void
@@ -458,6 +462,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [discardPromptOpen, setDiscardPromptOpen] = React.useState(false)
   const [recoveryOpen, setRecoveryOpen] = React.useState(false)
   const intentRef = React.useRef<PendingIntent>(null)
+  /**
+   * バッチの実行（startBatchDetection）ごとに一意な識別子。
+   * historyId に含めることで、doneCount/errorCount が偶然一致した
+   * 無関係なバッチ同士で履歴エントリが衝突・上書きされるのを防ぐ（Critical対応）。
+   * redoBatchItem/retryBatchErrors による同一バッチ内の再処理ではインクリメントしない。
+   */
+  const batchRunIdRef = React.useRef(0)
+  /**
+   * 同一バッチ実行（batchRunIdRef.current が変わらない間）で確定した historyId。
+   * retryBatchErrors は失敗分を成功させるため doneItems.length/errorCount が
+   * 必ず変化し、これらから毎回 historyId を再計算すると dedup
+   * （prev.some((h) => h.id === historyId)）が常に false になり、古い
+   * unsaved:true のエントリが残置され続ける（Warning対応）。
+   * 最初に確定した値をこの ref に保持し、以後の summary useEffect 再実行では
+   * 再計算せずこの値を使い回すことで、redoBatchItem/retryBatchErrors のどちらの
+   * 経路でも同一バッチ内では historyId が変わらないようにする。
+   * startBatchDetection で新しいバッチ実行が始まるたびに null へリセットする。
+   */
+  const batchHistoryIdRef = React.useRef<string | null>(null)
 
   const [batchStage, setBatchStage] = React.useState<BatchStage>("setup")
   const [batchMode, setBatchMode] = React.useState<BatchMode>("auto")
@@ -716,6 +739,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
    * 「32枚中20枚だけ保存できた」という部分成功を再現する。
    */
   const markDelivered = React.useCallback(() => {
+    // 完了（settled）前の受け渡しは ADR 0006 違反。UI 側は完了前に保存・共有ボタンを
+    // 出さない設計だが、ここでも状態側の二重防御として弾く（m2）。
+    if (!pendingOutput || !pendingOutput.settled) return
     setPendingOutput((current) => {
       if (!current) return current
       const pending = current.records.filter((r) => r.state === "generated")
@@ -739,18 +765,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const intent = intentRef.current
     intentRef.current = null
     if (intent) intent.run()
-  }, [lowStorage])
+  }, [lowStorage, pendingOutput])
 
   const savePending = React.useCallback(() => markDelivered(), [markDelivered])
   // 共有シートを開いただけでは成功ではない。Completed のときだけ Delivered にする
   const sharePending = React.useCallback(() => {
+    // markDelivered 側にもガードはあるが、未完了で共有シートの結果分岐に
+    // 入ること自体を防ぐため、ここでも settled を確認する（m2）。
+    if (!pendingOutput || !pendingOutput.settled) return
     if (shareOutcome !== "completed") {
       setUnsavedPromptOpen(false)
       setRecoveryOpen(false)
       return
     }
     markDelivered()
-  }, [markDelivered, shareOutcome])
+  }, [markDelivered, pendingOutput, shareOutcome])
 
   const discardPending = React.useCallback(() => {
     setPendingOutput((current) => {
@@ -1046,6 +1075,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [dropOverview])
 
   const startBatchDetection = React.useCallback(() => {
+    batchRunIdRef.current += 1
+    batchHistoryIdRef.current = null
     setBatchItems(
       batchSelection.map((id) => ({
         mediaId: id,
@@ -1061,6 +1092,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setBatchStage("detecting")
     setGridConfirmed(false)
     setReachedEnd(false)
+    // 新しいバッチの生成サイクルが始まる瞬間。すでに全件受け渡し済み（または元々空）の
+    // 残留 pendingOutput は破棄する。未受け渡し（generatedCount > 0）の場合は
+    // unsavedBatch バナーが「検出する」ボタンを無効化しこの関数まで到達しない設計のため、
+    // ここに来た時点で残っているのは解決済みの残留物だけ。破棄しないと、無関係な
+    // 次バッチの summary useEffect が古い pendingOutput.settled を読んでしまう（Critical対応）。
+    setPendingOutput((current) =>
+      current && current.kind === "batch" && generatedCount(current) === 0 ? null : current,
+    )
   }, [batchSelection])
 
   // 検出とサムネイル生成を順に終わらせる
@@ -1249,7 +1288,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setChargedIds((prev) => [...prev, ...withoutGrant.map((i) => i.mediaId)])
     }
 
-    const historyId = `batch-${doneItems.length}-${errorCount}`
+    // batchHistoryIdRef に確定値があれば使い回す。retryBatchErrors 経由の再実行では
+    // doneItems.length/errorCount が変化するため、ここで毎回計算し直すと dedup が
+    // 効かなくなる（Warning対応）。ref が null（＝このバッチ実行で初めて到達）のときだけ
+    // 新規に計算して確定させる。
+    const historyId = batchHistoryIdRef.current ?? `batch-${batchRunIdRef.current}-${doneItems.length}-${errorCount}`
+    batchHistoryIdRef.current = historyId
     const entry: BatchHistoryItem = {
       id: historyId,
       type: "batch",
@@ -1262,16 +1306,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       errorCount,
       unsaved: true,
     }
-    if (retention !== "none") setHistory((prev) => [entry, ...prev])
-    setPendingOutput({
+    if (retention !== "none") {
+      // historyId は batchHistoryIdRef により同一バッチ実行内で不変なので、
+      // redoBatchItem/retryBatchErrors のどちらで summary useEffect が再実行されても
+      // 常に既存エントリを更新する側（上書き）に入り、history に同一 id が重複しない。
+      setHistory((prev) =>
+        prev.some((h) => h.id === historyId) ? prev.map((h) => (h.id === historyId ? entry : h)) : [entry, ...prev],
+      )
+    }
+    setPendingOutput((current) => ({
       kind: "batch",
       historyId,
       usedTrial,
-      // 一括処理には出力確認画面（confirm）を経由する完了操作がまだない。
-      // settled は型上必須のフィールドとして false を置くだけで、この kind では読まれない
-      settled: false,
+      // すでに completeBatch() 済み（settled: true）のバッチが retryBatchErrors /
+      // redoBatchItem 経由でこの effect を再度通ることがある。ここで false に
+      // リテラル固定すると、確定済みの完了状態を誤って巻き戻してしまう（回帰）。
+      // 直前の pendingOutput が同じ batch なら settled を引き継ぐ
+      settled: current?.kind === "batch" ? current.settled : false,
       records: doneItems.map((i) => ({ mediaId: i.mediaId, state: "generated" as OutputState })),
-    })
+    }))
   }, [batchItems, batchStage, canBatchFull, chargedIds, effect, plan, retention, trialChargedIds])
 
   const pauseBatch = React.useCallback(() => setBatchRunning(false), [])
@@ -1288,6 +1341,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   const retryBatchErrors = React.useCallback(() => {
+    // redoBatchItem と対称のガード。completeBatch() 済み（settled: true）のバッチに
+    // 対して retry でキューへ再投入すると、summary useEffect が再実行され、
+    // 確定済みの history エントリ（unsaved: false）と pendingOutput.records
+    // （delivered 済み分を含む）を doneItems ベースで丸ごと巻き戻してしまう
+    // （ADR 0006「完了操作が枠を確定する」への違反）。settled 後は無効化する。
+    if (pendingOutput?.kind === "batch" && pendingOutput.settled) return
     summaryHandled.current = false
     setBatchItems((prev) =>
       prev.map((item) =>
@@ -1296,7 +1355,36 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     )
     setBatchStage("queue")
     setBatchRunning(true)
+  }, [pendingOutput])
+
+  /**
+   * バッチの出力確認に相当する完了操作（ADR 0006）。
+   * 結果一覧（SummaryStage）に留まったまま枠を確定する。画面遷移はしない。
+   */
+  const completeBatch = React.useCallback(() => {
+    setPendingOutput((current) =>
+      current && current.kind === "batch" && !current.settled ? { ...current, settled: true } : current,
+    )
   }, [])
+
+  /**
+   * 完了前だけ有効なやり直し。該当写真をキューへ戻し、書き出しキューの
+   * useEffect にもう一度処理させる。chargedIds / trialChargedIds は
+   * そのまま残す（すでに消費済み台帳にあるため、書き出し完了時の消費エフェクトは
+   * 自動的にこの写真を除外する。ADR 0006 の「完了前のやり直しは無料」）。
+   */
+  const redoBatchItem = React.useCallback(
+    (mediaId: string) => {
+      if (!pendingOutput || pendingOutput.kind !== "batch" || pendingOutput.settled) return
+      setBatchItems((prev) =>
+        prev.map((item) => (item.mediaId === mediaId ? { ...item, status: "waiting" as BatchItemStatus } : item)),
+      )
+      summaryHandled.current = false
+      setBatchStage("queue")
+      setBatchRunning(true)
+    },
+    [pendingOutput],
+  )
 
   /**
    * 確認段階から設定段階へ戻る。検出結果は保持し、再検出しない。
@@ -1437,6 +1525,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     resumeBatch,
     cancelBatch,
     retryBatchErrors,
+    completeBatch,
+    redoBatchItem,
     resetBatch,
     backToSetup,
     backToReview,

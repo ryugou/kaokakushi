@@ -959,9 +959,11 @@ function QueueStage() {
   const total = batchItems.length
   const doneCount = batchItems.filter((i) => i.status === "done").length
   const errorCount = batchItems.filter((i) => i.status === "error").length
-  const settled = batchItems.filter((i) => ["done", "error", "canceled"].includes(i.status)).length
-  const remaining = total - settled
-  const percent = total > 0 ? Math.round((settled / total) * 100) : 0
+  // 「バッチ内の処理完了件数」であり、ADR 0006 の完了フラグ PendingOutput.settled
+  // （真偽値）とは別概念。同名だと紛らわしいため settledCount と呼ぶ（m3）。
+  const settledCount = batchItems.filter((i) => ["done", "error", "canceled"].includes(i.status)).length
+  const remaining = total - settledCount
+  const percent = total > 0 ? Math.round((settledCount / total) * 100) : 0
 
   return (
     <>
@@ -1019,7 +1021,16 @@ function QueueStage() {
   )
 }
 
-function QueueList({ items, effect }: { items: BatchItem[]; effect: ReturnType<typeof useApp>["effect"] }) {
+function QueueList({
+  items,
+  effect,
+  onRedo,
+}: {
+  items: BatchItem[]
+  effect: ReturnType<typeof useApp>["effect"]
+  /** 完了前の結果一覧からのみ渡す。渡されないとき（QueueStage・完了後）は「やり直す」を出さない */
+  onRedo?: (mediaId: string) => void
+}) {
   return (
     <ul className="flex flex-col gap-2">
       {items.map((item) => {
@@ -1048,6 +1059,17 @@ function QueueList({ items, effect }: { items: BatchItem[]; effect: ReturnType<t
             >
               {BATCH_STATUS_LABELS[item.status]}
             </span>
+            {onRedo && item.status === "done" ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-8 shrink-0 rounded-xl px-2 text-[10px] font-bold text-muted-foreground"
+                onClick={() => onRedo(item.mediaId)}
+              >
+                <RotateCcw data-icon="inline-start" />
+                やり直す
+              </Button>
+            ) : null}
           </li>
         )
       })}
@@ -1076,6 +1098,8 @@ function SummaryStage() {
     resetBatch,
     go,
     pendingOutput,
+    completeBatch,
+    redoBatchItem,
     savePending,
     sharePending,
     canBatchFull,
@@ -1089,6 +1113,10 @@ function SummaryStage() {
   const pendingNow = generatedCount(pendingOutput)
   const deliveredNow = deliveredCount(pendingOutput)
   const delivered = pendingNow === 0
+  // ADR 0006 の完了フラグ。QueueStage の settledCount（処理完了件数）とは別概念なので
+  // 混同を避けるため batchSettled と呼ぶ（m3 に合わせた命名）
+  const batchSettled = pendingOutput?.kind === "batch" && pendingOutput.settled
+  const trialContext = !canBatchFull && batchTrialUsed
 
   return (
     <>
@@ -1133,7 +1161,28 @@ function SummaryStage() {
           </div>
         ) : null}
 
-        {!delivered ? (
+        {!batchSettled ? (
+          // 完了前（ADR 0006）: 保存・共有はまだできない。ここでの完了操作が枠を確定する
+          <div className="flex flex-col gap-2">
+            <Button
+              size="lg"
+              className="h-13 w-full rounded-2xl font-bold"
+              onClick={completeBatch}
+              disabled={pendingNow === 0}
+            >
+              完了する
+            </Button>
+            <p className="px-1 text-center text-[11px] leading-relaxed text-muted-foreground">
+              {trialContext
+                ? `完了すると${doneCount}枚のお試しクレジットとして確定します。完了後の作り直しは新しい消費になります。`
+                : `完了すると${doneCount}枚として確定します。完了後の作り直しは新しい枚数として数えます。`}
+            </p>
+            <p className="px-1 text-center text-[11px] leading-relaxed text-muted-foreground">
+              完了前のやり直しは追加の消費がありません。
+            </p>
+          </div>
+        ) : !delivered ? (
+          // 完了後・未保存: 何度でも保存・共有できる
           <div className="flex flex-col gap-2">
             <Button size="lg" className="h-13 w-full rounded-2xl font-bold" onClick={savePending}>
               {pendingNow}枚をまとめて保存
@@ -1151,12 +1200,13 @@ function SummaryStage() {
             </p>
           </div>
         ) : (
+          // 完了後・保存済み
           <p className="rounded-2xl bg-secondary px-3 py-2.5 text-center text-[11px] leading-relaxed text-secondary-foreground">
             保存しました。元の写真は変更されていません。
           </p>
         )}
 
-        {errorCount > 0 ? (
+        {errorCount > 0 && !batchSettled ? (
           <Button
             variant="secondary"
             size="lg"
@@ -1168,7 +1218,7 @@ function SummaryStage() {
           </Button>
         ) : null}
 
-        <QueueList items={batchItems} effect={effect} />
+        <QueueList items={batchItems} effect={effect} onRedo={!batchSettled ? redoBatchItem : undefined} />
 
         <PrivacyNote />
       </div>
