@@ -1,0 +1,114 @@
+included:
+  - App
+  - packages
+
+excluded:
+  - "**/.build"
+  - "**/.swiftpm"
+  - DerivedData
+
+# 基本ルールは SwiftLint の既定に従う。
+# import 制限は custom_rules で error レベルとして強制する
+# （architecture.md 3.3 の Domain 制約、4.3 の Application 制約が正本）。
+# Package.swift の `dependencies` では forbidden import を強制できない
+# （Apple SDK のシステムモジュールは列挙なしで import できるため。architecture.md 3.3）。
+custom_rules:
+  # --- packages/Domain/** : Foundation 以外のフレームワーク import を禁止 ---
+  domain_no_import_uikit:
+    included: ".*packages/Domain/.*\\.swift"
+    regex: "^\\s*(@testable\\s+)?import\\s+UIKit\\b"
+    name: "Domain: forbidden import UIKit"
+    message: "packages/Domain は UIKit を import できません（architecture.md 3.3）。"
+    severity: error
+  domain_no_import_swiftui:
+    included: ".*packages/Domain/.*\\.swift"
+    regex: "^\\s*(@testable\\s+)?import\\s+SwiftUI\\b"
+    name: "Domain: forbidden import SwiftUI"
+    message: "packages/Domain は SwiftUI を import できません（architecture.md 3.3）。"
+    severity: error
+  domain_no_import_coregraphics:
+    included: ".*packages/Domain/.*\\.swift"
+    regex: "^\\s*(@testable\\s+)?import\\s+CoreGraphics\\b"
+    name: "Domain: forbidden import CoreGraphics"
+    message: "packages/Domain は CoreGraphics を import できません（architecture.md 3.3。PixelSize / PixelRect / NormalizedRect を使う）。"
+    severity: error
+  domain_no_import_coreimage:
+    included: ".*packages/Domain/.*\\.swift"
+    regex: "^\\s*(@testable\\s+)?import\\s+CoreImage\\b"
+    name: "Domain: forbidden import CoreImage"
+    message: "packages/Domain は CoreImage を import できません（architecture.md 3.3）。"
+    severity: error
+  domain_no_import_grdb:
+    included: ".*packages/Domain/.*\\.swift"
+    regex: "^\\s*(@testable\\s+)?import\\s+GRDB\\b"
+    name: "Domain: forbidden import GRDB"
+    message: "packages/Domain は GRDB を import できません（architecture.md 3.3）。"
+    severity: error
+  domain_no_import_vision:
+    included: ".*packages/Domain/.*\\.swift"
+    regex: "^\\s*(@testable\\s+)?import\\s+Vision\\b"
+    name: "Domain: forbidden import Vision"
+    message: "packages/Domain は Vision を import できません（architecture.md 3.3。FaceDetector はプロトコルとして定義し実装は MediaKit に置く）。"
+    severity: error
+  domain_no_import_photos:
+    included: ".*packages/Domain/.*\\.swift"
+    regex: "^\\s*(@testable\\s+)?import\\s+Photos\\b"
+    name: "Domain: forbidden import Photos"
+    message: "packages/Domain は Photos を import できません（architecture.md 3.3）。"
+    severity: error
+  domain_no_import_photosui:
+    included: ".*packages/Domain/.*\\.swift"
+    regex: "^\\s*(@testable\\s+)?import\\s+PhotosUI\\b"
+    name: "Domain: forbidden import PhotosUI"
+    message: "packages/Domain は PhotosUI を import できません（architecture.md 3.3）。"
+    severity: error
+  domain_no_import_avfoundation:
+    included: ".*packages/Domain/.*\\.swift"
+    regex: "^\\s*(@testable\\s+)?import\\s+AVFoundation\\b"
+    name: "Domain: forbidden import AVFoundation"
+    message: "packages/Domain は AVFoundation を import できません（architecture.md 3.3）。"
+    severity: error
+  domain_no_import_security:
+    included: ".*packages/Domain/.*\\.swift"
+    regex: "^\\s*(@testable\\s+)?import\\s+Security\\b"
+    name: "Domain: forbidden import Security"
+    message: "packages/Domain は Security を import できません（architecture.md 3.3）。"
+    severity: error
+
+  # --- packages/Application/** : architecture.md 4.3 の禁止 import ---
+  application_no_import_swiftui:
+    included: ".*packages/Application/.*\\.swift"
+    regex: "^\\s*(@testable\\s+)?import\\s+SwiftUI\\b"
+    name: "Application: forbidden import SwiftUI"
+    message: "packages/Application は SwiftUI を import できません（architecture.md 4.3）。"
+    severity: error
+  application_no_import_uikit:
+    included: ".*packages/Application/.*\\.swift"
+    regex: "^\\s*(@testable\\s+)?import\\s+UIKit\\b"
+    name: "Application: forbidden import UIKit"
+    message: "packages/Application は UIKit を import できません（architecture.md 4.3）。"
+    severity: error
+  application_no_import_grdb:
+    included: ".*packages/Application/.*\\.swift"
+    regex: "^\\s*(@testable\\s+)?import\\s+GRDB\\b"
+    name: "Application: forbidden import GRDB"
+    message: "packages/Application は GRDB を import できません（architecture.md 4.3。Domain の永続化プロトコルを使う）。"
+    severity: error
+  application_no_import_vision:
+    included: ".*packages/Application/.*\\.swift"
+    regex: "^\\s*(@testable\\s+)?import\\s+Vision\\b"
+    name: "Application: forbidden import Vision"
+    message: "packages/Application は Vision を import できません（architecture.md 4.3。Domain の FaceDetector を使う）。"
+    severity: error
+  application_no_import_coreimage:
+    included: ".*packages/Application/.*\\.swift"
+    regex: "^\\s*(@testable\\s+)?import\\s+CoreImage\\b"
+    name: "Application: forbidden import CoreImage"
+    message: "packages/Application は CoreImage を import できません（architecture.md 4.3。Domain の ImageEffectRenderer を使う）。"
+    severity: error
+  application_no_import_photos:
+    included: ".*packages/Application/.*\\.swift"
+    regex: "^\\s*(@testable\\s+)?import\\s+Photos\\b"
+    name: "Application: forbidden import Photos"
+    message: "packages/Application は Photos を import できません（architecture.md 4.3。Domain の MediaSaver を使う）。"
+    severity: error
