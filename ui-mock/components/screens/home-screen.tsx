@@ -17,8 +17,8 @@ export function HomeScreen() {
     plan,
     hasAds,
     canBatchFull,
-    canBatchTrial,
     trialCredits,
+    canBatchTrial,
     remainingFree,
     history,
     startEditing,
@@ -39,6 +39,13 @@ export function HomeScreen() {
     requestUpgrade("batch-credit")
   }
 
+  const batchBadge = canBatchFull ? null : canBatchTrial ? "お試し" : "Pro"
+  const batchHint = canBatchFull
+    ? "最大50枚をまとめて"
+    : canBatchTrial
+      ? `お試しであと${trialCredits}枚ためせます`
+      : "お試しは使い切りました"
+
   return (
     <div className="flex flex-col gap-6 px-4 pt-2 pb-8">
       <header className="flex items-center justify-between">
@@ -58,17 +65,32 @@ export function HomeScreen() {
         <button
           type="button"
           onClick={openPicker}
-          className="flex h-36 flex-col items-start justify-between rounded-3xl bg-primary p-5 text-left text-primary-foreground shadow-sm transition-transform active:scale-[0.98]"
+          className="flex h-32 flex-col items-start justify-between rounded-3xl bg-primary p-5 text-left text-primary-foreground shadow-sm transition-transform active:scale-[0.98]"
         >
-          <ImageIcon className="size-9" aria-hidden />
+          <ImageIcon className="size-8" aria-hidden />
           <span>
-            <span className="block font-rounded text-lg font-bold">写真を選ぶ</span>
-            <span className="block text-xs opacity-85">1枚ずつ加工します</span>
+            <span className="block font-rounded text-base font-bold">写真を選ぶ（1枚ずつ加工）</span>
+            <span className="block text-xs opacity-85">顔を自動で見つけて、かんたんに隠せます</span>
           </span>
         </button>
-        <p className="text-center text-sm font-medium text-foreground text-pretty">
-          顔を自動で見つけて、かんたんに隠せます
-        </p>
+        <button
+          type="button"
+          onClick={openBatch}
+          className="flex h-24 flex-col justify-between rounded-3xl bg-secondary p-4 text-left text-secondary-foreground ring-1 ring-foreground/10 transition-transform active:scale-[0.98]"
+        >
+          <div className="flex w-full items-center justify-between">
+            <Layers className="size-6 text-primary" aria-hidden />
+            {batchBadge ? (
+              <span className="rounded-full bg-accent px-2 py-0.5 text-[10px] font-bold text-accent-foreground">
+                {batchBadge}
+              </span>
+            ) : null}
+          </div>
+          <span>
+            <span className="block font-rounded text-sm font-bold">まとめて加工</span>
+            <span className="block text-[11px] text-muted-foreground">{batchHint}</span>
+          </span>
+        </button>
         <PrivacyNote />
       </div>
 
@@ -138,19 +160,6 @@ export function HomeScreen() {
       <section className="flex flex-col gap-3">
         <SectionTitle>べんりな使いかた</SectionTitle>
         <div className="flex flex-col gap-2">
-          <ShortcutRow
-            icon={Layers}
-            label="まとめて加工"
-            hint={
-              canBatchFull
-                ? "最大50枚をまとめて加工"
-                : canBatchTrial
-                  ? `一括処理お試し：あと${trialCredits}枚`
-                  : "お試しクレジットを使い切りました"
-            }
-            badge={canBatchFull ? null : canBatchTrial ? "お試し" : "Pro"}
-            onClick={openBatch}
-          />
           <ShortcutRow
             icon={Smile}
             label="スタンプをえらぶ"

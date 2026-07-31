@@ -49,7 +49,7 @@ const PLANS: PlanCard[] = [
       { label: "追加スタンプが使えます", ok: true },
       { label: "マイスタンプを最大100個まで登録できます", ok: true },
       { label: `一括処理はお試しの${TRIAL_CREDITS}枚ぶんだけ`, ok: true },
-      { label: "処理キュー・一括設定プリセット", ok: false },
+      { label: "まとめて自動で進める一括処理", ok: false },
     ],
   },
   {
@@ -63,9 +63,9 @@ const PLANS: PlanCard[] = [
       { label: `1回の一括処理で最大${BATCH_MAX_ITEMS}枚`, ok: true },
       { label: "おまかせ一括と1枚ずつ確認の2つのすすめかた", ok: true },
       { label: "要確認の写真だけを抽出して確認", ok: true },
-      { label: "処理キューで進みぐあいを確認", ok: true },
+      { label: "確認済みの写真は自動で進みます", ok: true },
       { label: "失敗した写真だけあとから再試行", ok: true },
-      { label: "一括設定プリセットとバッチ履歴", ok: true },
+      { label: "いつもの設定をそのまま使え、あとから見返せます", ok: true },
     ],
   },
 ]

@@ -1133,7 +1133,7 @@ function SummaryStage() {
           </p>
         </div>
 
-        {!canBatchFull && batchTrialUsed ? (
+        {!canBatchFull && batchTrialUsed && !batchSettled ? (
           <div className="flex flex-col gap-1.5 rounded-2xl bg-accent/70 px-3 py-2.5">
             <p className="text-[11px] font-bold text-accent-foreground">
               {trialCredits > 0 ? `一括処理お試し：あと${trialCredits}枚` : "お試しクレジットを使い切りました"}
@@ -1205,6 +1205,22 @@ function SummaryStage() {
             保存しました。元の写真は変更されていません。
           </p>
         )}
+
+        {/* 完了後・トライアル消費だったときだけ。操作は遮らない任意の案内 */}
+        {batchSettled && trialContext ? (
+          <div className="flex flex-col gap-2 rounded-2xl bg-accent/70 px-3 py-2.5">
+            <p className="text-[11px] leading-relaxed text-accent-foreground">
+              {doneCount}枚を片づけました。Proなら1回で最大{BATCH_MAX_ITEMS}枚まで、まとめて終わります。
+            </p>
+            <Button
+              size="sm"
+              className="h-9 self-start rounded-xl text-[11px] font-bold"
+              onClick={() => go("pricing")}
+            >
+              Proを確認する
+            </Button>
+          </div>
+        ) : null}
 
         {errorCount > 0 && !batchSettled ? (
           <Button
