@@ -19,7 +19,7 @@ export function HistoryScreen() {
 
   return (
     <div className="flex min-h-full flex-col">
-      <ScreenHeader title="加工の履歴" subtitle={`端末内にだけ残ります・${RETENTION_LABELS[retention]}`} />
+      <ScreenHeader title="加工済み写真" subtitle={`端末内にだけ残ります・${RETENTION_LABELS[retention]}`} />
 
       <div className="flex flex-1 flex-col gap-3 px-4 py-4">
         {retention === "none" ? (
@@ -96,12 +96,9 @@ function SingleRow({
         {/* サムネイルは必ず加工後の状態 */}
         <MediaThumb media={media} effect={item.effect} className="size-16 shrink-0" priority={priority} />
         <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <p className="truncate text-sm font-bold">{media.title}</p>
+          <p className="truncate text-sm font-bold">{item.method}</p>
           <p className="truncate text-[11px] text-muted-foreground">{item.processedAt}</p>
           <div className="flex flex-wrap items-center gap-1.5">
-            <Badge variant="secondary" className="text-[10px]">
-              {item.method}
-            </Badge>
             <Badge variant="outline" className="gap-1 text-[10px]">
               <Users className="size-2.5" aria-hidden />
               {item.faceCount}人
@@ -153,7 +150,7 @@ function SingleRow({
               onClick={() => removeHistory(item.id)}
             >
               <Trash2 className="size-4" />
-              <span className="sr-only">{media.title}の履歴を削除</span>
+              <span className="sr-only">この写真の履歴を削除</span>
             </Button>
           )}
         </div>
@@ -209,7 +206,7 @@ function BatchRow({ item, onResume }: { item: BatchHistoryItem; onResume: () => 
         </span>
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <p className="truncate text-sm font-bold">
-            {item.title} {item.doneCount + item.errorCount}枚
+            まとめて加工 {item.doneCount + item.errorCount}枚
           </p>
           <p className="truncate text-[11px] text-muted-foreground">{item.processedAt}</p>
           <div className="flex flex-wrap items-center gap-1.5">
@@ -242,7 +239,7 @@ function BatchRow({ item, onResume }: { item: BatchHistoryItem; onResume: () => 
             onClick={() => removeHistory(item.id)}
           >
             <Trash2 className="size-4" />
-            <span className="sr-only">{item.title}の履歴を削除</span>
+            <span className="sr-only">この一括処理の履歴を削除</span>
           </Button>
         </div>
       </div>
@@ -266,7 +263,7 @@ function BatchRow({ item, onResume }: { item: BatchHistoryItem; onResume: () => 
                   effect={item.effect}
                   className="aspect-square w-full ring-1 ring-foreground/10"
                 />
-                <span className="sr-only">{findMedia(id).title}を編集する</span>
+                <span className="sr-only">この写真を編集する</span>
               </button>
             ))}
           </div>
