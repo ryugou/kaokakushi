@@ -57,17 +57,17 @@ function buildCopy(reason: UpgradeReason): Copy {
         primary: "Standardを確認する",
         benefits: ["写真やPNGからスタンプを作成", "最大100個まで登録できます", "追加スタンプもすべて使えます"],
       }
-    // お試し枠で「新しい写真」を選べる数を超えた
+    // お試し枠を使い切った（5枚まで。ADR 0006により素材の同一性は問わない）
     case "batch-credit":
       return {
         target: "pro",
-        title: "お試しで選べる新しい写真の上限です",
-        body: `お試しでは新しい写真を合計${TRIAL_CREDITS}枚まで処理できます。一度試した写真は、クレジットを使わず何度でも処理できます。`,
+        title: `お試しの${TRIAL_CREDITS}枚を使い切りました`,
+        body: `お試しで処理できるのは合計${TRIAL_CREDITS}枚までです。Proなら1回で最大${BATCH_MAX_ITEMS}枚をまとめて処理できます。`,
         primary: "Proを確認する",
         benefits: [
-          `1回の一括処理で最大${BATCH_MAX_ITEMS}枚`,
-          "処理キューで進みぐあいを確認",
-          "一括設定プリセットとバッチ履歴",
+          `1回で最大${BATCH_MAX_ITEMS}枚、まとめて片づきます`,
+          "一覧で見渡して、注意が必要な写真だけ直せます",
+          "確認済みの写真は自動で進みます",
         ],
       }
     // お試し枠の総枚数を超えた。すべて消費済みの写真でも発火する
@@ -93,7 +93,7 @@ function buildCopy(reason: UpgradeReason): Copy {
         primary: "わかりました",
         benefits: [
           "残りの写真は次のバッチとして処理できます",
-          "処理キューで進みぐあいを確認できます",
+          "確認済みの写真は自動で進みます",
           "失敗した写真だけあとから再試行できます",
         ],
       }

@@ -1206,6 +1206,22 @@ function SummaryStage() {
           </p>
         )}
 
+        {/* 完了後・トライアル消費だったときだけ。操作は遮らない任意の案内 */}
+        {batchSettled && trialContext ? (
+          <div className="flex flex-col gap-2 rounded-2xl bg-accent/70 px-3 py-2.5">
+            <p className="text-[11px] leading-relaxed text-accent-foreground">
+              {doneCount}枚を片づけました。Proなら1回で最大{BATCH_MAX_ITEMS}枚まで、まとめて終わります。
+            </p>
+            <Button
+              size="sm"
+              className="h-9 self-start rounded-xl text-[11px] font-bold"
+              onClick={() => go("pricing")}
+            >
+              Proを確認する
+            </Button>
+          </div>
+        ) : null}
+
         {errorCount > 0 && !batchSettled ? (
           <Button
             variant="secondary"
