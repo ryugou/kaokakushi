@@ -179,7 +179,7 @@
 
 出力へ影響しない値は含めません。**含めると、名前を変えただけで「変更した」と判定されます。** 両方のハッシュに共通です。
 
-- プロジェクト名、作成日時、更新日時、お気に入りフラグ
+- 作成日時、更新日時、お気に入りフラグ
 - `DetectionStatus` / `ReviewStatus` / `ReviewDecision` / `overviewConfirmed`
 - `detectionRevision` / `projectRevision`（`ExportInputSnapshot` が別に持つ）
 - サムネイルの `ManagedFileRef`、`ProjectSourceLocator`
