@@ -1,10 +1,9 @@
 "use client"
 
 import * as React from "react"
-import { AlertTriangle, ChevronDown, Clock, Layers, Lock, Trash2, Users } from "lucide-react"
+import { AlertTriangle, Clock, Lock, Trash2, Users } from "lucide-react"
 
-import { cn } from "@/lib/utils"
-import { findMedia, type BatchHistoryItem, type SingleHistoryItem } from "@/lib/mock-data"
+import { findMedia, type HistoryItem, type SingleHistoryItem } from "@/lib/mock-data"
 import { RETENTION_LABELS, useApp } from "@/components/app-provider"
 import { EFFECT_LABELS, type EffectType } from "@/components/face-mask"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -14,12 +13,55 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 
+type GridTile = {
+  key: string
+  mediaId: string
+  effect: SingleHistoryItem["effect"]
+  processedAt: string
+  method: string
+  source: HistoryItem
+}
+
 export function HistoryScreen() {
   const { history, hasAds, retention, openUnsavedPrompt } = useApp()
+  const [selected, setSelected] = React.useState<GridTile | null>(null)
+
+  // 単体もバッチ内の1枚も、区別なく同じグリッドに並べる（写真アプリ相当のフラット表示）
+  // history は新しい加工ほど先頭に追加されるため、そのままの並びで日付降順になる
+  const tiles = React.useMemo<GridTile[]>(() => {
+    const list: GridTile[] = []
+    for (const item of history) {
+      if (item.type === "single") {
+        list.push({
+          key: item.id,
+          mediaId: item.mediaId,
+          effect: item.effect,
+          processedAt: item.processedAt,
+          method: item.method,
+          source: item,
+        })
+      } else {
+        for (const mediaId of item.mediaIds) {
+          list.push({
+            key: `${item.id}-${mediaId}`,
+            mediaId,
+            effect: item.effect,
+            processedAt: item.processedAt,
+            method: item.method,
+            source: item,
+          })
+        }
+      }
+    }
+    return list
+  }, [history])
+
+  const unsavedItem = history.find((h) => h.unsaved)
+  const unsavedCount = unsavedItem ? (unsavedItem.type === "batch" ? unsavedItem.doneCount : 1) : 0
 
   return (
     <div className="flex min-h-full flex-col">
-      <ScreenHeader title="加工の履歴" subtitle={`端末内にだけ残ります・${RETENTION_LABELS[retention]}`} />
+      <ScreenHeader title="加工済み写真" subtitle={`端末内にだけ残ります・${RETENTION_LABELS[retention]}`} />
 
       <div className="flex flex-1 flex-col gap-3 px-4 py-4">
         {retention === "none" ? (
@@ -28,7 +70,9 @@ export function HistoryScreen() {
           </p>
         ) : null}
 
-        {history.length === 0 ? (
+        {unsavedItem ? <UnsavedBanner onResume={openUnsavedPrompt} count={unsavedCount} /> : null}
+
+        {tiles.length === 0 ? (
           <Empty className="rounded-3xl bg-card ring-1 ring-foreground/10">
             <EmptyHeader>
               <EmptyMedia variant="icon">
@@ -39,19 +83,35 @@ export function HistoryScreen() {
             </EmptyHeader>
           </Empty>
         ) : (
-          history.map((item, index) =>
-            item.type === "batch" ? (
-              <BatchRow key={item.id} item={item} onResume={openUnsavedPrompt} />
-            ) : (
-              <SingleRow key={item.id} item={item} priority={index === 0} onResume={openUnsavedPrompt} />
-            ),
-          )
+          <div className="grid grid-cols-3 gap-1.5">
+            {tiles.map((tile, index) => (
+              <button
+                key={tile.key}
+                type="button"
+                onClick={() => setSelected(tile)}
+                className="transition-transform active:scale-95"
+              >
+                {/* サムネイルは必ず加工後の状態 */}
+                <MediaThumb
+                  media={findMedia(tile.mediaId)}
+                  effect={tile.effect}
+                  className="aspect-square w-full ring-1 ring-foreground/10"
+                  priority={index === 0}
+                />
+                <span className="sr-only">
+                  {tile.method}・{tile.processedAt}
+                </span>
+              </button>
+            ))}
+          </div>
         )}
 
         {hasAds ? <AdSlot /> : null}
 
         <PrivacyNote className="pt-2" />
       </div>
+
+      <PhotoActionSheet tile={selected} onClose={() => setSelected(null)} />
     </div>
   )
 }
@@ -72,100 +132,170 @@ function UnsavedBanner({ onResume, count }: { onResume: () => void; count: numbe
   )
 }
 
-function SingleRow({
-  item,
-  priority,
-  onResume,
-}: {
-  item: SingleHistoryItem
-  priority?: boolean
-  onResume: () => void
-}) {
-  const { removeHistory, startReexport, startLockedView, duplicateAsFree, guardNewWork, startEditing, effectivePlan } =
-    useApp()
-  const [duplicating, setDuplicating] = React.useState(false)
-  const media = findMedia(item.mediaId)
+/**
+ * サムネイルをタップすると開く操作シート。
+ * 単体の履歴か、バッチ由来の1枚かで内容を出し分ける。
+ * バッチ由来の削除は、そのバッチ全体の履歴を削除する（写真1枚だけを
+ * バッチから取り除く手段は下層にないため、シート内でその旨を明示する）。
+ */
+function PhotoActionSheet({ tile, onClose }: { tile: GridTile | null; onClose: () => void }) {
+  const {
+    removeHistory,
+    startReexport,
+    startLockedView,
+    duplicateAsFree,
+    guardNewWork,
+    startEditing,
+    effectivePlan,
+  } = useApp()
+  const [duplicating, setDuplicating] = React.useState<SingleHistoryItem | null>(null)
+
+  const single = tile?.source.type === "single" ? tile.source : null
   // 有料スタンプで作った作品は、Freeでも「変更せず再書き出し」だけできる
   // 判定は作成時のプランではなく、内容が要求するプラン（requiredPlan）
-  const editLocked = effectivePlan === "free" && item.paidFeature !== undefined
+  const editLocked = single !== null && effectivePlan === "free" && single.paidFeature !== undefined
 
   return (
-    <article className="flex flex-col gap-2 rounded-2xl bg-card p-3 ring-1 ring-foreground/10">
-      {item.unsaved ? <UnsavedBanner onResume={onResume} count={1} /> : null}
-      <div className="flex items-center gap-3">
-        {/* サムネイルは必ず加工後の状態 */}
-        <MediaThumb media={media} effect={item.effect} className="size-16 shrink-0" priority={priority} />
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <p className="truncate text-sm font-bold">{media.title}</p>
-          <p className="truncate text-[11px] text-muted-foreground">{item.processedAt}</p>
-          <div className="flex flex-wrap items-center gap-1.5">
-            <Badge variant="secondary" className="text-[10px]">
-              {item.method}
-            </Badge>
-            <Badge variant="outline" className="gap-1 text-[10px]">
-              <Users className="size-2.5" aria-hidden />
-              {item.faceCount}人
-            </Badge>
-            {editLocked ? (
-              <Badge variant="outline" className="gap-1 text-[10px]">
-                <Lock className="size-2.5" aria-hidden />
-                そのまま書き出し可
-              </Badge>
-            ) : null}
-          </div>
-        </div>
-        <div className="flex shrink-0 flex-col items-end gap-1">
-          <Button
-            size="sm"
-            variant="secondary"
-            className="h-8 rounded-xl text-[11px] font-bold"
-            onClick={() =>
-              guardNewWork("再書き出し", () => (editLocked ? startReexport(item) : startEditing(item.mediaId)))
-            }
-          >
-            {editLocked ? "再書き出し" : "もう一度"}
-          </Button>
-          {editLocked ? (
-            // 閲覧はできる。変更しようとした時点でStandardを案内する
+    <>
+      <Dialog open={tile !== null} onOpenChange={(open) => (!open ? onClose() : undefined)}>
+        <DialogContent className="max-w-[330px] rounded-3xl">
+          {tile ? (
             <>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-7 rounded-xl px-2 text-[10px] text-muted-foreground"
-                onClick={() => guardNewWork("内容を見る", () => startLockedView(item))}
-              >
-                内容を見る
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-7 rounded-xl px-2 text-[10px] text-primary"
-                onClick={() => setDuplicating(true)}
-              >
-                Free版として複製
-              </Button>
+              <DialogHeader>
+                <div className="mx-auto">
+                  <MediaThumb
+                    media={findMedia(tile.mediaId)}
+                    effect={tile.effect}
+                    className="size-24 ring-1 ring-foreground/10"
+                  />
+                </div>
+                <DialogTitle className="text-center font-rounded text-base leading-snug">{tile.method}</DialogTitle>
+                <DialogDescription className="text-center leading-relaxed">{tile.processedAt}</DialogDescription>
+              </DialogHeader>
+
+              {single ? (
+                <div className="flex flex-wrap items-center justify-center gap-1.5">
+                  <Badge variant="outline" className="gap-1 text-[10px]">
+                    <Users className="size-2.5" aria-hidden />
+                    {single.faceCount}人
+                  </Badge>
+                  {editLocked ? (
+                    <Badge variant="outline" className="gap-1 text-[10px]">
+                      <Lock className="size-2.5" aria-hidden />
+                      そのまま書き出し可
+                    </Badge>
+                  ) : null}
+                </div>
+              ) : null}
+
+              <div className="flex flex-col gap-2">
+                {single ? (
+                  editLocked ? (
+                    <>
+                      <Button
+                        size="lg"
+                        className="h-12 rounded-2xl text-sm font-bold"
+                        onClick={() => {
+                          onClose()
+                          guardNewWork("再書き出し", () => startReexport(single))
+                        }}
+                      >
+                        再書き出し
+                      </Button>
+                      <Button
+                        size="lg"
+                        variant="secondary"
+                        className="h-11 rounded-2xl text-sm font-bold"
+                        onClick={() => {
+                          onClose()
+                          guardNewWork("内容を見る", () => startLockedView(single))
+                        }}
+                      >
+                        内容を見る
+                      </Button>
+                      <Button
+                        size="lg"
+                        variant="ghost"
+                        className="h-11 rounded-2xl text-sm font-bold text-primary"
+                        onClick={() => {
+                          onClose()
+                          setDuplicating(single)
+                        }}
+                      >
+                        Free版として複製
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <Button
+                        size="lg"
+                        className="h-12 rounded-2xl text-sm font-bold"
+                        onClick={() => {
+                          onClose()
+                          guardNewWork("もう一度", () => startEditing(single.mediaId))
+                        }}
+                      >
+                        もう一度
+                      </Button>
+                      <Button
+                        size="lg"
+                        variant="ghost"
+                        className="h-11 rounded-2xl text-sm font-bold text-destructive"
+                        onClick={() => {
+                          onClose()
+                          removeHistory(single.id)
+                        }}
+                      >
+                        <Trash2 data-icon="inline-start" />
+                        この写真の履歴を削除
+                      </Button>
+                    </>
+                  )
+                ) : (
+                  <>
+                    <Button
+                      size="lg"
+                      className="h-12 rounded-2xl text-sm font-bold"
+                      onClick={() => {
+                        const mediaId = tile.mediaId
+                        onClose()
+                        guardNewWork("この写真を編集", () => startEditing(mediaId))
+                      }}
+                    >
+                      この写真を編集
+                    </Button>
+                    <Button
+                      size="lg"
+                      variant="ghost"
+                      className="h-11 rounded-2xl text-sm font-bold text-destructive"
+                      onClick={() => {
+                        const batchId = tile.source.id
+                        onClose()
+                        removeHistory(batchId)
+                      }}
+                    >
+                      <Trash2 data-icon="inline-start" />
+                      この一括処理の履歴を削除
+                    </Button>
+                    <p className="px-1 text-center text-[11px] leading-relaxed text-muted-foreground">
+                      同じ一括処理で加工した他の写真の履歴も、まとめて削除されます。
+                    </p>
+                  </>
+                )}
+                <Button variant="ghost" size="lg" className="h-11 rounded-2xl" onClick={onClose}>
+                  とじる
+                </Button>
+              </div>
             </>
-          ) : (
-            <Button
-              size="icon"
-              variant="ghost"
-              className="size-8 rounded-xl text-muted-foreground"
-              onClick={() => removeHistory(item.id)}
-            >
-              <Trash2 className="size-4" />
-              <span className="sr-only">{media.title}の履歴を削除</span>
-            </Button>
-          )}
-        </div>
-      </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
 
       {/* 置き換え先は利用者に選ばせる。決め打ちすると意図しない見た目になる */}
-      <Dialog open={duplicating} onOpenChange={(open) => (!open ? setDuplicating(false) : undefined)}>
+      <Dialog open={duplicating !== null} onOpenChange={(open) => (!open ? setDuplicating(null) : undefined)}>
         <DialogContent className="max-w-[330px] rounded-3xl">
           <DialogHeader>
-            <DialogTitle className="font-rounded text-base leading-snug">
-              どの隠し方に置き換えますか？
-            </DialogTitle>
+            <DialogTitle className="font-rounded text-base leading-snug">どの隠し方に置き換えますか？</DialogTitle>
             <DialogDescription className="leading-relaxed">
               有料スタンプを使っていた部分だけを置き換えた複製を作ります。範囲の位置と大きさ、その他の設定はそのまま引き継ぎます。元の作品は変わりません。
             </DialogDescription>
@@ -178,100 +308,20 @@ function SingleRow({
                 variant="secondary"
                 className="h-12 rounded-2xl text-sm font-bold"
                 onClick={() => {
-                  setDuplicating(false)
-                  guardNewWork("Free版として複製", () => duplicateAsFree(item, t))
+                  const target = duplicating
+                  setDuplicating(null)
+                  if (target) guardNewWork("Free版として複製", () => duplicateAsFree(target, t))
                 }}
               >
                 {t === "stamp" ? "基本スタンプ" : EFFECT_LABELS[t]}
               </Button>
             ))}
           </div>
-          <Button variant="ghost" size="lg" className="h-11 rounded-2xl" onClick={() => setDuplicating(false)}>
+          <Button variant="ghost" size="lg" className="h-11 rounded-2xl" onClick={() => setDuplicating(null)}>
             やめる
           </Button>
         </DialogContent>
       </Dialog>
-    </article>
-  )
-}
-
-/** 一括処理はバッチ単位で1件にまとめる */
-function BatchRow({ item, onResume }: { item: BatchHistoryItem; onResume: () => void }) {
-  const { removeHistory, guardNewWork, startEditing } = useApp()
-  const [open, setOpen] = React.useState(false)
-
-  return (
-    <article className="flex flex-col gap-2 rounded-2xl bg-card p-3 ring-1 ring-foreground/10">
-      {item.unsaved ? <UnsavedBanner onResume={onResume} count={item.doneCount} /> : null}
-      <div className="flex items-center gap-3">
-        <span className="grid size-16 shrink-0 place-items-center rounded-2xl bg-secondary text-primary">
-          <Layers className="size-6" aria-hidden />
-        </span>
-        <div className="flex min-w-0 flex-1 flex-col gap-1">
-          <p className="truncate text-sm font-bold">
-            {item.title} {item.doneCount + item.errorCount}枚
-          </p>
-          <p className="truncate text-[11px] text-muted-foreground">{item.processedAt}</p>
-          <div className="flex flex-wrap items-center gap-1.5">
-            <Badge variant="secondary" className="text-[10px]">
-              {item.method}
-            </Badge>
-            <Badge variant="outline" className="text-[10px]">
-              {item.doneCount}枚完了
-              {item.errorCount > 0 ? ` ・ ${item.errorCount}枚エラー` : ""}
-            </Badge>
-          </div>
-        </div>
-        <div className="flex shrink-0 flex-col items-end gap-1">
-          <Button
-            size="sm"
-            variant="secondary"
-            className="h-8 rounded-xl text-[11px] font-bold"
-            onClick={() => setOpen((o) => !o)}
-          >
-            <ChevronDown
-              className={cn("size-3.5 transition-transform", open && "rotate-180")}
-              data-icon="inline-start"
-            />
-            {open ? "とじる" : "開く"}
-          </Button>
-          <Button
-            size="icon"
-            variant="ghost"
-            className="size-8 rounded-xl text-muted-foreground"
-            onClick={() => removeHistory(item.id)}
-          >
-            <Trash2 className="size-4" />
-            <span className="sr-only">{item.title}の履歴を削除</span>
-          </Button>
-        </div>
-      </div>
-
-      {open ? (
-        <div className="flex flex-col gap-2 border-t pt-2">
-          {/* バッチ内の1枚を開く操作は単体編集なので requiredPlan に従う */}
-          <p className="text-[10px] leading-relaxed text-muted-foreground">
-            写真をタップすると、1枚だけ選んで編集し直せます。
-          </p>
-          <div className="grid grid-cols-4 gap-2">
-            {item.mediaIds.map((id) => (
-              <button
-                key={id}
-                type="button"
-                onClick={() => guardNewWork("この写真を編集", () => startEditing(id))}
-                className="transition-transform active:scale-95"
-              >
-                <MediaThumb
-                  media={findMedia(id)}
-                  effect={item.effect}
-                  className="aspect-square w-full ring-1 ring-foreground/10"
-                />
-                <span className="sr-only">{findMedia(id).title}を編集する</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      ) : null}
-    </article>
+    </>
   )
 }

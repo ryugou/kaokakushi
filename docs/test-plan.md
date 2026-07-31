@@ -241,11 +241,11 @@
 - 異常終了後の起動時、`isUndelivered` では復旧案内が出て、`delivered` では出ないこと
 - 「履歴を保存しない」設定で、未受け渡し出力・保存結果不明の注記が付いた `delivered` 出力・`UsageLedger` の消費記録・処理中の `ExportJob` とその生成済み出力の 4 つ以外が残らないこと
 - `canDeleteHistoryUnit` が**列挙された全参照元**を保護すること
-- **`Batch` 削除が所属する全 `Project`・キュー項目・`ExportRecord` を 1 トランザクションで削除し、台帳側も全 `projectID` 分を 1 トランザクションで削除すること**
+- **`Project` 削除時、それが `Batch` の最後の所属 `Project` なら `Batch` 行が同一トランザクションで削除されること**
+- **所属 `Project` が残る場合は `Batch` 行が残ること**
 - **`deleteHistoryUnit` が `DeletionContext` を受け取らず、DB トランザクション内で読み直して再判定すること**
 - **`inspectDeletion` の後・削除の前に新しい `ExportJob` が作られた場合、削除が throw すること**
 - **`hasUndeliveredOutputRecord` が `delivered` の出力を保護せず、`isUndelivered` のみを見ること**
-- **1 枚でも絶対保護に触れていればバッチ全体が削除されないこと**
 - **編集中 `Project` の破棄が `WorkingSourceRecord` をすべて削除すること**
 - `CustomStamp` を削除しても、それを使用したプロジェクトが再書き出しできること
 - `StampAsset` が**最終保存バイト列**の内容ハッシュで重複排除され、参照カウントが 0 になったときのみ削除されること

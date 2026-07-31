@@ -65,7 +65,7 @@ const PLANS: PlanCard[] = [
       { label: "要確認の写真だけを抽出して確認", ok: true },
       { label: "確認済みの写真は自動で進みます", ok: true },
       { label: "失敗した写真だけあとから再試行", ok: true },
-      { label: "いつもの設定をそのまま使え、あとから見返せます", ok: true },
+      { label: "いつもの設定をそのまま使えます", ok: true },
     ],
   },
 ]
@@ -86,7 +86,6 @@ const COMPARISON: { label: string; values: [Cell, Cell, Cell] }[] = [
   { label: "一括処理", values: [`お試し${TRIAL_CREDITS}枚`, `お試し${TRIAL_CREDITS}枚`, `最大${BATCH_MAX_ITEMS}枚`] },
   { label: "処理キュー", values: [false, false, true] },
   { label: "一括設定プリセット", values: [false, false, true] },
-  { label: "バッチ履歴", values: [false, false, true] },
 ]
 
 export function PricingScreen() {

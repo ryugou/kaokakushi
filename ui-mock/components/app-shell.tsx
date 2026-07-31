@@ -5,6 +5,7 @@ import * as React from "react"
 import { AppProvider, useApp } from "@/components/app-provider"
 import { PhoneShell } from "@/components/phone-shell"
 import { BottomNav } from "@/components/bottom-nav"
+import { StartSheet } from "@/components/start-sheet"
 import { MediaPicker } from "@/components/media-picker"
 import { UpgradeModal } from "@/components/upgrade-modal"
 import { DiscardDialog, RecoveryDialog, UnsavedOutputDialog } from "@/components/pending-dialogs"
@@ -34,7 +35,7 @@ export function AppShell() {
 }
 
 function AppShellInner() {
-  const { screen, openPicker } = useApp()
+  const { screen, openStartSheet } = useApp()
   const scrollRef = React.useRef<HTMLDivElement>(null)
 
   React.useEffect(() => {
@@ -59,10 +60,11 @@ function AppShellInner() {
         {screen === "custom-stamp" ? <CustomStampScreen /> : null}
       </main>
 
-      {/* v1 は写真専用なので、種類選択をはさまず写真ピッカーへ直接進む */}
-      {TAB_SCREENS.includes(screen) ? <BottomNav onNew={openPicker} /> : null}
+      {/* 加工の開始は1アクション。ホームとフッターの両方から同じシートを開く */}
+      {TAB_SCREENS.includes(screen) ? <BottomNav onNew={openStartSheet} /> : null}
 
       <MediaPicker />
+      <StartSheet />
       <UpgradeModal />
       <UnsavedOutputDialog />
       <DiscardDialog />

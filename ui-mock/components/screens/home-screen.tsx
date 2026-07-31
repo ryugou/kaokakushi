@@ -1,50 +1,25 @@
 "use client"
 
 import * as React from "react"
-import { ChevronRight, ImageIcon, Layers, Settings, ShieldCheck, Smile, Sparkles } from "lucide-react"
+import { ChevronRight, Settings, Sparkles } from "lucide-react"
 
 import { findMedia } from "@/lib/mock-data"
-import { FREE_MONTHLY_LIMIT, useApp } from "@/components/app-provider"
-import { AdSlot, PrivacyNote, SectionTitle } from "@/components/app-bits"
+import { useApp } from "@/components/app-provider"
+import { AdSlot, SectionTitle } from "@/components/app-bits"
 import { InfoDialog, type InfoTopic } from "@/components/info-dialog"
 import { MediaThumb } from "@/components/media-canvas"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 
 export function HomeScreen() {
-  const {
-    go,
-    plan,
-    hasAds,
-    canBatchFull,
-    trialCredits,
-    canBatchTrial,
-    remainingFree,
-    history,
-    startEditing,
-    requestUpgrade,
-    openPicker,
-    guardNewWork,
-  } = useApp()
+  const { go, plan, hasAds, remainingFree, history, startEditing, guardNewWork, openStartSheet } = useApp()
 
   const recent = history.filter((h) => h.type === "single").slice(0, 6)
   const [info, setInfo] = React.useState<InfoTopic | null>(null)
   const outOfFree = plan === "free" && remainingFree === 0
 
-  const openBatch = () => {
-    if (canBatchFull || canBatchTrial) {
-      guardNewWork("まとめて加工", () => go("batch"))
-      return
-    }
-    requestUpgrade("batch-credit")
-  }
-
-  const batchBadge = canBatchFull ? null : canBatchTrial ? "お試し" : "Pro"
-  const batchHint = canBatchFull
-    ? "最大50枚をまとめて"
-    : canBatchTrial
-      ? `お試しであと${trialCredits}枚ためせます`
-      : "お試しは使い切りました"
+  // Free だけ、ボタンの中で残り枚数を示す（常設カードは残0枚のときだけ下に出す）
+  const heroSubtext = plan === "free" ? `今月あと${remainingFree}枚` : "写真の顔をかんたんに隠せます"
 
   return (
     <div className="flex flex-col gap-6 px-4 pt-2 pb-8">
@@ -64,37 +39,25 @@ export function HomeScreen() {
       <div className="flex flex-col gap-3">
         <button
           type="button"
-          onClick={openPicker}
-          className="flex h-32 flex-col items-start justify-between rounded-3xl bg-primary p-5 text-left text-primary-foreground shadow-sm transition-transform active:scale-[0.98]"
+          onClick={openStartSheet}
+          className="flex h-16 w-full flex-col items-center justify-center rounded-full bg-gradient-to-b from-primary to-primary/85 text-primary-foreground shadow-md shadow-primary/25 transition-transform active:scale-[0.98]"
         >
-          <ImageIcon className="size-8" aria-hidden />
-          <span>
-            <span className="block font-rounded text-base font-bold">写真を選ぶ（1枚ずつ加工）</span>
-            <span className="block text-xs opacity-85">顔を自動で見つけて、かんたんに隠せます</span>
+          <span className="flex items-center gap-2 font-rounded text-lg font-bold">
+            <Sparkles className="size-5" aria-hidden />
+            加工をはじめる
           </span>
+          <span className="text-[11px] opacity-85">{heroSubtext}</span>
         </button>
         <button
           type="button"
-          onClick={openBatch}
-          className="flex h-24 flex-col justify-between rounded-3xl bg-secondary p-4 text-left text-secondary-foreground ring-1 ring-foreground/10 transition-transform active:scale-[0.98]"
+          onClick={() => setInfo("privacy")}
+          className="text-center text-[11px] text-muted-foreground underline-offset-2 hover:underline"
         >
-          <div className="flex w-full items-center justify-between">
-            <Layers className="size-6 text-primary" aria-hidden />
-            {batchBadge ? (
-              <span className="rounded-full bg-accent px-2 py-0.5 text-[10px] font-bold text-accent-foreground">
-                {batchBadge}
-              </span>
-            ) : null}
-          </div>
-          <span>
-            <span className="block font-rounded text-sm font-bold">まとめて加工</span>
-            <span className="block text-[11px] text-muted-foreground">{batchHint}</span>
-          </span>
+          写真は端末の中だけで処理されます
         </button>
-        <PrivacyNote />
       </div>
 
-      {plan === "free" ? (
+      {outOfFree ? (
         <Card size="sm" className="rounded-3xl">
           <CardContent className="flex items-center gap-3">
             <div className="flex size-11 shrink-0 flex-col items-center justify-center rounded-2xl bg-accent">
@@ -104,14 +67,8 @@ export function HomeScreen() {
               <span className="text-[9px] text-accent-foreground">枚</span>
             </div>
             <div className="min-w-0 flex-1">
-              <p className="text-sm font-bold">
-                {outOfFree ? "今月の無料保存を使い切りました" : `今月あと${remainingFree}枚保存できます`}
-              </p>
-              <p className="text-[11px] text-muted-foreground">
-                {outOfFree
-                  ? "Standardなら1枚ずつ無制限で保存できます"
-                  : `無料プランは月${FREE_MONTHLY_LIMIT}枚まで保存できます`}
-              </p>
+              <p className="text-sm font-bold">今月の無料保存を使い切りました</p>
+              <p className="text-[11px] text-muted-foreground">Standardなら1枚ずつ無制限で保存できます</p>
             </div>
             <Button variant="ghost" size="icon-lg" className="size-9 rounded-full" onClick={() => go("pricing")}>
               <ChevronRight className="size-5" />
@@ -157,63 +114,9 @@ export function HomeScreen() {
         </section>
       ) : null}
 
-      <section className="flex flex-col gap-3">
-        <SectionTitle>べんりな使いかた</SectionTitle>
-        <div className="flex flex-col gap-2">
-          <ShortcutRow
-            icon={Smile}
-            label="スタンプをえらぶ"
-            hint="動物やかわいい絵柄もあります"
-            onClick={() => go("stamps")}
-          />
-          <ShortcutRow
-            icon={ShieldCheck}
-            label="プライバシーについて"
-            hint="端末内だけで処理するしくみ"
-            onClick={() => setInfo("privacy")}
-          />
-        </div>
-      </section>
-
       <InfoDialog topic={info} onClose={() => setInfo(null)} />
 
       {hasAds ? <AdSlot /> : null}
     </div>
-  )
-}
-
-function ShortcutRow({
-  icon: Icon,
-  label,
-  hint,
-  badge,
-  onClick,
-}: {
-  icon: typeof ImageIcon
-  label: string
-  hint: string
-  badge?: string | null
-  onClick: () => void
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="flex items-center gap-3 rounded-2xl bg-card p-3 text-left ring-1 ring-foreground/10 transition-transform active:scale-[0.99]"
-    >
-      <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-secondary text-primary">
-        <Icon className="size-5" aria-hidden />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm font-bold">{label}</span>
-        <span className="block truncate text-[11px] text-muted-foreground">{hint}</span>
-      </span>
-      {badge ? (
-        <span className="shrink-0 rounded-full bg-accent px-2 py-0.5 text-[10px] font-bold text-accent-foreground">
-          {badge}
-        </span>
-      ) : null}
-      <ChevronRight className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-    </button>
   )
 }
