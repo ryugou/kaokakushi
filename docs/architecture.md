@@ -679,7 +679,7 @@ Free 範囲のプロジェクトとは、モザイク・ぼかし・黒塗り・
 
 | 操作 | 必要な能力 |
 | --- | --- |
-| バッチ履歴の閲覧 / バッチ内の個別写真の閲覧 | なし |
+| 加工済み写真（履歴グリッド）の閲覧 | なし |
 | バッチ全体への設定反映 / 再実行 / エラー写真のみの再試行 | `canUseProBatch` |
 
 原則は 4 つです。
@@ -1237,7 +1237,7 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `UnknownLibrarySave.exportID` | `OutputRecord` | CASCADE |
 | `DeliveryAttempt.exportID` | `OutputRecord` | CASCADE |
 
-**`batchID` を `SET NULL` にするのはバッチ履歴を消しても出力と書き出し記録を残すため**（バッチは集約単位であり個々の出力の存在条件ではない）。宣言していない参照は `PRAGMA foreign_key_check` で検出できないため、上の表が外部キーの全体であり新しい参照は必ずこの表へ加える。**`RESTRICT` は削除可否の判定（7.5）を DB 側でも二重に担保する**（アプリ側判定を通り抜けた削除は制約違反として失敗する）。**「未確定の出力は 1 プロジェクトにつき 1 件」は `OutputRecord.projectID` の部分 UNIQUE インデックス（`WHERE settledAt IS NULL`）で表現できる**（SQLite の部分インデックスを使う。開始ゲートを別途持たない）。中断・失敗は `ExportJob` 行を削除して終わるため再試行という概念は無く、次の開始は常に新しい `exportID` を発行する（[書き出し Saga](export-saga.md) が正本）。
+**`batchID` を `SET NULL` にするのは `Batch` の記録を消しても出力と書き出し記録を残すため**（バッチは処理の単位であり個々の出力の存在条件ではない。閲覧・削除の単位は `Project` のみ。7.5）。宣言していない参照は `PRAGMA foreign_key_check` で検出できないため、上の表が外部キーの全体であり新しい参照は必ずこの表へ加える。**`RESTRICT` は削除可否の判定（7.5）を DB 側でも二重に担保する**（アプリ側判定を通り抜けた削除は制約違反として失敗する）。**「未確定の出力は 1 プロジェクトにつき 1 件」は `OutputRecord.projectID` の部分 UNIQUE インデックス（`WHERE settledAt IS NULL`）で表現できる**（SQLite の部分インデックスを使う。開始ゲートを別途持たない）。中断・失敗は `ExportJob` 行を削除して終わるため再試行という概念は無く、次の開始は常に新しい `exportID` を発行する（[書き出し Saga](export-saga.md) が正本）。
 
 ##### 接続と journal
 
@@ -1609,7 +1609,6 @@ Pro は 1 バッチ 50 枚のため完成物が数百 MB〜1GB を超えるこ�
 ```swift
 enum HistoryUnit: Sendable, Equatable {
     case project(ProjectID)
-    case batch(BatchID)
 }
 
 enum DeletionTrigger: Sendable {
@@ -1638,10 +1637,12 @@ struct DeletionContext: Sendable {
 }
 
 func canDeleteHistoryUnit(
-    _ unit: HistoryUnit,          // Project または Batch
+    _ unit: HistoryUnit,          // Project
     context: DeletionContext
 ) -> Bool
 ```
+
+**履歴は写真アプリ型のフラットな写真グリッドであり、閲覧・削除の単位は `Project` のみとする**（バッチのグルーピングは処理の単位としてのみ存在し、閲覧・削除の単位ではない。[商品面の決定](product-decisions.md)）。`Batch` 行自体は利用者が直接削除する対象ではなく、所属する `Project` がすべて削除されたときに自動的に消える（下記「`Project` 削除 Saga」）。
 
 **参照元は 2 種類に分かれます。**
 
@@ -1680,21 +1681,14 @@ func canDeleteHistoryUnit(
 | --- | --- |
 | 1 | `canDeleteHistoryUnit` が真であることを確認する |
 | 2 | **同一 DB トランザクション**で `Project` と関連行（`ExportRecord` / `OutputRecord` / キュー項目 / `WorkingSourceRecord` / 検出・レビュー結果 / `ProjectStampAsset` / 履歴サムネイル / `ExportedSettingsEntry`）を削除し、実体を `PendingFileDeletion` へ積む |
-| 3 | `PendingFileDeletion` に従って実体を削除する |
+| 3 | 削除した `Project` が `Batch` に属しており、そのトランザクション内で数えた **残り所属 `Project` 数が 0** になった場合、**同じトランザクションで `Batch` 行も削除する** |
+| 4 | `PendingFileDeletion` に従って実体を削除する |
 
-中断すればトランザクションはロールバックされ削除は成立しない（他の `app.db` 更新と同じ）。手順 2 と 3 の間で中断した場合は、`PendingFileDeletion` の起動時 GC が実体を回収する。
+中断すればトランザクションはロールバックされ削除は成立しない（他の `app.db` 更新と同じ）。手順 3 と 4 の間で中断した場合は、`PendingFileDeletion` の起動時 GC が実体を回収する。**`Batch` 行の削除は利用者操作の対象ではなく、`Project` 削除の副次的な後始末に過ぎない**（`ExportQueueItem.projectID` は `Project` へ `CASCADE` するため、この時点でそのバッチのキュー項目は既に存在しない。7.1）。`ExportRecord` / `OutputRecord` / `ExportJob` が保持する `batchID` は `SET NULL` になる（7.1）。
 
-##### `Batch` 削除と編集中 `Project` の破棄
+##### 編集中 `Project` の破棄
 
-**`HistoryUnit` は `Project` と `Batch` の 2 つ**（`Batch` 削除は所属する全 `Project` を巻き込むため別の手順になる）。
-
-| Saga | 対象 | 手順 |
-| --- | --- | --- |
-| `Project` 削除 | 単体の `Project` | 上記 |
-| **`Batch` 削除** | `Batch` と所属する全 `Project` | 判定を**バッチ全体で 1 回**行い、同一 DB トランザクションで `Batch`・全 `Project`・全キュー項目・全 `ExportRecord`・**全 `projectID` 分の `ExportedSettingsEntry`**を削除する（`UsageLedger` の消費カウンタは変更しない） |
-| **編集中 `Project` の破棄** | 書き出し前の `Project` | `Project` 削除 Saga と同じ。`beingEdited` の上書き確認を伴う |
-
-**`Batch` の判定は写真ごとに行わない**（一部だけ削除できると参照の切れた `Project`/`Batch` が残る。1 枚でも絶対保護に触れていればバッチ全体を削除しない）。
+書き出し前の `Project` を破棄する場合も `Project` 削除 Saga と同じ手順を使う。`beingEdited` の上書き確認を伴う（削除の可否判定）。
 
 ##### 実装の所在
 
@@ -1710,18 +1704,17 @@ protocol HistoryDeletionStore: Sendable {
     ) async throws -> DeletionInspection
 
     /// DB トランザクション内で DeletionContext を再取得し、
-    /// canDeleteHistoryUnit を再評価してから削除する
+    /// canDeleteHistoryUnit を再評価してから削除する（所属 Batch が空になった場合の自動削除を含む）
     func deleteHistoryUnit(
         _ unit: HistoryUnit,
         trigger: DeletionTrigger
-    ) async throws -> Set<ProjectID>
+    ) async throws
 }
 
 /// 確認画面へ出す情報。削除の可否そのものは保証しない
 struct DeletionInspection: Sendable {
     let blockedByAbsoluteProtection: Set<AbsoluteProtection>
     let overridableProtections: Set<OverridableProtection>
-    let affectedProjectCount: Int
     let reclaimableBytes: Int64
 }
 
