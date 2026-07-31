@@ -277,6 +277,9 @@ function PhotoActionSheet({ tile, onClose }: { tile: GridTile | null; onClose: (
                       <Trash2 data-icon="inline-start" />
                       この一括処理の履歴を削除
                     </Button>
+                    <p className="px-1 text-center text-[11px] leading-relaxed text-muted-foreground">
+                      同じ一括処理で加工した他の写真の履歴も、まとめて削除されます。
+                    </p>
                   </>
                 )}
                 <Button variant="ghost" size="lg" className="h-11 rounded-2xl" onClick={onClose}>
