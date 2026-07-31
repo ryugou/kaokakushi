@@ -1133,7 +1133,7 @@ function SummaryStage() {
           </p>
         </div>
 
-        {!canBatchFull && batchTrialUsed ? (
+        {!canBatchFull && batchTrialUsed && !batchSettled ? (
           <div className="flex flex-col gap-1.5 rounded-2xl bg-accent/70 px-3 py-2.5">
             <p className="text-[11px] font-bold text-accent-foreground">
               {trialCredits > 0 ? `一括処理お試し：あと${trialCredits}枚` : "お試しクレジットを使い切りました"}

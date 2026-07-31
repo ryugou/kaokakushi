@@ -17,6 +17,7 @@ export function HomeScreen() {
     plan,
     hasAds,
     canBatchFull,
+    trialCredits,
     canBatchTrial,
     remainingFree,
     history,
@@ -42,7 +43,7 @@ export function HomeScreen() {
   const batchHint = canBatchFull
     ? "最大50枚をまとめて"
     : canBatchTrial
-      ? "お試しで5枚までためせます"
+      ? `お試しであと${trialCredits}枚ためせます`
       : "お試しは使い切りました"
 
   return (
