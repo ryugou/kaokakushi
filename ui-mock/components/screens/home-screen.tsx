@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { ChevronRight, ImageIcon, Settings, Sparkles } from "lucide-react"
+import { ChevronRight, Settings, Sparkles } from "lucide-react"
 
 import { findMedia } from "@/lib/mock-data"
 import { useApp } from "@/components/app-provider"
@@ -40,13 +40,13 @@ export function HomeScreen() {
         <button
           type="button"
           onClick={openStartSheet}
-          className="flex h-32 flex-col items-start justify-between rounded-3xl bg-primary p-5 text-left text-primary-foreground shadow-sm transition-transform active:scale-[0.98]"
+          className="flex h-16 w-full flex-col items-center justify-center rounded-full bg-gradient-to-b from-primary to-primary/85 text-primary-foreground shadow-md shadow-primary/25 transition-transform active:scale-[0.98]"
         >
-          <ImageIcon className="size-8" aria-hidden />
-          <span>
-            <span className="block font-rounded text-lg font-bold">加工をはじめる</span>
-            <span className="block text-xs opacity-85">{heroSubtext}</span>
+          <span className="flex items-center gap-2 font-rounded text-lg font-bold">
+            <Sparkles className="size-5" aria-hidden />
+            加工をはじめる
           </span>
+          <span className="text-[11px] opacity-85">{heroSubtext}</span>
         </button>
         <button
           type="button"
