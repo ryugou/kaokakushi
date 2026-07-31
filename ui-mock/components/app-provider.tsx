@@ -334,6 +334,11 @@ type AppContextValue = {
   retiredStampCount: number
   clearMyStamps: () => void
 
+  /** 加工の開始を1アクションに統一するシート。「1枚ずつ」「まとめて」を選ばせる */
+  startSheetOpen: boolean
+  openStartSheet: () => void
+  closeStartSheet: () => void
+
   /** 写真ピッカー */
   pickerOpen: boolean
   pickerMulti: boolean
@@ -447,6 +452,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [myStamps, setMyStamps] = React.useState<MyStamp[]>(MY_STAMPS)
   /** 一覧からは消えたが、過去プロジェクトが参照しているスタンプ */
   const [retiredStamps, setRetiredStamps] = React.useState<MyStamp[]>([])
+
+  const [startSheetOpen, setStartSheetOpen] = React.useState(false)
+  const openStartSheet = React.useCallback(() => setStartSheetOpen(true), [])
+  const closeStartSheet = React.useCallback(() => setStartSheetOpen(false), [])
 
   const [pickerOpen, setPickerOpen] = React.useState(false)
   const [pickerMulti, setPickerMulti] = React.useState(false)
@@ -1443,6 +1452,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     stampStorageRetainedMb,
     retiredStampCount,
     clearMyStamps,
+    startSheetOpen,
+    openStartSheet,
+    closeStartSheet,
     pickerOpen,
     pickerMulti,
     openPicker,

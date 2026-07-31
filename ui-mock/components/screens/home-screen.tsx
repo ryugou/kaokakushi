@@ -1,7 +1,7 @@
 "use client"
 
 import * as React from "react"
-import { ChevronRight, ImageIcon, Layers, Settings, Sparkles } from "lucide-react"
+import { ChevronRight, ImageIcon, Settings, Sparkles } from "lucide-react"
 
 import { findMedia } from "@/lib/mock-data"
 import { useApp } from "@/components/app-provider"
@@ -12,41 +12,14 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 
 export function HomeScreen() {
-  const {
-    go,
-    plan,
-    hasAds,
-    canBatchFull,
-    trialCredits,
-    canBatchTrial,
-    remainingFree,
-    history,
-    startEditing,
-    requestUpgrade,
-    openPicker,
-    guardNewWork,
-  } = useApp()
+  const { go, plan, hasAds, remainingFree, history, startEditing, guardNewWork, openStartSheet } = useApp()
 
   const recent = history.filter((h) => h.type === "single").slice(0, 6)
   const [info, setInfo] = React.useState<InfoTopic | null>(null)
   const outOfFree = plan === "free" && remainingFree === 0
 
-  const openBatch = () => {
-    if (canBatchFull || canBatchTrial) {
-      guardNewWork("まとめて加工", () => go("batch"))
-      return
-    }
-    requestUpgrade("batch-credit")
-  }
-
-  const batchBadge = canBatchFull ? null : canBatchTrial ? "お試し" : "Pro"
-  const batchHint = canBatchFull
-    ? "最大50枚をまとめて"
-    : canBatchTrial
-      ? `お試しであと${trialCredits}枚ためせます`
-      : "お試しは使い切りました"
   // Free だけ、ボタンの中で残り枚数を示す（常設カードは残0枚のときだけ下に出す）
-  const pickerSubtext = plan === "free" ? `1枚ずつ加工します・今月あと${remainingFree}枚` : "1枚ずつ加工します"
+  const heroSubtext = plan === "free" ? `今月あと${remainingFree}枚` : "写真の顔をかんたんに隠せます"
 
   return (
     <div className="flex flex-col gap-6 px-4 pt-2 pb-8">
@@ -66,31 +39,13 @@ export function HomeScreen() {
       <div className="flex flex-col gap-3">
         <button
           type="button"
-          onClick={openPicker}
+          onClick={openStartSheet}
           className="flex h-32 flex-col items-start justify-between rounded-3xl bg-primary p-5 text-left text-primary-foreground shadow-sm transition-transform active:scale-[0.98]"
         >
           <ImageIcon className="size-8" aria-hidden />
           <span>
-            <span className="block font-rounded text-base font-bold">写真を選ぶ（1枚ずつ加工）</span>
-            <span className="block text-xs opacity-85">{pickerSubtext}</span>
-          </span>
-        </button>
-        <button
-          type="button"
-          onClick={openBatch}
-          className="flex h-24 flex-col justify-between rounded-3xl bg-secondary p-4 text-left text-secondary-foreground ring-1 ring-foreground/10 transition-transform active:scale-[0.98]"
-        >
-          <div className="flex w-full items-center justify-between">
-            <Layers className="size-6 text-primary" aria-hidden />
-            {batchBadge ? (
-              <span className="rounded-full bg-accent px-2 py-0.5 text-[10px] font-bold text-accent-foreground">
-                {batchBadge}
-              </span>
-            ) : null}
-          </div>
-          <span>
-            <span className="block font-rounded text-sm font-bold">まとめて加工</span>
-            <span className="block text-[11px] text-muted-foreground">{batchHint}</span>
+            <span className="block font-rounded text-lg font-bold">加工をはじめる</span>
+            <span className="block text-xs opacity-85">{heroSubtext}</span>
           </span>
         </button>
         <button
