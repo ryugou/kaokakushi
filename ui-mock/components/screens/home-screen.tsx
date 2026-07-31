@@ -1,11 +1,11 @@
 "use client"
 
 import * as React from "react"
-import { ChevronRight, ImageIcon, Layers, Settings, ShieldCheck, Smile, Sparkles } from "lucide-react"
+import { ChevronRight, ImageIcon, Layers, Settings, Sparkles } from "lucide-react"
 
 import { findMedia } from "@/lib/mock-data"
-import { FREE_MONTHLY_LIMIT, useApp } from "@/components/app-provider"
-import { AdSlot, PrivacyNote, SectionTitle } from "@/components/app-bits"
+import { useApp } from "@/components/app-provider"
+import { AdSlot, SectionTitle } from "@/components/app-bits"
 import { InfoDialog, type InfoTopic } from "@/components/info-dialog"
 import { MediaThumb } from "@/components/media-canvas"
 import { Button } from "@/components/ui/button"
@@ -45,6 +45,8 @@ export function HomeScreen() {
     : canBatchTrial
       ? `お試しであと${trialCredits}枚ためせます`
       : "お試しは使い切りました"
+  // Free だけ、ボタンの中で残り枚数を示す（常設カードは残0枚のときだけ下に出す）
+  const pickerSubtext = plan === "free" ? `1枚ずつ加工します・今月あと${remainingFree}枚` : "1枚ずつ加工します"
 
   return (
     <div className="flex flex-col gap-6 px-4 pt-2 pb-8">
@@ -70,7 +72,7 @@ export function HomeScreen() {
           <ImageIcon className="size-8" aria-hidden />
           <span>
             <span className="block font-rounded text-base font-bold">写真を選ぶ（1枚ずつ加工）</span>
-            <span className="block text-xs opacity-85">顔を自動で見つけて、かんたんに隠せます</span>
+            <span className="block text-xs opacity-85">{pickerSubtext}</span>
           </span>
         </button>
         <button
@@ -91,10 +93,16 @@ export function HomeScreen() {
             <span className="block text-[11px] text-muted-foreground">{batchHint}</span>
           </span>
         </button>
-        <PrivacyNote />
+        <button
+          type="button"
+          onClick={() => setInfo("privacy")}
+          className="text-center text-[11px] text-muted-foreground underline-offset-2 hover:underline"
+        >
+          写真は端末の中だけで処理されます
+        </button>
       </div>
 
-      {plan === "free" ? (
+      {outOfFree ? (
         <Card size="sm" className="rounded-3xl">
           <CardContent className="flex items-center gap-3">
             <div className="flex size-11 shrink-0 flex-col items-center justify-center rounded-2xl bg-accent">
@@ -104,14 +112,8 @@ export function HomeScreen() {
               <span className="text-[9px] text-accent-foreground">枚</span>
             </div>
             <div className="min-w-0 flex-1">
-              <p className="text-sm font-bold">
-                {outOfFree ? "今月の無料保存を使い切りました" : `今月あと${remainingFree}枚保存できます`}
-              </p>
-              <p className="text-[11px] text-muted-foreground">
-                {outOfFree
-                  ? "Standardなら1枚ずつ無制限で保存できます"
-                  : `無料プランは月${FREE_MONTHLY_LIMIT}枚まで保存できます`}
-              </p>
+              <p className="text-sm font-bold">今月の無料保存を使い切りました</p>
+              <p className="text-[11px] text-muted-foreground">Standardなら1枚ずつ無制限で保存できます</p>
             </div>
             <Button variant="ghost" size="icon-lg" className="size-9 rounded-full" onClick={() => go("pricing")}>
               <ChevronRight className="size-5" />
@@ -157,63 +159,9 @@ export function HomeScreen() {
         </section>
       ) : null}
 
-      <section className="flex flex-col gap-3">
-        <SectionTitle>べんりな使いかた</SectionTitle>
-        <div className="flex flex-col gap-2">
-          <ShortcutRow
-            icon={Smile}
-            label="スタンプをえらぶ"
-            hint="動物やかわいい絵柄もあります"
-            onClick={() => go("stamps")}
-          />
-          <ShortcutRow
-            icon={ShieldCheck}
-            label="プライバシーについて"
-            hint="端末内だけで処理するしくみ"
-            onClick={() => setInfo("privacy")}
-          />
-        </div>
-      </section>
-
       <InfoDialog topic={info} onClose={() => setInfo(null)} />
 
       {hasAds ? <AdSlot /> : null}
     </div>
-  )
-}
-
-function ShortcutRow({
-  icon: Icon,
-  label,
-  hint,
-  badge,
-  onClick,
-}: {
-  icon: typeof ImageIcon
-  label: string
-  hint: string
-  badge?: string | null
-  onClick: () => void
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="flex items-center gap-3 rounded-2xl bg-card p-3 text-left ring-1 ring-foreground/10 transition-transform active:scale-[0.99]"
-    >
-      <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-secondary text-primary">
-        <Icon className="size-5" aria-hidden />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm font-bold">{label}</span>
-        <span className="block truncate text-[11px] text-muted-foreground">{hint}</span>
-      </span>
-      {badge ? (
-        <span className="shrink-0 rounded-full bg-accent px-2 py-0.5 text-[10px] font-bold text-accent-foreground">
-          {badge}
-        </span>
-      ) : null}
-      <ChevronRight className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-    </button>
   )
 }
