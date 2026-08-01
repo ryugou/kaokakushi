@@ -241,14 +241,6 @@ func fakeExportSagaStoreForwardsArguments() async throws {
     let settledAt = Date(timeIntervalSince1970: 1_700_000_000)
     try await store.settleBatch(batchID, settledAt: settledAt)
 
-    let discardedID = ExportID(rawValue: UUID())
-    try await store.discardExport(discardedID)
-
-    _ = try await store.loadRunningJobs()
-
-    let deletedIDs = [ExportID(rawValue: UUID()), ExportID(rawValue: UUID())]
-    try await store.deleteRunningJobs(deletedIDs)
-
     let startCalls = await store.startExportCalls
     #expect(startCalls.count == 1)
     #expect(startCalls[0].expectedProjectRevision == 7)
@@ -268,6 +260,20 @@ func fakeExportSagaStoreForwardsArguments() async throws {
     #expect(settleBatchCalls.count == 1)
     #expect(settleBatchCalls[0].batchID == batchID)
     #expect(settleBatchCalls[0].settledAt == settledAt)
+}
+
+@Test("ExportSagaStoreへの最小準拠がdiscard/loadRunningJobs/deleteRunningJobsの引数を記録する")
+func fakeExportSagaStoreForwardsJobMaintenanceArguments() async throws {
+    let store = FakeExportSagaStore(startExportResult: .blocked(
+        ExportStartBlock(reason: .trialCreditsUnavailable, limit: nil)))
+
+    let discardedID = ExportID(rawValue: UUID())
+    try await store.discardExport(discardedID)
+
+    _ = try await store.loadRunningJobs()
+
+    let deletedIDs = [ExportID(rawValue: UUID()), ExportID(rawValue: UUID())]
+    try await store.deleteRunningJobs(deletedIDs)
 
     let discardCalls = await store.discardExportCalls
     #expect(discardCalls == [discardedID])

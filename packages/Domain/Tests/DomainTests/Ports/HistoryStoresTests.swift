@@ -2,12 +2,12 @@ import Testing
 @testable import Domain
 import Foundation
 
-/// Task 4: 履歴削除の永続化ポート（architecture.md「削除の可否判定」〜「出力の削除経路」節）。
-///
-/// `HistoryUnit` / `DeletionTrigger` / `OverridableProtection` / `DeletionContext` /
-/// `DeletionInspection` / `AbsoluteProtection` の各ケース・フィールド保持と、
-/// `HistoryDeletionStore` への最小準拠を検証する。`canDeleteHistoryUnit`（純粋関数）は
-/// どのタスクにも割り当てが無いためここでは扱わない（spec 参照）。
+// Task 4: 履歴削除の永続化ポート（architecture.md「削除の可否判定」〜「出力の削除経路」節）。
+//
+// `HistoryUnit` / `DeletionTrigger` / `OverridableProtection` / `DeletionContext` /
+// `DeletionInspection` / `AbsoluteProtection` の各ケース・フィールド保持と、
+// `HistoryDeletionStore` への最小準拠を検証する。`canDeleteHistoryUnit`（純粋関数）は
+// どのタスクにも割り当てが無いためここでは扱わない（spec 参照）。
 
 // MARK: - HistoryUnit
 
