@@ -36,8 +36,10 @@
 # 対応範囲:
 #   修飾（@testable / @_implementationOnly / @preconcurrency / @_exported / アクセスレベル）と
 #   種別つき import（`import struct Foundation.Date` 等）はモジュール名を正しく抽出する。
-#   セミコロン後の import 等、通常のコーディングで現れない構文への完全対応は目的にしない
-#   （これは自分たちの事故防止ガードレールであり、意図的な迂回はレビューで検出する）。
+#   行内ブロックコメントの挿入（`import/*x*/UIKit` 等。コメントはトークン区切りとして
+#   機能するため正規表現を迂回できる）は、検査前にコメントを空白へ正規化して検出する。
+#   複数行に跨るコメントで import 文を分割する等、通常のコーディングで現れない構文への
+#   完全対応は目的にしない（意図的な難読化はレビューで検出する）。
 
 set -euo pipefail
 
@@ -70,13 +72,18 @@ scan_scope() {
     return
   fi
 
-  local matches
-  # -H: マッチしたファイルが1件だけの場合でも "file:line:content" 形式を強制する
-  #     （-H なしだと単一ファイルの場合に grep がファイル名を省略し、後段の
-  #     file:line:content パースが壊れて誤ったファイル名・行番号を報告する）。
-  # grep が「マッチなし」で exit 1 を返すのは正常系（違反なし）なので、
-  # ここでは `|| true` で吸収し、後段の while ループが空入力を正しく処理する。
-  matches=$(printf '%s\n' "$swift_files" | xargs grep -nHE "$IMPORT_REGEX" -- 2>/dev/null || true)
+  local matches=""
+  # 行内ブロックコメント（/* ... */）を空白へ置換してから import 行を検査する。
+  # コメント挿入（`import/*x*/UIKit`）による正規表現の迂回を防ぐため。
+  # sed 出力へファイル名を自前で前置し "file:line:content" 形式を保つ。
+  # grep が「マッチなし」で exit 1 を返すのは正常系（違反なし）なので `|| true` で吸収する。
+  local f m
+  while IFS= read -r f; do
+    m=$(sed -E 's@/\*([^*]|\*+[^*/])*\*+/@ @g' "$f" | grep -nE "$IMPORT_REGEX" | sed "s@^@${f}:@" || true)
+    if [[ -n "$m" ]]; then
+      matches+="${m}"$'\n'
+    fi
+  done <<< "$swift_files"
 
   if [[ -z "$matches" ]]; then
     return
@@ -92,11 +99,7 @@ scan_scope() {
     content="${rest#*:}"
 
     local module
-    module=$(printf '%s\n' "$content" | awk -v allowed="$allowed_csv" '
-      BEGIN {
-        n = split(allowed, arr, ",")
-        for (i = 1; i <= n; i++) allow[arr[i]] = 1
-      }
+    module=$(printf '%s\n' "$content" | awk '
       {
         line = $0
         gsub(/^[ \t]+/, "", line)

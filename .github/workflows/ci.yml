@@ -83,15 +83,21 @@ jobs:
         uses: ./.github/actions/select-xcode
 
       - name: Install XcodeGen
-        run: brew install xcodegen
+        id: xcodegen
+        run: |
+          set -euo pipefail
+          brew install xcodegen
+          # XcodeGen のバージョンが変わると生成される xcodeproj が変わりうるため、
+          # DerivedData キャッシュキーへ含める（旧生成形式由来のキャッシュ復元を防ぐ）。
+          echo "version=$(xcodegen version | tr -d ' ')" >> "$GITHUB_OUTPUT"
 
       - name: Cache DerivedData
         uses: actions/cache@v4
         with:
           path: ~/Library/Developer/Xcode/DerivedData
-          key: deriveddata-${{ runner.os }}-${{ steps.select_xcode.outputs.xcode_id }}-${{ hashFiles('project.yml', 'App/**', 'packages/**') }}
+          key: deriveddata-${{ runner.os }}-${{ steps.select_xcode.outputs.xcode_id }}-${{ steps.xcodegen.outputs.version }}-${{ hashFiles('project.yml', 'App/**', 'packages/**') }}
           restore-keys: |
-            deriveddata-${{ runner.os }}-${{ steps.select_xcode.outputs.xcode_id }}-
+            deriveddata-${{ runner.os }}-${{ steps.select_xcode.outputs.xcode_id }}-${{ steps.xcodegen.outputs.version }}-
 
       - name: xcodegen generate
         run: xcodegen generate

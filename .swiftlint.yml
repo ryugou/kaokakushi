@@ -21,9 +21,11 @@ excluded:
 # regex は `import X` 本体に加え、修飾（@testable / @_implementationOnly /
 # @preconcurrency / @_exported / アクセスレベル）と種別つき import
 # （`import struct Foundation.Date` 等）を任意の組み合わせで検出できる形にしている。
-# 対象は Sources のみ（Tests は import Testing / @testable import が必要なため対象外。
-# scripts/check-imports.sh（CI の import-scan ジョブ）と同一のスコープ・制約を
-# 独立実装で二重にチェックしている（多層防御）。
+# 対象は Sources のみ（Tests は import Testing / @testable import が必要なため対象外）。
+# 既知の字句的制限: コメント挿入（`import/*x*/UIKit` 等）はこの regex では検出できない。
+# CI ゲート（scripts/check-imports.sh）がコメントを正規化してから検査するため、
+# その形の迂回は import-scan ジョブで検出される（SwiftLint 側はエディタ内の
+# 即時フィードバック用途と割り切る）。
 custom_rules:
   domain_import_allowlist:
     included: ".*packages/Domain/Sources/.*\\.swift"
