@@ -465,7 +465,7 @@ struct CustomerInfoSnapshot: Sendable, Equatable {
     let isSandbox: Bool                     // サンドボックス購読の区分（下記）
 }
 
-/// 契約の等級。固定番号は正準スキーマ 3 章
+/// 契約の等級
 enum Plan: Sendable, Hashable, Comparable {
     case free
     case standard
@@ -500,6 +500,22 @@ struct SubscriptionState: Sendable, Equatable {
 ```
 
 **購読キャッシュの鮮度管理は RevenueCat SDK の標準キャッシュ挙動にそのまま任せる**（ADR 0005）。`Purchases.getCustomerInfo()` を既定のキャッシュポリシーで呼び、返された `CustomerInfo` をそのまま `resolve` へ渡す。
+
+| `Plan` | DB 列値 |
+| --- | --- |
+| `free` | **1** |
+| `standard` | **2** |
+| `pro` | **3** |
+
+| `PlanStatus` | DB 列値 |
+| --- | --- |
+| `active` | **1** |
+| `grace` | **2** |
+| `pending` | **3** |
+| `expired` | **4** |
+| `revoked` | **5** |
+
+**列値を固定する**（`SubscriptionState` の DB 列としてスキーマ移行をまたぐため、`case` 宣言順に依存させない。`BatchKind`（6.4）/ `OutputState`（7.5）と同じ規則）。
 
 ##### `isSandbox` の用途
 
@@ -553,7 +569,8 @@ enum SubscriptionCacheState: Sendable {
 
 func resolveCapabilities(
     _ state: SubscriptionCacheState,
-    usageNow: Date
+    usageNow: Date,
+    enabledStampPacks: Set<String>   // 設定定数（10 章）。Domain は設定定数の型を参照しないため注入する
 ) -> CapabilityResolution
 ```
 
@@ -1971,7 +1988,7 @@ enum SourceRepresentation: Sendable, Equatable {
     case transcoded    // OS が変換した派生データしか取得できなかった
 }
 
-/// EXIF の撮影日時。ローカル表記とオフセットを分けて保持する（正準スキーマ 5.1.1）
+/// EXIF の撮影日時。ローカル表記とオフセットを分けて保持する（正準スキーマ 5.1）
 struct OriginalCaptureMetadata: Sendable, Equatable {
     let dateTimeOriginal: String?      // "YYYY:MM:DD HH:MM:SS"
     let subSecTimeOriginal: String?
@@ -1988,7 +2005,7 @@ struct OutputMetadata: Sendable, Equatable {
 }
 ```
 
-**`utcMillis` は `offsetTimeOriginal` がある場合にだけ入り、無い場合は `nil`（端末のタイムゾーンで補完しない。正準スキーマ 5.1.1）。** ローカル表記をそのまま持つのは出力 EXIF へ書き戻すため（UTC 変換後の再構築は往復誤差が出る）。**`representation` が `transcoded`（取得経路が元データを返さなかった）でも取得を拒否しない**（取得できた表現からそのまま処理する。9.1 の診断区分値としてのみ記録する）。
+**`utcMillis` は `offsetTimeOriginal` がある場合にだけ入り、無い場合は `nil`（端末のタイムゾーンで補完しない。正準スキーマ 5.1）。** ローカル表記をそのまま持つのは出力 EXIF へ書き戻すため（UTC 変換後の再構築は往復誤差が出る）。**`representation` が `transcoded`（取得経路が元データを返さなかった）でも取得を拒否しない**（取得できた表現からそのまま処理する。9.1 の診断区分値としてのみ記録する）。
 
 **`Project` は `capture: OriginalCaptureMetadata?` / `sourceRepresentation: SourceRepresentation` / `libraryCreationDate: Date?`（`PHAsset.creationDate` 由来。取得できる場合のみ）を直接フィールドとして持つ**（7.1。素材ごとの中間 snapshot は持たない）。
 

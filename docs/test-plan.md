@@ -30,10 +30,9 @@
 ### 2.1 クォータとトライアル（[アーキテクチャ設計](architecture.md) の 6.3）
 
 - `evaluateMonthlyQuota` / `rollPeriod`（月跨ぎ、端末 TZ 変更後の年月算出）
-- `evaluateMonthlyQuota` が更新後の `UsageLedger` を返すこと
 - `evaluateMonthlyQuota` が `access`（`SingleExportAccess`）を引数で受け取り `Plan` を見ないこと
 - `monthlyLimit` を引数で受け取り、`consumed >= limit` で `blocked(limit:)` になること
-- **`current != ledger.period` なら `period` が現在の年月へ切り替わること（巻き戻しを含む。ADR 0006）**
+- **`current != ledger.period` なら `rollPeriod` が `period` を現在の年月へ切り替えること（巻き戻しを含む。`evaluateMonthlyQuota` は台帳を変更しない。ADR 0006）**
 - 月初に `consumedExportIDs` だけがリセットされ、`trialConsumedExportIDs` は月をまたいで保持されること
 - 消費が件数ではなく `ExportID` の集合で持たれ、同一 `exportID` の再適用を拒否できること
 - 時刻は端末の現在時刻・現在タイムゾーンをそのまま使うこと（ADR 0005）
@@ -85,6 +84,8 @@
 - `canEnterBatch` が `canUseProBatch` / `canUseBatchTrial` / 残クレジットから導かれること
 - `canUseProBatch` / `canUseBatchTrial` が能力で判定され、`plan = pro` かつ `status = pending` が通常一括にならないこと
 - `resolve(snapshot:usageNow:)`（`CustomerInfoSnapshot` の全状態）
+- `resolveCapabilities` が `enabledStampPacks` を引数で受け取り、`Domain` が設定定数の型を参照しないこと
+- `Plan`（`free = 1` / `standard = 2` / `pro = 3`）と `PlanStatus`（`active = 1` 〜 `revoked = 5`）の DB 列値が固定され、`case` 宣言順の変更で解釈が変わらないこと（[アーキテクチャ設計](architecture.md) の 6.2）
 - `plan = standard` かつ `status = pending` で `singleExportAccess == .metered` になること
 - `CapabilityResolution.verificationRequired` で書き出し認可が開始されず、Free 降格の表示も出ないこと
 - `missing` かつオフラインで `verificationRequired` になること
@@ -108,6 +109,7 @@
 - `left` / `top` が floor、`right` / `bottom` が ceil で丸められ、領域が外側へ広がること
 - `sourceCrop` の不変条件違反が例外になり、クランプで黙って直されないこと
 - `manual` の領域が `auto` より後の `order` になること
+- `fit` で縦横比が保たれ中央配置になり `sourceRect` が変わらないこと。`fill` で `destinationRect` がキャンバス全面になり `sourceRect` がキャンバス比率へ中央で切り詰められること（いずれも一様スケール。2 章「`SourcePlacement` の配置規則」）
 - `Domain` が `StampRasterizer` プロトコルのみを持ち、`CoreGraphics` を参照しないこと
 - `StampRasterKey` に位置・回転・不透明度・形状が含まれないこと
 - **`opacity = 0` / `cellSizePx < 2`（特に 1px） / `sigmaPx = 0` / 幅 0 の領域が `throw` されること**
@@ -152,6 +154,7 @@
 - **`PreviewConfirmation` と `overviewConfirmed` が再起動後に保持されず、再確認を求めること**
 - **出力へ影響する子行（`FaceTrack` / `EffectSetting` / `ExportSetting` / `ProjectStampAsset`）の変更で、同一トランザクション内に `projectRevision` が増えること**
 - **各ハッシュ（`StampAssetHash` / `ProjectSettingsHash` / `PreviewRenderHash`）について、既知の入力から生成した固定 canonical bytes と出力値をテストへ埋め込むこと**（符号化ロジックの変更を検出する。[正準スキーマ](canonical-schema.md) の 6）
+- **`Domain` が `Sha256Digest` プロトコルのみを持ち、`CryptoKit` を参照しないこと**（[正準スキーマ](canonical-schema.md) の 5.2）
 
 ### 2.6 更新誘導（[アーキテクチャ設計](architecture.md) の 6.6）
 

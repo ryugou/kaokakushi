@@ -72,9 +72,7 @@ public enum CanonicalEncoder {
     /// ソートキーは「長さ前置き後」のバイト列。要素長が異なっても比較結果が
     /// 要素間で一意に決まるよう、長さ前置き込みの完全なエンコード結果で
     /// 比較する。
-    /// canonical-schema.md 2 章はソート対象が長さ前置き前後どちらかを明記していない
-    /// ため、このファイルの解釈として明示する（Task 5 時点でこのプリミティブを使う
-    /// 実運用コードは無く、実害はない）。
+    /// （canonical-schema.md 2 章「長さ前置きを含むバイト列を辞書順にソート」が正本）。
     public static func unorderedCollection<Element>(_ elements: [Element], encode: (Element) -> Data) -> Data {
         let encodedElements = elements
             .map { lengthPrefixed(encode($0)) }

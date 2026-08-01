@@ -1,13 +1,13 @@
 import Foundation
 
 // レンダリング境界の型群（image-pipeline.md 5 章「写真選択と PhotoKit 境界」の
-// 「境界型」小節、L674-738）。
+// 「境界型」小節）。
 //
 // すべて Foundation のみで表現する。CGImage / CIImage / URL を持たない。実体の参照は
 // ManagedFileRef（の種別つきラッパー）のみ（image-pipeline.md 5 章）。
 //
-// `OriginalCaptureMetadata`（architecture.md 1975-1980、EXIF 撮影日時。正準スキーマ 5.1.1）と
-// `LoadedPhoto`（image-pipeline.md 692-695、PickedPhotoLoader の戻り値）はいずれも
+// `OriginalCaptureMetadata`（architecture.md 9 章「出力メタデータ」、EXIF 撮影日時。正準スキーマ 5.1）と
+// `LoadedPhoto`（image-pipeline.md 5 章、PickedPhotoLoader の戻り値）はいずれも
 // image-pipeline.md 5 章の境界型の一部であり、計画の Task 2 行が Produces として
 // 明記しているためここに実装する（`OriginalCaptureMetadata` を Task 4 待ちとした前回の
 // 判断は誤りだったため撤回）。
@@ -41,7 +41,7 @@ public struct ImageSource: Sendable {
     }
 }
 
-/// EXIF の撮影日時。ローカル表記とオフセットを分けて保持する（正準スキーマ 5.1.1）
+/// EXIF の撮影日時。ローカル表記とオフセットを分けて保持する（正準スキーマ 5.1）
 public struct OriginalCaptureMetadata: Sendable, Equatable {
     public let dateTimeOriginal: String?      // "YYYY:MM:DD HH:MM:SS"
     public let subSecTimeOriginal: String?

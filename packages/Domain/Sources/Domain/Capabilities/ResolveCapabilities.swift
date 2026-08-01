@@ -4,14 +4,8 @@ import Foundation
 // 「purchase 状態キャッシュの読み込み失敗」節、product-decisions.md 3.1「課金訴求分類表」
 // 〈91-97行〉から確定した Entitlement → ResolvedCapabilities の導出規則）。
 //
-// 既知の乖離（一次レビューで指摘され、オーケストレーターが承認）: 正本
-// architecture.md 554-557行の関数シグネチャ `resolveCapabilities(_:usageNow:)` には
-// `enabledStampPacks` の注入経路が無い。一方で同 572行は「enabledStampPacks を能力解決の
-// 内側で ResolvedCapabilities へ写す」と明記しており、Domain が設定定数の型を参照できない
-// 制約（同行括弧書き）の下ではこの値を関数の外から受け取る以外に実現手段が無い
-// （`monthlyLimit` が `evaluateMonthlyQuota` に注入されているのと同じ理由。
-// architecture.md 10 章）。554-557行のコードブロックは正本側の更新待ちであり、
-// `packages/Domain` 側のこの実装を正としている。
+// `enabledStampPacks` は設定定数（architecture.md 10 章）を引数で注入する
+// （Domain は設定定数の型を参照しないため。シグネチャは architecture.md 6.2 が正本）。
 
 public func resolveCapabilities(
     _ state: SubscriptionCacheState,

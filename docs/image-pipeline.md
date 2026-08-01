@@ -265,6 +265,17 @@ enum BackgroundOp: Sendable {
 
 `BackgroundOp.blur(sigmaPx:)` ではなく `blurFromSource` にしたのは、`sigma` だけでは「元画像全体をぼかすのか、切り抜き範囲をぼかすのか、どの倍率で敷くのか」が決まらないためです。一般的な用途では `sourceRect` に元画像全体を指定し、`fill` でキャンバス全面へ拡大します。
 
+##### `SourcePlacement` の配置規則
+
+`compileRenderDraft` が配置を完全に確定し、`MediaKit` は比率計算を行いません。
+
+| `scaleMode` | 規則 |
+| --- | --- |
+| `fit` | 縦横比を保ったままキャンバスへ収まる最大サイズへスケールし、中央配置する。`sourceRect` は変更しない。スケール後の幅・高さは最近接整数へ丸め（`.5` は 0 から遠い方）、中央配置で 1px の端数が出る場合は余白を右・下側へ付ける（画像は左・上寄り） |
+| `fill` | `destinationRect` はキャンバス全面。**`sourceRect` をキャンバスの縦横比に合わせて中央で切り詰める**（cover）。切り詰めは元画像ピクセル空間の `Double` で計算してから「ピクセルへの丸め」（4 章）を適用する |
+
+いずれも `sourceRect → destinationRect` の変換は一様スケールになります。`fill` を単純な矩形間ストレッチにすると、`outputAspect` と `sourceCrop` の縦横比が異なる場合に写真が非一様に歪みます。
+
 `RenderRegion.bounds` の基準を出力キャンバスに確定します。元画像基準にすると `MediaKit` が切り抜き変換を再実装することになります。
 
 ##### `sourceCrop` の不変条件
@@ -574,7 +585,7 @@ struct RasterizedStampAsset: Sendable {
 
 ##### 適用順
 
-1. `sourceCrop` で元画像を切り出す
+1. `SourcePlacement.sourceRect` で元画像を切り出す（`fill` では `sourceCrop` をさらにキャンバス比率へ中央切り詰めした範囲。2 章「`SourcePlacement` の配置規則」）
 2. `canvasSize` のキャンバスへ配置し、余白を `background` で埋める
 3. `regions` を `order` の昇順に、前の結果へ重ねて適用する
 

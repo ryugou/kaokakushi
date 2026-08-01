@@ -32,11 +32,12 @@ public struct CustomerInfoSnapshot: Sendable, Equatable {
     }
 }
 
-/// 契約の等級。固定番号は正準スキーマ 3 章
-public enum Plan: Sendable, Hashable, Comparable {
-    case free
-    case standard
-    case pro
+/// 契約の等級。DB 列値は architecture.md 6.2 の表が正本
+/// （SubscriptionState の DB 列としてスキーマ移行をまたぐため case 宣言順に依存させない）。
+public enum Plan: UInt32, Sendable, Hashable, Comparable {
+    case free = 1
+    case standard = 2
+    case pro = 3
 
     // Swift は enum の Comparable を合成しない（YearMonth と同じ事情。CommonValues.swift）。
     // 宣言順（free < standard < pro）を正とし、料金プランの序列として自然な比較を素直に書く。
@@ -50,13 +51,13 @@ public enum Plan: Sendable, Hashable, Comparable {
     }
 }
 
-/// 契約の状態。pending は支払い保留（仕様 5.4）
-public enum PlanStatus: Sendable, Hashable {
-    case active
-    case grace
-    case pending
-    case expired
-    case revoked
+/// 契約の状態。pending は支払い保留（仕様 5.4）。DB 列値は architecture.md 6.2 の表が正本。
+public enum PlanStatus: UInt32, Sendable, Hashable {
+    case active = 1
+    case grace = 2
+    case pending = 3
+    case expired = 4
+    case revoked = 5
 }
 
 public struct Entitlement: Sendable, Equatable {

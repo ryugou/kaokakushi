@@ -5,7 +5,7 @@ import Foundation
 // Task 2: 顔検出モデルとレンダリング境界型（image-pipeline.md 1 章「顔単位の共通モデル」、
 // 5 章「境界型」小節）。
 //
-// `LoadedPhoto` は正本（image-pipeline.md 692-695）どおり Equatable ではないため、
+// `LoadedPhoto` は正本（image-pipeline.md 5 章）どおり Equatable ではないため、
 // 等価性テストは書かず「全フィールドを保持できる」ことのみを固定する。
 // `Date()`（引数なし）は packages/Domain では禁止のため、`OutputFile` のテストでは
 // `Date(timeIntervalSince1970:)` を使う。
@@ -104,7 +104,7 @@ func imageSourceHoldsAllFields() {
     #expect(subject.format == .heic)
 }
 
-// MARK: - OriginalCaptureMetadata（image-pipeline.md 692-695 / architecture.md 1975-1980）
+// MARK: - OriginalCaptureMetadata（image-pipeline.md 5 章 / architecture.md 9 章）
 
 @Test("OriginalCaptureMetadataは全フィールドをそのまま保持する")
 func originalCaptureMetadataHoldsAllFields() {
@@ -158,7 +158,7 @@ func originalCaptureMetadataEqualityRequiresAllFieldsToMatch() {
     #expect(base != differentUtcMillis)
 }
 
-// MARK: - LoadedPhoto（image-pipeline.md 692-695。正本どおりEquatableではないため等価性テストは書かない）
+// MARK: - LoadedPhoto（image-pipeline.md 5 章。正本どおりEquatableではないため等価性テストは書かない）
 
 @Test("LoadedPhotoはsource/captureを全フィールドそのまま保持する")
 func loadedPhotoHoldsAllFields() {

@@ -5,10 +5,8 @@ import Foundation
 //
 // `evaluateMonthlyQuota` はこの関数自体が台帳を更新しない（architecture.md 6.3 本文
 // 「認可時に評価するのは『消費できるか』だけであり、この関数自体は台帳を更新しない」）。
-// 実際の period 更新と消費の計上は完了操作（単一トランザクション）でまとめて行う。
-// test-plan.md 2.1 に「evaluateMonthlyQuota が更新後の UsageLedger を返すこと」という
-// 記述があるが、architecture.md 本文の明記を正としてこの関数は MonthlyQuotaDecision の
-// みを返す（`period` の切り替えは rollPeriod が別途、完了操作の中で担う）。
+// 実際の period 更新と消費の計上は完了操作（単一トランザクション）でまとめて行い、
+// `period` の切り替えは rollPeriod が担う。
 
 extension YearMonth {
     // 端末の現在時刻・現在タイムゾーンから年月を算出する（architecture.md 6.3「時間の扱い」）。

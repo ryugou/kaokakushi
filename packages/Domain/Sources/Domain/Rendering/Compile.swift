@@ -115,8 +115,8 @@ private func pixelRect(from rect: NormalizedRect, in size: PixelSize) -> PixelRe
     )
 }
 
-/// 前景の配置（`SourcePlacement`）。正本に fit/fill の具体的な計算式が無いため、
-/// 標準的な contain（fit）／cover（fill）としてオーケストレータが確定した式を用いる。
+/// 前景の配置（`SourcePlacement`）。配置規則は image-pipeline.md 2 章
+/// 「`SourcePlacement` の配置規則」が正本。
 private func makeSourcePlacement(
     sourceRect: PixelRect,
     canvasSize: PixelSize,
@@ -126,8 +126,8 @@ private func makeSourcePlacement(
     case .fill:
         // fill: 真の cover。destinationRect はキャンバス全面。sourceRect はそのまま使うと
         // sourceCrop とキャンバスの縦横比が異なる場合に非一様な引き伸ばしが起きるため、
-        // キャンバス縦横比に合わせて中央で切り詰める（MediaKit へ比率計算を漏らさないという
-        // image-pipeline.md の原則に基づき、fill の cover 計算をオーケストレータが確定した仕様）。
+        // キャンバス縦横比に合わせて中央で切り詰める（image-pipeline.md 2 章
+        // 「SourcePlacement の配置規則」）。
         let destinationRect = PixelRect(
             left: 0, top: 0, rightExclusive: canvasSize.width, bottomExclusive: canvasSize.height
         )

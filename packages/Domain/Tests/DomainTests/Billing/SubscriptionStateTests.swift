@@ -27,6 +27,34 @@ func planComparableFollowsDeclarationOrder(lhs: Plan, rhs: Plan, expectedLessTha
     #expect((lhs < rhs) == expectedLessThan)
 }
 
+// MARK: - Plan / PlanStatus の DB 列値（architecture.md 6.2 の表が正本）
+
+@Test(
+    "PlanのrawValueが正本どおり",
+    arguments: [
+        (Plan.free, UInt32(1)),
+        (Plan.standard, UInt32(2)),
+        (Plan.pro, UInt32(3))
+    ]
+)
+func planRawValueMatchesCanonicalDoc(plan: Plan, expected: UInt32) {
+    #expect(plan.rawValue == expected)
+}
+
+@Test(
+    "PlanStatusのrawValueが正本どおり",
+    arguments: [
+        (PlanStatus.active, UInt32(1)),
+        (PlanStatus.grace, UInt32(2)),
+        (PlanStatus.pending, UInt32(3)),
+        (PlanStatus.expired, UInt32(4)),
+        (PlanStatus.revoked, UInt32(5))
+    ]
+)
+func planStatusRawValueMatchesCanonicalDoc(status: PlanStatus, expected: UInt32) {
+    #expect(status.rawValue == expected)
+}
+
 // MARK: - CustomerInfoSnapshot / Entitlement / SubscriptionState のフィールド保持
 
 @Test("CustomerInfoSnapshotがSendable/Equatableで全フィールドを保持する")
