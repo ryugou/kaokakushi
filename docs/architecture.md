@@ -119,15 +119,15 @@ Swift Package Manager のローカルパッケージとして層を分け、**�
 
 ```
 kaokakushi/
-├── Kaokakushi.xcodeproj
+├── KaoKakushi.xcodeproj
 ├── App/                     アプリ本体
-│   ├── KaokakushiApp.swift  エントリポイント、DI の組み立て
+│   ├── KaoKakushiApp.swift  エントリポイント、DI の組み立て
 │   ├── Navigation/          Route と画面解決
 │   ├── Screens/             SwiftUI の各画面
 │   ├── Selection/           PhotoSelectionBridge / FileSelectionBridge（[画像処理](image-pipeline.md)）
 │   └── PrivacyShield/       スクリーンショット対策（9.2）
 │
-├── Packages/
+├── packages/
 │   ├── Domain/              純粋 Swift。Foundation 以外に依存しない
 │   ├── Application/         書き出し Saga、起動時復旧、ロールバック（4.3）
 │   ├── Rendering/           StampRasterizer 実装（Core Graphics）
@@ -183,7 +183,7 @@ Composition Root（DI の組み立て）:
 
 | 手段 | 内容 |
 | --- | --- |
-| SwiftLint の `forbidden_imports` | `Domain/Sources/**` に対し上記の禁止モジュールを検出する |
+| SwiftLint の `custom_rules`（禁止 import の正規表現検出） | `Domain/Sources/**` に対し上記の禁止モジュールを検出する |
 | CI のチェック | `Domain/Sources` 配下の `import` 行を走査し、許可リスト（`Foundation` のみ）以外で失敗させる |
 | SwiftLint のカスタムルール | `Domain` ターゲット内の `Date()` を禁止する（6.3 の時刻規約） |
 

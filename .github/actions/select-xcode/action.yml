@@ -1,0 +1,21 @@
+name: Select Xcode 26
+description: 最新の Xcode 26 系を選択し、キャッシュキー用の識別子（ディレクトリ名＋ビルド番号）を出力する
+outputs:
+  xcode_id:
+    description: DerivedData 等のキャッシュキーに使う Xcode 識別子
+    value: ${{ steps.select.outputs.xcode_id }}
+runs:
+  using: composite
+  steps:
+    - id: select
+      shell: bash
+      run: |
+        set -euo pipefail
+        app=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
+        sudo xcode-select -s "$app/Contents/Developer"
+        xcodebuild -version
+        # Xcode バージョンが変わると DerivedData の内部フォーマットに互換性が
+        # ない場合があるため、キャッシュキーへ含める識別子をここで一元的に作る。
+        build_number=$(xcodebuild -version | awk '/^Build version/{print $3}')
+        xcode_id="$(basename "$app" .app)-${build_number}"
+        echo "xcode_id=${xcode_id}" >> "$GITHUB_OUTPUT"

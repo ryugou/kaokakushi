@@ -1,0 +1,53 @@
+included:
+  - App
+  - packages
+
+excluded:
+  - "**/.build"
+  - "**/.swiftpm"
+  - DerivedData
+
+# 基本ルールは SwiftLint の既定に従う。
+# import 制限は custom_rules で error レベルとして強制する
+# （architecture.md 3.3 の Domain 制約、4.3 の Application 制約が正本）。
+# Package.swift の `dependencies` では forbidden import を強制できない
+# （Apple SDK のシステムモジュールは列挙なしで import できるため。architecture.md 3.3）。
+#
+# 方式は許可リスト（allow-list）: Domain/Sources は Foundation 以外、
+# Application/Sources は Foundation・Domain 以外の import をすべて error にする。
+# 禁止モジュールの列挙（deny-list）ではないため、未列挙フレームワークの
+# 紛れ込みも検出できる。各フレームワークの代替手段は architecture.md 3.3 / 4.3 を参照。
+#
+# regex は `import X` 本体に加え、修飾（@testable / @_implementationOnly /
+# @preconcurrency / @_exported / アクセスレベル）と種別つき import
+# （`import struct Foundation.Date` 等）を任意の組み合わせで検出できる形にしている。
+# 対象は Sources のみ（Tests は import Testing / @testable import が必要なため対象外）。
+# 既知の字句的制限: コメント挿入（`import/*x*/UIKit` 等）はこの regex では検出できない。
+# CI ゲート（scripts/check-imports.sh）がコメントを正規化してから検査するため、
+# その形の迂回は import-scan ジョブで検出される（SwiftLint 側はエディタ内の
+# 即時フィードバック用途と割り切る）。
+custom_rules:
+  domain_import_allowlist:
+    included: ".*packages/Domain/Sources/.*\\.swift"
+    regex: "^\\s*((@testable|@_implementationOnly|@preconcurrency|@_exported)\\s+)*((public|package|internal|private|fileprivate)\\s+)?import\\s+(?!((struct|class|enum|protocol|typealias|actor|func|var|let)\\s+)?Foundation\\b)[A-Za-z_]"
+    name: "Domain: import allowlist"
+    message: "packages/Domain/Sources で import できるのは Foundation のみです（architecture.md 3.3。代替手段も同節を参照）。"
+    severity: error
+
+  application_import_allowlist:
+    included: ".*packages/Application/Sources/.*\\.swift"
+    regex: "^\\s*((@testable|@_implementationOnly|@preconcurrency|@_exported)\\s+)*((public|package|internal|private|fileprivate)\\s+)?import\\s+(?!((struct|class|enum|protocol|typealias|actor|func|var|let)\\s+)?(Foundation|Domain)\\b)[A-Za-z_]"
+    name: "Application: import allowlist"
+    message: "packages/Application/Sources で import できるのは Foundation と Domain のみです（architecture.md 4.3。アダプタは Domain のプロトコル経由で注入する）。"
+    severity: error
+
+  # --- packages/Domain/** : Date() の引数なし呼び出し（現在時刻取得）を禁止 ---
+  # 現在時刻はテスト不能な暗黙の外部依存になるため、Domain 層では Clock 抽象等を
+  # 経由させる（architecture.md 3.3）。`Date(timeIntervalSince1970:)` のような
+  # 引数つき初期化（決定的な値からの構築）は対象外にする。
+  domain_no_bare_date:
+    included: ".*packages/Domain/.*\\.swift"
+    regex: "\\bDate\\s*\\(\\s*\\)"
+    name: "Domain: forbidden bare Date()"
+    message: "packages/Domain で Date()（現在時刻取得）は禁止です（architecture.md 3.3）。Clock 等の抽象を注入してください。Date(timeIntervalSince1970:) 等の引数つき初期化は許可されます。"
+    severity: error

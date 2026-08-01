@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swiftlint:
+    name: SwiftLint
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # SwiftLint はランナーへ brew で導入する。
+      # （「macos-15 イメージに標準搭載」という情報に基づき一度削除したが、
+      # 2026-08 時点の実ランナーで command not found となり CI が失敗したため復活。
+      # プリインストールを仮定しない。）
+      - name: Install SwiftLint
+        run: brew install swiftlint
+
+      - name: Run SwiftLint (strict)
+        run: swiftlint lint --strict
+
+  import-scan:
+    name: import 許可リスト走査 (Domain / Application)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: scripts/check-imports-test.sh（回帰テスト）
+        run: bash scripts/check-imports-test.sh
+
+      - name: scripts/check-imports.sh
+        run: bash scripts/check-imports.sh
+
+  package-tests:
+    name: swift test (全パッケージ)
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 26
+        uses: ./.github/actions/select-xcode
+
+      # このIssue（#4）では外部SwiftPM依存を一切追加していないため、
+      # パッケージごとの .build キャッシュは導入しない。Package.resolved が
+      # 存在しない状態でキャッシュキーを組むと常に固定キーになり「一度も
+      # 更新されないキャッシュ」を生む事故につながる。外部依存が入る後続Issueで
+      # Package.resolved を基にキャッシュキーを再設計して導入する。
+      #
+      # --scratch-path を全パッケージで共有し、依存先（Domain）のビルド成果物を
+      # 使い回す（共有しないと Domain が依存元の数だけ再コンパイルされる）。
+      - name: swift test (all packages)
+        run: |
+          set -euo pipefail
+          for p in Domain Rendering MediaKit Persistence Application Billing Ads Analytics; do
+            echo "::group::swift test $p"
+            swift test --package-path "packages/$p" --scratch-path "$PWD/.build/ci-shared"
+            echo "::endgroup::"
+          done
+
+  build:
+    name: xcodegen + xcodebuild (iOS Simulator)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 26
+        id: select_xcode
+        uses: ./.github/actions/select-xcode
+
+      - name: Install XcodeGen
+        id: xcodegen
+        run: |
+          set -euo pipefail
+          brew install xcodegen
+          # XcodeGen のバージョンが変わると生成される xcodeproj が変わりうるため、
+          # DerivedData キャッシュキーへ含める（旧生成形式由来のキャッシュ復元を防ぐ）。
+          echo "version=$(xcodegen version | tr -d ' ')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData
+          key: deriveddata-${{ runner.os }}-${{ steps.select_xcode.outputs.xcode_id }}-${{ steps.xcodegen.outputs.version }}-${{ hashFiles('project.yml', 'App/**', 'packages/**') }}
+          restore-keys: |
+            deriveddata-${{ runner.os }}-${{ steps.select_xcode.outputs.xcode_id }}-${{ steps.xcodegen.outputs.version }}-
+
+      - name: xcodegen generate
+        run: xcodegen generate
+
+      - name: xcodebuild (iOS Simulator, unsigned)
+        run: |
+          xcodebuild build \
+            -project KaoKakushi.xcodeproj \
+            -scheme KaoKakushi \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO

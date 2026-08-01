@@ -1,0 +1,67 @@
+name: KaoKakushi
+
+options:
+  bundleIdPrefix: com.ryugou
+  deploymentTarget:
+    iOS: "26.0"
+  # xcodegen が Xcode プロジェクトファイル自体は生成物として出力するため、
+  # このリポジトリではコミットしない（.gitignore の *.xcodeproj を参照）。
+  createIntermediateGroups: true
+
+packages:
+  Domain:
+    path: packages/Domain
+  Rendering:
+    path: packages/Rendering
+  MediaKit:
+    path: packages/MediaKit
+  Persistence:
+    path: packages/Persistence
+  Application:
+    path: packages/Application
+  Billing:
+    path: packages/Billing
+  Ads:
+    path: packages/Ads
+  Analytics:
+    path: packages/Analytics
+
+targets:
+  KaoKakushi:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    # ターゲット単位で `scheme: {}` を指定し、XcodeGen の
+    # autogenerateSchemes（バージョン・設定依存で既定値が変わりうる）に頼らず
+    # 確実に "KaoKakushi" scheme を生成させる（CI の
+    # `xcodebuild -scheme KaoKakushi` が scheme 未検出で失敗しないため）。
+    # このターゲットにアプリ内蔵の XCTest ターゲットは無く（テストは各パッケージの
+    # `swift test` で完結する）、追加の testTargets 等の設定は不要なため空で足りる。
+    scheme: {}
+    sources:
+      - path: App
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        PRODUCT_BUNDLE_IDENTIFIER: com.ryugou.kaokakushi
+        PRODUCT_NAME: KaoKakushi
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_PREVIEWS: YES
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: "顔かくし"
+        # 権限文言（NSPhotoLibraryAddUsageDescription 等）は後続 Issue で追加する。
+        # このプロジェクト基盤 Issue ではアプリ表示名のみを設定する。
+    # Domain は各パッケージが内部で依存するのみで、アプリターゲットからは
+    # 直接依存しない（architecture.md 3.2: Domain へのプロトコル経由アクセスは
+    # Application 層を通す）。
+    dependencies:
+      - package: Application
+      - package: MediaKit
+      - package: Rendering
+      - package: Persistence
+      - package: Billing
+      - package: Ads
+      - package: Analytics
