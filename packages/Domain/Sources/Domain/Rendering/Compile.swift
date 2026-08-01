@@ -30,16 +30,45 @@ public struct RasterizedStampAsset: Sendable {
 
 // MARK: - expand（image-pipeline.md 1章「拡張率の適用」）
 
+/// 4 方向の拡張比を矩形へ適用した生座標。image-pipeline.md 1 章の拡張式の唯一の実装で、
+/// `expand(face:effect:)` と triage の境界判定（Triage.swift）が共有する
+/// （別々に書くと将来の式変更で「隠す範囲」と「要確認判定」が食い違う）。
+/// `NormalizedRect` にしないのは、拡張後は負数・1.0 超過を含む生の座標であることを
+/// 型で区別するため。
+struct ExpandedEdges {
+    let left: Double
+    let top: Double
+    let right: Double
+    let bottom: Double
+}
+
+func expandedEdges(
+    of rect: NormalizedRect,
+    top: Double,
+    bottom: Double,
+    leading: Double,
+    trailing: Double
+) -> ExpandedEdges {
+    let width = rect.rightExclusive - rect.left
+    let height = rect.bottomExclusive - rect.top
+    return ExpandedEdges(
+        left: rect.left - width * leading,
+        top: rect.top - height * top,
+        right: rect.rightExclusive + width * trailing,
+        bottom: rect.bottomExclusive + height * bottom
+    )
+}
+
 /// 顔矩形へ拡張率を適用する。画像外へはみ出す場合もクランプしない
 /// （クランプすると顔が露出する方向へ倒れるため。はみ出しはマスク描画側で処理する）。
 public func expand(face: NormalizedRect, effect: EffectSetting) -> NormalizedRect {
-    let width = face.rightExclusive - face.left
-    let height = face.bottomExclusive - face.top
-
-    let top = face.top - height * effect.expansion.top.value
-    let bottom = face.bottomExclusive + height * effect.expansion.bottom.value
-    let left = face.left - width * effect.expansion.leading.value
-    let right = face.rightExclusive + width * effect.expansion.trailing.value
+    let edges = expandedEdges(
+        of: face,
+        top: effect.expansion.top.value,
+        bottom: effect.expansion.bottom.value,
+        leading: effect.expansion.leading.value,
+        trailing: effect.expansion.trailing.value
+    )
 
     // try! の根拠: face は有効な NormalizedRect（left<right, top<bottom, 全て有限）であり
     // ExpansionRatio は有限かつ 0<=v<=2.0 に検証済み。width・height は常に正、拡張率は有限の
@@ -47,7 +76,9 @@ public func expand(face: NormalizedRect, effect: EffectSetting) -> NormalizedRec
     // （このinitが失敗することは設計上ありえない）。expand() 自体は正本どおり non-throwing の
     // シグネチャを維持する。
     // swiftlint:disable:next force_try
-    return try! NormalizedRect(left: left, top: top, rightExclusive: right, bottomExclusive: bottom)
+    return try! NormalizedRect(
+        left: edges.left, top: edges.top, rightExclusive: edges.right, bottomExclusive: edges.bottom
+    )
 }
 
 // MARK: - compileRenderDraft（image-pipeline.md 2章「二段階コンパイル」）

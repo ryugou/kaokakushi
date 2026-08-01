@@ -10,8 +10,6 @@ import Foundation
 /// `ThumbnailFileRef` は正本の 7.3 コードブロックに存在しないため作らない
 /// （計画メモの記述は正本ではない）。
 
-private func assertSendableHashable<T: Sendable & Hashable>(_ value: T) -> T { value }
-
 /// 正本（architecture.md 7.3）に列挙された全 6 ケース。`ManagedFileKind` は
 /// `CaseIterable` に適合させていない（正本のコードブロックに無い適合を追加しないため）ので、
 /// テスト側で手動列挙する。
@@ -74,60 +72,41 @@ func pendingFileDeletionHoldsFile() {
 
 // MARK: - 種別つき参照の failable init（kind 不一致は nil。architecture.md 7.3 本文）
 
-@Test(
-    "OutputFileRefはkind=.outputのみ受理する",
-    arguments: allManagedFileKinds
-)
+// 4 つの種別つき参照は「対応する kind のみ受理し、それ以外は nil」という同じ契約を持つ。
+// 検証を1つの共通アサーションに集約する（simplify レビュー指摘）。
+private func assertTypedRefAcceptsOnly<T>(
+    _ expectedKind: ManagedFileKind,
+    kind: ManagedFileKind,
+    make: (ManagedFileRef) -> T?,
+    refOf: KeyPath<T, ManagedFileRef>
+) {
+    let ref = ManagedFileRef(kind: kind, fileID: ManagedFileID(rawValue: UUID()))
+    let subject = make(ref)
+    if kind == expectedKind {
+        #expect(subject?[keyPath: refOf] == ref)
+    } else {
+        #expect(subject == nil)
+    }
+}
+
+@Test("OutputFileRefはkind=.outputのみ受理する", arguments: allManagedFileKinds)
 func outputFileRefAcceptsOnlyOutputKind(kind: ManagedFileKind) {
-    let ref = ManagedFileRef(kind: kind, fileID: ManagedFileID(rawValue: UUID()))
-    let subject = OutputFileRef(ref)
-    if kind == .output {
-        #expect(subject?.ref == ref)
-    } else {
-        #expect(subject == nil)
-    }
+    assertTypedRefAcceptsOnly(.output, kind: kind, make: OutputFileRef.init, refOf: \.ref)
 }
 
-@Test(
-    "WorkingSourceFileRefはkind=.processingTemporaryのみ受理する",
-    arguments: allManagedFileKinds
-)
+@Test("WorkingSourceFileRefはkind=.processingTemporaryのみ受理する", arguments: allManagedFileKinds)
 func workingSourceFileRefAcceptsOnlyProcessingTemporaryKind(kind: ManagedFileKind) {
-    let ref = ManagedFileRef(kind: kind, fileID: ManagedFileID(rawValue: UUID()))
-    let subject = WorkingSourceFileRef(ref)
-    if kind == .processingTemporary {
-        #expect(subject?.ref == ref)
-    } else {
-        #expect(subject == nil)
-    }
+    assertTypedRefAcceptsOnly(.processingTemporary, kind: kind, make: WorkingSourceFileRef.init, refOf: \.ref)
 }
 
-@Test(
-    "RasterFileRefはkind=.rasterTemporaryのみ受理する",
-    arguments: allManagedFileKinds
-)
+@Test("RasterFileRefはkind=.rasterTemporaryのみ受理する", arguments: allManagedFileKinds)
 func rasterFileRefAcceptsOnlyRasterTemporaryKind(kind: ManagedFileKind) {
-    let ref = ManagedFileRef(kind: kind, fileID: ManagedFileID(rawValue: UUID()))
-    let subject = RasterFileRef(ref)
-    if kind == .rasterTemporary {
-        #expect(subject?.ref == ref)
-    } else {
-        #expect(subject == nil)
-    }
+    assertTypedRefAcceptsOnly(.rasterTemporary, kind: kind, make: RasterFileRef.init, refOf: \.ref)
 }
 
-@Test(
-    "StampAssetFileRefはkind=.stampAssetのみ受理する",
-    arguments: allManagedFileKinds
-)
+@Test("StampAssetFileRefはkind=.stampAssetのみ受理する", arguments: allManagedFileKinds)
 func stampAssetFileRefAcceptsOnlyStampAssetKind(kind: ManagedFileKind) {
-    let ref = ManagedFileRef(kind: kind, fileID: ManagedFileID(rawValue: UUID()))
-    let subject = StampAssetFileRef(ref)
-    if kind == .stampAsset {
-        #expect(subject?.ref == ref)
-    } else {
-        #expect(subject == nil)
-    }
+    assertTypedRefAcceptsOnly(.stampAsset, kind: kind, make: StampAssetFileRef.init, refOf: \.ref)
 }
 
 @Test("種別つき参照はSendable/Hashableである")

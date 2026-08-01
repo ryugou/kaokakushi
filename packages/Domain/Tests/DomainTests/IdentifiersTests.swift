@@ -13,7 +13,6 @@ import Foundation
 
 /// `T` が `Sendable` かつ `Hashable` に適合していることをコンパイル時に強制するヘルパー。
 /// ジェネリック制約に通せない型は、そもそもこの関数呼び出し自体がコンパイルエラーになる。
-private func assertSendableHashable<T: Sendable & Hashable>(_ value: T) -> T { value }
 
 @Test("ProjectIDがSendable/Hashableでraw値を保持する")
 func projectIDHoldsRawValue() {

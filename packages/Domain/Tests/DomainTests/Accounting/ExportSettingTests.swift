@@ -6,8 +6,6 @@ import Foundation
 ///
 /// `OutputAspect` の4ケース、`MetadataPolicy` / `ExportSetting` のフィールド保持を検証する。
 
-private func assertSendableEquatable<T: Sendable & Equatable>(_ value: T) -> T { value }
-
 @Test(
     "OutputAspectはoriginal/square/fourFive/nineSixteenの4ケースを持ちHashableである",
     arguments: [OutputAspect.original, .square, .fourFive, .nineSixteen]

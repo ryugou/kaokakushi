@@ -11,11 +11,6 @@ import Foundation
 
 private func makeProjectID() -> ProjectID { ProjectID(rawValue: UUID()) }
 
-private func makeRenderSpec() throws -> RenderSpec {
-    let rect = try NormalizedRect(left: 0, top: 0, rightExclusive: 1, bottomExclusive: 1)
-    return RenderSpec(sourceCrop: rect, scaleMode: .fit, background: .none, regions: [])
-}
-
 private func makeExportSetting() -> ExportSetting {
     ExportSetting(
         outputAspect: .square,
@@ -36,14 +31,6 @@ private func makePreviewConfirmation(projectID: ProjectID) -> PreviewConfirmatio
         detectionRevision: 1,
         previewRenderHash: PreviewRenderHash(bytes: Data(repeating: 0x01, count: 32))
     )
-}
-
-private func makeOutputFileRef() -> OutputFileRef {
-    let ref = ManagedFileRef(kind: .output, fileID: ManagedFileID(rawValue: UUID()))
-    guard let outputRef = OutputFileRef(ref) else {
-        fatalError("test setup invariant violated: kind must be .output")
-    }
-    return outputRef
 }
 
 private func makeExportJob(exportID: ExportID, projectID: ProjectID) -> ExportJob {

@@ -9,8 +9,6 @@ import Foundation
 // `PixelSize` / `PixelRect` は正本に throws init が無いため、検証なしで任意の値を
 // 保持できることを固定する（誤って検証を追加していないことの回帰テスト）。
 
-private func assertSendableHashable<T: Sendable & Hashable>(_ value: T) -> T { value }
-
 // MARK: - PixelSize / PixelRect（検証なし）
 
 // 正本コードブロックに throws init が無いため型に検証を追加していない

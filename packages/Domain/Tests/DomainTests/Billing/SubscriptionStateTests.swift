@@ -2,13 +2,11 @@ import Testing
 @testable import Domain
 import Foundation
 
-/// Task 3: 課金・購読状態の型群（architecture.md 6.2）。
-///
-/// `Plan` の Comparable が宣言順（free < standard < pro）であること、各 struct が
-/// Sendable + Equatable でありフィールドを保持すること、`SubscriptionCacheState` の
-/// 3 ケースが構築できることを検証する。
-
-private func assertSendableEquatable<T: Sendable & Equatable>(_ value: T) -> T { value }
+// Task 3: 課金・購読状態の型群（architecture.md 6.2）。
+//
+// `Plan` の Comparable が宣言順（free < standard < pro）であること、各 struct が
+// Sendable + Equatable でありフィールドを保持すること、`SubscriptionCacheState` の
+// 3 ケースが構築できることを検証する。
 
 // MARK: - Plan の Comparable（宣言順: free < standard < pro）
 

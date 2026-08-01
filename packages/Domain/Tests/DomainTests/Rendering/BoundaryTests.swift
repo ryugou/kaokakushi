@@ -10,8 +10,6 @@ import Foundation
 // `Date()`（引数なし）は packages/Domain では禁止のため、`OutputFile` のテストでは
 // `Date(timeIntervalSince1970:)` を使う。
 
-private func assertSendableHashable<T: Sendable & Hashable>(_ value: T) -> T { value }
-
 private func makeNormalizedRect() throws -> NormalizedRect {
     try NormalizedRect(left: 0.2, top: 0.2, rightExclusive: 0.6, bottomExclusive: 0.6)
 }

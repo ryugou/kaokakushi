@@ -2,19 +2,11 @@ import Testing
 @testable import Domain
 import Foundation
 
-/// Task 3: 出力レコードの型群（export-saga.md 3 章 + architecture.md 7.5）。
-///
-/// `OutputState` の固定 rawValue（1/2/3。architecture.md 7.5 の表）、
-/// `OutputRecord.isUndelivered` の述語（generated/deliveryUnknown で true、delivered で false）、
-/// `OutputRecord` / `ExportRecord` のフィールド保持を検証する。
-
-private func makeOutputFileRef() -> OutputFileRef {
-    let ref = ManagedFileRef(kind: .output, fileID: ManagedFileID(rawValue: UUID()))
-    guard let outputRef = OutputFileRef(ref) else {
-        fatalError("test setup invariant violated: kind must be .output")
-    }
-    return outputRef
-}
+// Task 3: 出力レコードの型群（export-saga.md 3 章 + architecture.md 7.5）。
+//
+// `OutputState` の固定 rawValue（1/2/3。architecture.md 7.5 の表）、
+// `OutputRecord.isUndelivered` の述語（generated/deliveryUnknown で true、delivered で false）、
+// `OutputRecord` / `ExportRecord` のフィールド保持を検証する。
 
 // MARK: - OutputState の固定 rawValue（architecture.md 7.5 の表）
 

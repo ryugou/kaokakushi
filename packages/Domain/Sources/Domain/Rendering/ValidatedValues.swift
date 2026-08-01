@@ -76,15 +76,21 @@ public struct EffectOpacity: Sendable, Equatable {
     }
 }
 
+// MosaicRatio と BlurRatio は「領域短辺に対する比。(0, 0.5]」という同じ制約を共有する。
+// 検証を1箇所にし、片方だけ範囲を変えて他方を直し忘れる事故を防ぐ。
+private func validatedShortSideRatio(_ rawValue: Double) throws -> Double {
+    guard rawValue.isFinite, rawValue > 0, rawValue <= 0.5 else {
+        throw RenderValidationError.invalidRatio
+    }
+    return rawValue
+}
+
 /// モザイクのセル比（領域短辺に対する比）。
 public struct MosaicRatio: Sendable, Hashable {
     public let value: Double
 
     public init(_ rawValue: Double) throws {
-        guard rawValue.isFinite, rawValue > 0, rawValue <= 0.5 else {
-            throw RenderValidationError.invalidRatio
-        }
-        self.value = rawValue
+        self.value = try validatedShortSideRatio(rawValue)
     }
 }
 
@@ -93,10 +99,7 @@ public struct BlurRatio: Sendable, Hashable {
     public let value: Double
 
     public init(_ rawValue: Double) throws {
-        guard rawValue.isFinite, rawValue > 0, rawValue <= 0.5 else {
-            throw RenderValidationError.invalidRatio
-        }
-        self.value = rawValue
+        self.value = try validatedShortSideRatio(rawValue)
     }
 }
 

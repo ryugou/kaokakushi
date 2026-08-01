@@ -8,8 +8,6 @@ import Foundation
 /// （"1.10.0" < "1.9.0" は文字列としては真になるが、数値では偽になる境界を検証する）、
 /// `UpdateDecision` の2ケースを検証する。
 
-private func assertSendableHashable<T: Sendable & Hashable>(_ value: T) -> T { value }
-
 @Test("AppVersionは数値タプル比較でminorが2桁でも正しく比較される")
 func appVersionComparesNumericallyNotLexically() {
     // "1.10.0" と "1.9.0" は文字列としては "1.10.0" < "1.9.0"（先頭 "1." の次の文字 '1' < '9'）。

@@ -7,8 +7,6 @@ import Foundation
 /// `BatchKind` の固定rawValue（1/2。列値を宣言順に依存させない規則）、
 /// `BatchPolicySnapshot` のフィールド保持を検証する。
 
-private func assertSendableEquatable<T: Sendable & Equatable>(_ value: T) -> T { value }
-
 @Test(
     "BatchKindのrawValueが正本の表どおりproBatch=1/trial=2",
     arguments: [

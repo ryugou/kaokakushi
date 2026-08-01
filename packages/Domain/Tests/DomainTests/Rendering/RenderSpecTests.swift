@@ -8,8 +8,6 @@ import Foundation
 // RenderOpSpec / BackgroundSpec / MaskShape / RegionOrigin / StampSource /
 // SourceScaleMode）を、各 case が検証済み値型で構築できることを中心に検証する。
 
-private func assertSendableHashable<T: Sendable & Hashable>(_ value: T) -> T { value }
-
 private func makeNormalizedRect() throws -> NormalizedRect {
     try NormalizedRect(left: 0.1, top: 0.1, rightExclusive: 0.9, bottomExclusive: 0.9)
 }

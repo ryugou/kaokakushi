@@ -18,15 +18,16 @@ import Foundation
 // swiftlint file_length(400行)対応のため CompilePlacementTests.swift へ分割している。
 // このファイルは丸め・stampKeys・適用順・cellSizePx・expand 等のコア変換ロジックを扱う。
 
-private func makeSize(_ width: Int, _ height: Int) -> PixelSize {
+// makeSize / makeRect / makeSpec は CompilePlacementTests.swift と共有する（internal）。
+func makeSize(_ width: Int, _ height: Int) -> PixelSize {
     PixelSize(width: width, height: height)
 }
 
-private func makeRect(left: Double, top: Double, right: Double, bottom: Double) throws -> NormalizedRect {
+func makeRect(left: Double, top: Double, right: Double, bottom: Double) throws -> NormalizedRect {
     try NormalizedRect(left: left, top: top, rightExclusive: right, bottomExclusive: bottom)
 }
 
-private func makeSpec(
+func makeSpec(
     sourceCrop: NormalizedRect,
     scaleMode: SourceScaleMode = .fill,
     background: BackgroundSpec = .none,

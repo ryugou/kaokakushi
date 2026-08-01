@@ -8,8 +8,6 @@ import Foundation
 /// 4ケース、`StampCatalog` プロトコルへの最小準拠、`ExportAccountingMode` の3ケース、
 /// `ExportStartBlockReason` の3ケース、`ExportStartBlock` のフィールド保持を検証する。
 
-private func assertSendableEquatable<T: Sendable & Equatable>(_ value: T) -> T { value }
-
 @Test("PreviewConfirmationが全フィールドを保持する")
 func previewConfirmationHoldsAllFields() {
     let projectID = ProjectID(rawValue: UUID())

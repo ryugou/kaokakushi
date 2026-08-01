@@ -7,30 +7,14 @@ import Foundation
 // file_length(400行)対応）。丸め・stampKeys・適用順・cellSizePx・expand 等のコア変換
 // ロジックは CompileTests.swift 側を参照。
 //
-// test-plan.md 2.4 の列挙にはないが、正本にコードで明示されない fit/fill の配置式・
-// 背景ぼかしの sourceRect/scaleMode 決定はいずれもオーケストレータが確定した仕様であり、
-// 未テストのまま残すとリグレッションを検出できない。TDD の観点から追加している。
+// fit/fill の配置式・背景ぼかしの sourceRect/scaleMode 決定の正本は image-pipeline.md
+// 2 章「SourcePlacement の配置規則」。
 //
 // 数値例は、Double の丸め誤差でテストの意図（floor/ceil の方向）が揺れないよう、
 // 積が整数境界へ十分近づかない値、または 2 進で厳密に表現できる dyadic rational
 // （0.5 等）のいずれかを選んでいる（CompileTests.swift 冒頭の方針を踏襲）。
-
-private func makeSize(_ width: Int, _ height: Int) -> PixelSize {
-    PixelSize(width: width, height: height)
-}
-
-private func makeRect(left: Double, top: Double, right: Double, bottom: Double) throws -> NormalizedRect {
-    try NormalizedRect(left: left, top: top, rightExclusive: right, bottomExclusive: bottom)
-}
-
-private func makeSpec(
-    sourceCrop: NormalizedRect,
-    scaleMode: SourceScaleMode = .fill,
-    background: BackgroundSpec = .none,
-    regions: [RenderRegionSpec] = []
-) -> RenderSpec {
-    RenderSpec(sourceCrop: sourceCrop, scaleMode: scaleMode, background: background, regions: regions)
-}
+//
+// makeSize / makeRect / makeSpec は CompileTests.swift の共有ヘルパーを使う。
 
 // MARK: - 1. scaleMode=fill / fit の destinationRect
 

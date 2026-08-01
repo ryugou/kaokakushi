@@ -157,18 +157,18 @@ private func isFaceAtEdge(_ face: DetectedFace) -> Bool {
     isAtEdgeAfterDefaultExpansion(face.bounds)
 }
 
-// triage 専用の簡易境界チェック。image-pipeline.md 1 章の既定拡張率
-// （上 25% / 下 15% / 左右 15%）を NormalizedRect へ直接適用し、画像境界（0...1）へ
-// 接するかどうかを見る。Task 7 の `expand(face:effect:)` とは別実装であり、
-// EffectSetting を必要としない。
+// triage の境界チェック。image-pipeline.md 1 章の既定拡張率
+// （上 25% / 下 15% / 左右 15%）を適用した矩形が画像境界（0...1）へ接するかを見る。
+// 拡張式そのものは expandedEdges（Compile.swift）と共有する。
 private func isAtEdgeAfterDefaultExpansion(_ bounds: NormalizedRect) -> Bool {
-    let width = bounds.rightExclusive - bounds.left
-    let height = bounds.bottomExclusive - bounds.top
-    let expandedLeft = bounds.left - width * edgeCheckExpandSide
-    let expandedTop = bounds.top - height * edgeCheckExpandTop
-    let expandedRight = bounds.rightExclusive + width * edgeCheckExpandSide
-    let expandedBottom = bounds.bottomExclusive + height * edgeCheckExpandBottom
-    return expandedLeft <= 0 || expandedTop <= 0 || expandedRight >= 1 || expandedBottom >= 1
+    let edges = expandedEdges(
+        of: bounds,
+        top: edgeCheckExpandTop,
+        bottom: edgeCheckExpandBottom,
+        leading: edgeCheckExpandSide,
+        trailing: edgeCheckExpandSide
+    )
+    return edges.left <= 0 || edges.top <= 0 || edges.right >= 1 || edges.bottom >= 1
 }
 
 // overlappingFaces は「重なる顔の組み合わせごとに 1 件」（architecture.md 6.1 の表）。

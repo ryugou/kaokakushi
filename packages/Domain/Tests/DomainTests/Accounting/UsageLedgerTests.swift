@@ -7,8 +7,6 @@ import Foundation
 /// `UsageLedger` の消費件数の導出（`consumed` / `trialConsumed`）、`ExportedSettingsEntry` の
 /// フィールド保持、`MonthlyQuotaDecision` の3ケースを検証する。
 
-private func assertSendableEquatable<T: Sendable & Equatable>(_ value: T) -> T { value }
-
 @Test("UsageLedgerがconsumedExportIDsとtrialConsumedExportIDsの件数をconsumed/trialConsumedとして導出する")
 func usageLedgerDerivesConsumedCounts() {
     let period = YearMonth(year: 2026, month: 8)

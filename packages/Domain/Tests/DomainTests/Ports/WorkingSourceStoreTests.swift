@@ -25,11 +25,6 @@ private func makeCaptureMetadata() -> OriginalCaptureMetadata {
     )
 }
 
-private func makeRenderSpec() throws -> RenderSpec {
-    let rect = try NormalizedRect(left: 0, top: 0, rightExclusive: 1, bottomExclusive: 1)
-    return RenderSpec(sourceCrop: rect, scaleMode: .fit, background: .none, regions: [])
-}
-
 // MARK: - SourceRepresentation の2ケース
 
 @Test(

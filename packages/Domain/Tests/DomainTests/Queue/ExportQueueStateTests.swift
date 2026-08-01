@@ -7,8 +7,6 @@ import Foundation
 /// `ExportQueueState.isTerminal`（completed/failed/canceledでtrue、それ以外でfalse）、
 /// `ExportQueueFailure` のフィールド保持、`AppErrorCode` の固定rawValue（欠番込み）を検証する。
 
-private func assertSendableEquatable<T: Sendable & Equatable>(_ value: T) -> T { value }
-
 private func sampleFailure() -> ExportQueueFailure {
     ExportQueueFailure(
         errorCode: .renderFailed, isRetryable: true, occurredAt: Date(timeIntervalSince1970: 1_700_000_000))

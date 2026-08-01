@@ -9,14 +9,6 @@ import Foundation
 /// requiresDeliveryAttention`（isUndelivered とは別の軸で hasUnknownLibrarySave も見る）、
 /// `OutputDeliveryStore` への最小準拠を検証する。
 
-private func makeOutputFileRef() -> OutputFileRef {
-    let ref = ManagedFileRef(kind: .output, fileID: ManagedFileID(rawValue: UUID()))
-    guard let outputRef = OutputFileRef(ref) else {
-        fatalError("test setup invariant violated: kind must be .output")
-    }
-    return outputRef
-}
-
 private func makeOutputRecord(state: OutputState) -> OutputRecord {
     OutputRecord(
         exportID: ExportID(rawValue: UUID()),
