@@ -22,11 +22,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # SwiftLint は macos-15 ランナーイメージに標準搭載されている（brew での
-      # 再インストールは無駄なネットワーク取得になるため行わない）。
-      # 前提が崩れた場合はこのステップが失敗して早期検知される。
-      - name: SwiftLint version
-        run: swiftlint version
+      # SwiftLint はランナーへ brew で導入する。
+      # （「macos-15 イメージに標準搭載」という情報に基づき一度削除したが、
+      # 2026-08 時点の実ランナーで command not found となり CI が失敗したため復活。
+      # プリインストールを仮定しない。）
+      - name: Install SwiftLint
+        run: brew install swiftlint
 
       - name: Run SwiftLint (strict)
         run: swiftlint lint --strict
