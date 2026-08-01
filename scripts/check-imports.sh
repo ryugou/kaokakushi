@@ -31,17 +31,17 @@
 #       （後者は package 構成が変わってこのスクリプトが更新されずに「何もチェックせず
 #       成功する」事故を防ぐため、fail-closed にしている）
 #
-# 既知の制約（spec 2026-08-01-project-foundation-fixes.md の範囲外）:
-#   `import struct Foundation.Date` のようなサブモジュール指定 import（kind-qualified
-#   import）は本スクリプトの対象外。現状のコードベースには存在せず、仕様書にも
-#   要求されていない。万一登場した場合、モジュール名の抽出結果が "struct" 等になり
-#   許可リストに一致しないため fail-closed（安全側）に倒れる＝見逃しではなく誤検知側に倒れる。
+# 対応範囲:
+#   修飾（@testable / @_implementationOnly / @preconcurrency / @_exported / アクセスレベル）と
+#   種別つき import（`import struct Foundation.Date` 等）はモジュール名を正しく抽出する。
+#   セミコロン後の import 等、通常のコーディングで現れない構文への完全対応は目的にしない
+#   （これは自分たちの事故防止ガードレールであり、意図的な迂回はレビューで検出する）。
 
 set -euo pipefail
 
 # import 行検出用の正規表現（grep -E）。
 # 修飾キーワードを0回以上・任意の順序で許容し、最終的に "import <Identifier>" にマッチする。
-IMPORT_REGEX='^[[:space:]]*(@testable[[:space:]]+|@_implementationOnly[[:space:]]+|public[[:space:]]+|internal[[:space:]]+|package[[:space:]]+|private[[:space:]]+|fileprivate[[:space:]]+)*import[[:space:]]+[A-Za-z_][A-Za-z0-9_]*'
+IMPORT_REGEX='^[[:space:]]*(@testable[[:space:]]+|@_implementationOnly[[:space:]]+|@preconcurrency[[:space:]]+|@_exported[[:space:]]+|public[[:space:]]+|internal[[:space:]]+|package[[:space:]]+|private[[:space:]]+|fileprivate[[:space:]]+)*import[[:space:]]+[A-Za-z_][A-Za-z0-9_]*'
 
 overall_fail=0
 
@@ -99,10 +99,12 @@ scan_scope() {
         line = $0
         gsub(/^[ \t]+/, "", line)
         # 先頭の修飾語（属性・アクセスレベル）を任意の組み合わせ・任意回数分だけ取り除く
-        while (line ~ /^(@testable|@_implementationOnly|public|internal|package|private|fileprivate)[ \t]+/) {
-          sub(/^(@testable|@_implementationOnly|public|internal|package|private|fileprivate)[ \t]+/, "", line)
+        while (line ~ /^(@testable|@_implementationOnly|@preconcurrency|@_exported|public|internal|package|private|fileprivate)[ \t]+/) {
+          sub(/^(@testable|@_implementationOnly|@preconcurrency|@_exported|public|internal|package|private|fileprivate)[ \t]+/, "", line)
         }
         sub(/^import[ \t]+/, "", line)
+        # 種別つき import（import struct Foundation.Date 等）は種別キーワードを読み飛ばす
+        sub(/^(struct|class|enum|protocol|typealias|actor|func|var|let)[ \t]+/, "", line)
         split(line, toks, /[ \t.;]/)
         mod = toks[1]
         gsub(/[^A-Za-z0-9_].*$/, "", mod)
