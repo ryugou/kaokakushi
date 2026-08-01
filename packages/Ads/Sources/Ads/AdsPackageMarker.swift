@@ -5,7 +5,6 @@ import Domain
 /// `Ads` は `AdPresenter`（Google Mobile Ads）の実装置き場。AdMob SDK の追加は
 /// Issue #11 の範囲であり、このIssue（#4）ではまだ追加しない。
 public enum AdsPackageMarker {
-    public static let packageName = "Ads"
 
     /// Domain への依存が解決されていることを示す（architecture.md 3.1）。
     public static let dependsOnPackageName = DomainPackageMarker.packageName

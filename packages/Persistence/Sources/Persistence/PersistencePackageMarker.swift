@@ -5,7 +5,6 @@ import Domain
 /// `Persistence` は GRDB・ファイル管理の実装置き場。GRDB 依存の追加は Issue #6 の範囲
 /// であり、このIssue（#4）ではまだ追加しない。
 public enum PersistencePackageMarker {
-    public static let packageName = "Persistence"
 
     /// Domain への依存が解決されていることを示す（architecture.md 3.1）。
     public static let dependsOnPackageName = DomainPackageMarker.packageName

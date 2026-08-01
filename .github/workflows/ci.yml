@@ -22,8 +22,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install SwiftLint
-        run: brew install swiftlint
+      # SwiftLint は macos-15 ランナーイメージに標準搭載されている（brew での
+      # 再インストールは無駄なネットワーク取得になるため行わない）。
+      # 前提が崩れた場合はこのステップが失敗して早期検知される。
+      - name: SwiftLint version
+        run: swiftlint version
 
       - name: Run SwiftLint (strict)
         run: swiftlint lint --strict
@@ -48,23 +51,22 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Select Xcode 26
-        run: |
-          set -euo pipefail
-          app=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
-          sudo xcode-select -s "$app/Contents/Developer"
-          xcodebuild -version
+        uses: ./.github/actions/select-xcode
 
       # このIssue（#4）では外部SwiftPM依存を一切追加していないため、
       # パッケージごとの .build キャッシュは導入しない。Package.resolved が
       # 存在しない状態でキャッシュキーを組むと常に固定キーになり「一度も
       # 更新されないキャッシュ」を生む事故につながる。外部依存が入る後続Issueで
       # Package.resolved を基にキャッシュキーを再設計して導入する。
+      #
+      # --scratch-path を全パッケージで共有し、依存先（Domain）のビルド成果物を
+      # 使い回す（共有しないと Domain が依存元の数だけ再コンパイルされる）。
       - name: swift test (all packages)
         run: |
           set -euo pipefail
           for p in Domain Rendering MediaKit Persistence Application Billing Ads Analytics; do
             echo "::group::swift test $p"
-            swift test --package-path "packages/$p"
+            swift test --package-path "packages/$p" --scratch-path "$PWD/.build/ci-shared"
             echo "::endgroup::"
           done
 
@@ -78,18 +80,7 @@ jobs:
 
       - name: Select Xcode 26
         id: select_xcode
-        run: |
-          set -euo pipefail
-          app=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
-          sudo xcode-select -s "$app/Contents/Developer"
-          xcodebuild -version
-          # DerivedData のキャッシュキーに Xcode の版（ディレクトリ名 + ビルド番号）を
-          # 含めるための識別子を作る。Xcode バージョンが変わると DerivedData の
-          # 内部フォーマットに互換性がない場合があり、キーにバージョンを含めないと
-          # 「別バージョンでビルドした DerivedData を復元してビルドが壊れる」事故になる。
-          build_number=$(xcodebuild -version | awk '/^Build version/{print $3}')
-          xcode_id="$(basename "$app" .app)-${build_number}"
-          echo "xcode_id=${xcode_id}" >> "$GITHUB_OUTPUT"
+        uses: ./.github/actions/select-xcode
 
       - name: Install XcodeGen
         run: brew install xcodegen

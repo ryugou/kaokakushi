@@ -50,3 +50,4 @@ GoogleService-Info.plist
 .worktrees/
 
 .pnpm-store/
+.build-ci-test/

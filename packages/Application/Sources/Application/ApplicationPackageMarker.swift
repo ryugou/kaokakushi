@@ -6,7 +6,6 @@ import Domain
 /// （architecture.md 4.3）。`Domain` のプロトコルのみを通してアダプタを操作し、
 /// `Persistence` には直接依存しない。実際の Coordinator は後続 Issue で追加する。
 public enum ApplicationPackageMarker {
-    public static let packageName = "Application"
 
     /// Domain への依存が解決されていることを示す（architecture.md 3.1）。
     public static let dependsOnPackageName = DomainPackageMarker.packageName
