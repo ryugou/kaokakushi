@@ -123,6 +123,8 @@ func appErrorCodeHasExactlyNineteenCases() {
     #expect(Set(allCases.map(appErrorCodeExhaustiveRawValue)).count == 19)
 }
 
+// 分岐数はケース数そのもの（網羅的 switch によるコンパイル時検出が目的のため許容する）。
+// swiftlint:disable:next cyclomatic_complexity
 private func appErrorCodeExhaustiveRawValue(_ subject: AppErrorCode) -> Int32 {
     switch subject {
     case .unknown: return 0

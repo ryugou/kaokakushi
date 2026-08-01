@@ -54,6 +54,8 @@ func renderValidationErrorHasExactlyTwelveCases() {
     #expect(Set(allCases.map(renderValidationErrorExhaustiveIndex)).count == 12)
 }
 
+// 分岐数はケース数そのもの（網羅的 switch によるコンパイル時検出が目的のため許容する）。
+// swiftlint:disable:next cyclomatic_complexity
 private func renderValidationErrorExhaustiveIndex(_ subject: RenderValidationError) -> Int {
     switch subject {
     case .invalidOpacity: return 0
