@@ -583,6 +583,8 @@ struct RasterizedStampAsset: Sendable {
 
 領域が必ず**外側へ広がる**方向に丸められます。内側へ丸めると顔の縁が 1 ピクセル露出しえます。
 
+**変換結果が有限でない、または `Int` で表現できない場合は `compileRenderDraft` が `invalidRect` を throw します**（極端な座標×解像度の積が `Double` のオーバーフローや `Int` 変換の trap になる経路を、クラッシュではなく検証エラーとして返す）。
+
 ##### 適用順
 
 1. `SourcePlacement.sourceRect` で元画像を切り出す（`fill` では `sourceCrop` をさらにキャンバス比率へ中央切り詰めした範囲。2 章「`SourcePlacement` の配置規則」）

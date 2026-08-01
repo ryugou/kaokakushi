@@ -231,6 +231,8 @@ protocol Sha256Digest: Sendable {
 
 ハッシュ計算関数はこのプロトコルを引数で受け取る純粋関数とし、実装（CryptoKit）は上位層がアダプタとして注入します。
 
+**32 バイト固定を型で強制します。** ハッシュ値型（`ProjectSettingsHash` / `PreviewRenderHash` / `StampAssetHash`）の initializer は 32 バイト以外の入力を拒否し（`throws`）、ハッシュ計算関数は注入された digest の戻り値長も検証します。`StampAssetHash` は長さ前置きなしで正準バイト列へ連結される（2 章）ため、長さの不変条件が崩れるとフィールド境界ごと壊れます。
+
 ### 5.3 `StampAssetHash`
 
 | 項目 | 規約 |

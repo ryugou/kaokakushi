@@ -32,8 +32,8 @@ public struct CustomerInfoSnapshot: Sendable, Equatable {
     }
 }
 
-/// 契約の等級。DB 列値は architecture.md 6.2 の表が正本
-/// （SubscriptionState の DB 列としてスキーマ移行をまたぐため case 宣言順に依存させない）。
+/// 契約の等級。raw value は DB 列値（architecture.md 6.2 のコードブロックが正本。
+/// SubscriptionState の DB 列としてスキーマ移行をまたぐため case 宣言順に依存させない）。
 public enum Plan: UInt32, Sendable, Hashable, Comparable {
     case free = 1
     case standard = 2
@@ -51,7 +51,7 @@ public enum Plan: UInt32, Sendable, Hashable, Comparable {
     }
 }
 
-/// 契約の状態。pending は支払い保留（仕様 5.4）。DB 列値は architecture.md 6.2 の表が正本。
+/// 契約の状態。pending は支払い保留（仕様 5.4）。raw value は DB 列値（architecture.md 6.2 のコードブロックが正本）。
 public enum PlanStatus: UInt32, Sendable, Hashable {
     case active = 1
     case grace = 2

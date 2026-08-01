@@ -49,11 +49,8 @@ public struct OutputRecord: Sendable {
     }
 }
 
-// architecture.md 7.5 のコードブロックは raw value 無しの enum
-// （`enum OutputState: Sendable, Equatable { case generated, deliveryUnknown, delivered }`）
-// だが、直後の表で DB 列値 generated=1 / deliveryUnknown=2 / delivered=3 が固定されている。
-// 「列値を固定するのは case の宣言順に依存させないため」（同節）という明文の要求を満たすには
-// raw value が必須であり、ManagedFileKind（ManagedFileRef.swift）と同じ既定パターンに倣う。
+// raw value は DB 列値（architecture.md 7.5 のコードブロックが正本。
+// スキーマ移行をまたぐため case の宣言順に依存させない）。
 public enum OutputState: UInt32, Sendable, Equatable {
     case generated = 1
     case deliveryUnknown = 2

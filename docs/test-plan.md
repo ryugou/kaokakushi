@@ -55,6 +55,7 @@
 - `triage` の入力が [画像処理](image-pipeline.md) の共通モデル（`DetectionResult`）だけであること。OS 固有の値に依存しないこと
 - `ReviewIssue` が**発生単位**で列挙され、小さい顔が 3 人なら 3 件になること
 - `lowConfidence` が顔ごとに 1 件の `ReviewIssue` になること
+- 非有限（`NaN` / 無限大）の `yawDegrees` / `pitchDegrees` が `extremePose` として安全側（要確認）に倒れること
 - `ReviewIssueID` が `detectionRevision` を含み、`overlappingFaces` では顔 ID が辞書順に並ぶこと
 - `ReviewIssueID` が `projectID` を含み、同じ revision の別写真の `noFaceDetected` が別 ID になること
 - `FaceTrack` が `confidence` / `yawDegrees` / `pitchDegrees` / `rollDegrees` / `isSmallFace` を列として持ち、`triage` を再実行できること

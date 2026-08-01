@@ -17,12 +17,8 @@ public struct BatchPolicySnapshot: Sendable, Equatable {
     }
 }
 
-// architecture.md 6.4 のコードブロックは raw value 無しの enum
-// （`enum BatchKind: Sendable, Hashable { case proBatch, case trial }`）だが、直後の表で
-// DB 列値 proBatch=1 / trial=2 が固定されている。「列値を固定する（`case` 宣言順に依存させると
-// 版によって trial のバッチが proBatch として上限 50 でクランプされうる。OutputState と同じ規則）」
-// という明文の要求を満たすには raw value が必須であり、OutputState（Accounting/OutputRecord.swift）
-// と同じ理由で UInt32 raw value を付ける。
+// raw value は DB 列値（architecture.md 6.4 のコードブロックが正本。
+// スキーマ移行をまたぐため case の宣言順に依存させない）。
 /// このバッチが Pro の通常一括かトライアルか。作成時に確定する
 public enum BatchKind: UInt32, Sendable, Hashable {
     case proBatch = 1      // canUseProBatch による通常の一括処理

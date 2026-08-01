@@ -25,7 +25,7 @@ func planComparableFollowsDeclarationOrder(lhs: Plan, rhs: Plan, expectedLessTha
     #expect((lhs < rhs) == expectedLessThan)
 }
 
-// MARK: - Plan / PlanStatus の DB 列値（architecture.md 6.2 の表が正本）
+// MARK: - Plan / PlanStatus の DB 列値（architecture.md 6.2 のコードブロックが正本）
 
 @Test(
     "PlanのrawValueが正本どおり",
