@@ -56,6 +56,8 @@ custom_rules:
 # `op` は docs/image-pipeline.md の正本コードブロックからの逐語転記フィールド名
 # （RenderRegionSpec.op / EffectSetting.op / RenderRegionDraft.op / RenderRegion.op）。
 # 正本との一字一句一致を優先するため改名せず、identifier_name(min_length) の対象から除外する。
+# excluded の指定は SwiftLint 既定の除外リスト（id を含む）を置き換えるため、id も明示する。
 identifier_name:
   excluded:
+    - id
     - op
