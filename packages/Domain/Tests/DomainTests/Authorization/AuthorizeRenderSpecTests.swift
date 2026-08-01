@@ -199,4 +199,15 @@ func renderSpecBlockReasonHasThreeCases() {
     ]
     #expect(allCases.count == 3)
     #expect(Set(allCases.map { String(describing: $0) }).count == 3)
+    // default無しのswitchで全ケースを一意な値へ写す。将来ケースが追加されるとこのswitchが
+    // 網羅性を失いコンパイルエラーになるため、配列への追加漏れを機械的に検出できる。
+    #expect(Set(allCases.map(renderSpecBlockReasonExhaustiveIndex)).count == 3)
+}
+
+private func renderSpecBlockReasonExhaustiveIndex(_ subject: RenderSpecBlockReason) -> Int {
+    switch subject {
+    case .premiumStampNotAvailable: return 0
+    case .customStampNotAvailable: return 1
+    case .unknownBuiltInStampCode: return 2
+    }
 }

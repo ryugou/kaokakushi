@@ -96,7 +96,7 @@ public func compileRenderDraft(
     try validateSourceCropBounds(spec.sourceCrop)
 
     let canvasSize = targetSize
-    let sourceRect = pixelRect(from: spec.sourceCrop, in: sourceSize)
+    let sourceRect = try pixelRect(from: spec.sourceCrop, in: sourceSize)
     let sourcePlacement = makeSourcePlacement(sourceRect: sourceRect, canvasSize: canvasSize, scaleMode: spec.scaleMode)
     let background = try makeBackgroundOp(spec.background, sourceSize: sourceSize, canvasSize: canvasSize)
 
@@ -134,16 +134,28 @@ private func orderedRegions(_ regions: [RenderRegionSpec]) -> [RenderRegionSpec]
 private func floorToInt(_ value: Double) -> Int { Int(value.rounded(.down)) }
 private func ceilToInt(_ value: Double) -> Int { Int(value.rounded(.up)) }
 
+/// `pixelRect` 専用の丸め済み `Int` 変換。丸め後の値が非有限（`NaN`/`±Infinity`）、または
+/// `Int` の表現範囲を超える場合は `nil` を返す（`Int(exactly:)` の契約どおり）。
+/// 同ファイル内の `floorToInt`/`ceilToInt`（非throwing、`fillSourceRect` 専用でスコープ外）
+/// とは別名にして責務を分ける。
+private func safeRoundedInt(_ value: Double, rule: FloatingPointRoundingRule) -> Int? {
+    Int(exactly: value.rounded(rule))
+}
+
 /// `NormalizedRect` を `size` に対して絶対ピクセルへ変換する（image-pipeline.md 4章
 /// 「ピクセルへの丸め」）。`left`/`top` は floor、`right`/`bottom` は ceil。領域が必ず
 /// 外側へ広がる方向へ丸められる（内側へ丸めると顔の縁が露出しうるため）。
-private func pixelRect(from rect: NormalizedRect, in size: PixelSize) -> PixelRect {
-    PixelRect(
-        left: floorToInt(rect.left * Double(size.width)),
-        top: floorToInt(rect.top * Double(size.height)),
-        rightExclusive: ceilToInt(rect.rightExclusive * Double(size.width)),
-        bottomExclusive: ceilToInt(rect.bottomExclusive * Double(size.height))
-    )
+/// 変換結果が有限でない、または `Int` で表現できない場合は `invalidRect` を throw する
+/// （極端な座標×解像度の積が `Double` のオーバーフローや `Int` 変換の trap になる経路を、
+/// クラッシュではなく検証エラーとして返す）。
+private func pixelRect(from rect: NormalizedRect, in size: PixelSize) throws -> PixelRect {
+    guard let left = safeRoundedInt(rect.left * Double(size.width), rule: .down),
+          let top = safeRoundedInt(rect.top * Double(size.height), rule: .down),
+          let right = safeRoundedInt(rect.rightExclusive * Double(size.width), rule: .up),
+          let bottom = safeRoundedInt(rect.bottomExclusive * Double(size.height), rule: .up) else {
+        throw RenderValidationError.invalidRect
+    }
+    return PixelRect(left: left, top: top, rightExclusive: right, bottomExclusive: bottom)
 }
 
 /// 前景の配置（`SourcePlacement`）。配置規則は image-pipeline.md 2 章
@@ -256,7 +268,7 @@ private func compileRegionDraft(
     order: Int,
     stampKeys: inout Set<StampRasterKey>
 ) throws -> RenderRegionDraft {
-    let boundsPx = pixelRect(from: region.bounds, in: canvasSize)
+    let boundsPx = try pixelRect(from: region.bounds, in: canvasSize)
     let regionWidth = boundsPx.rightExclusive - boundsPx.left
     let regionHeight = boundsPx.bottomExclusive - boundsPx.top
     let shortSide = min(regionWidth, regionHeight)

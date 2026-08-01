@@ -117,6 +117,26 @@ func triageExtremePoseBoundary(yawDegrees: Double, pitchDegrees: Double, expecte
 }
 
 @Test(
+    "yaw/pitchが非有限（NaN/Infinity/-Infinity）なら安全側に倒れextremePoseが発火する",
+    arguments: [
+        (Double.nan, 0.0),
+        (Double.infinity, 0.0),
+        (-Double.infinity, 0.0),
+        (0.0, Double.nan),
+        (0.0, Double.infinity),
+        (0.0, -Double.infinity)
+    ]
+)
+func triageExtremePoseFiresOnNonFiniteYawOrPitch(yawDegrees: Double, pitchDegrees: Double) throws {
+    let target = try face(yawDegrees: yawDegrees, pitchDegrees: pitchDegrees)
+    let result = detectionResult([target])
+
+    let issues = triage(result, projectID: ProjectID(rawValue: UUID()), detectionRevision: 1)
+
+    #expect(issues.contains { $0.id.reason == .extremePose })
+}
+
+@Test(
     "confidenceがどんな値でもlowConfidenceは発火しない（v1無効化の確認）",
     arguments: [0.0, 0.3, 0.5, 1.0]
 )

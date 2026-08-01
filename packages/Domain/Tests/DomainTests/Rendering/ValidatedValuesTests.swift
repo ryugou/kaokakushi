@@ -48,6 +48,27 @@ func renderValidationErrorHasExactlyTwelveCases() {
     #expect(allCases.count == 12)
     #expect(RenderValidationError.invalidOpacity == RenderValidationError.invalidOpacity)
     #expect(RenderValidationError.invalidOpacity != RenderValidationError.invalidRatio)
+    // default無しのswitchで全ケースを一意な値へ写す。将来ケースが追加されるとこのswitchが
+    // 網羅性を失いコンパイルエラーになるため、配列への追加漏れ（テストが静かに古びる）を
+    // 機械的に検出できる。
+    #expect(Set(allCases.map(renderValidationErrorExhaustiveIndex)).count == 12)
+}
+
+private func renderValidationErrorExhaustiveIndex(_ subject: RenderValidationError) -> Int {
+    switch subject {
+    case .invalidOpacity: return 0
+    case .invalidRatio: return 1
+    case .invalidCornerRatio: return 2
+    case .invalidPixelSize: return 3
+    case .invalidRect: return 4
+    case .invalidCellSize: return 5
+    case .invalidSigma: return 6
+    case .invalidFeather: return 7
+    case .nonVisibleColor: return 8
+    case .emptyRegion: return 9
+    case .unresolvedStampAsset: return 10
+    case .sourceCropOutOfBounds: return 11
+    }
 }
 
 // MARK: - EffectOpacity（有限かつ 0 < v <= 1）

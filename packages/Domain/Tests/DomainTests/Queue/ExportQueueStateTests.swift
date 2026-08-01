@@ -118,4 +118,31 @@ func appErrorCodeHasExactlyNineteenCases() {
     ]
     #expect(allCases.count == 19)
     #expect(Set(allCases).count == 19)
+    // default無しのswitchで全ケースをrawValueへ写す。将来ケースが追加されるとこのswitchが
+    // 網羅性を失いコンパイルエラーになるため、配列への追加漏れを機械的に検出できる。
+    #expect(Set(allCases.map(appErrorCodeExhaustiveRawValue)).count == 19)
+}
+
+private func appErrorCodeExhaustiveRawValue(_ subject: AppErrorCode) -> Int32 {
+    switch subject {
+    case .unknown: return 0
+    case .photoLoadFailed: return 1
+    case .unsupportedFormat: return 2
+    case .detectionFailed: return 3
+    case .renderFailed: return 4
+    case .encodeFailed: return 5
+    case .storageInsufficient: return 6
+    case .fileWriteFailed: return 7
+    case .fileVerificationFailed: return 8
+    case .databaseFailure: return 9
+    case .protectedDataUnavailable: return 13
+    case .photoLibrarySaveFailed: return 15
+    case .photoLibraryPermissionDenied: return 16
+    case .shareFailed: return 17
+    case .entitlementVerificationFailed: return 18
+    case .purchaseFailed: return 19
+    case .sourceMissing: return 21
+    case .sourceMismatch: return 22
+    case .capabilityRequired: return 23
+    }
 }

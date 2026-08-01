@@ -150,7 +150,12 @@ private func singleFaceIssues(
 }
 
 private func isExtremePose(_ face: DetectedFace) -> Bool {
-    abs(face.yawDegrees) > extremePoseYawDegrees || abs(face.pitchDegrees) > extremePosePitchDegrees
+    // 非有限（NaN/無限大）は安全側（extremePose扱い）へ倒す（architecture.md 6.1）。
+    // NaNは`abs(NaN) > threshold`が常にfalseになり素通しされるため、先に明示チェックする。
+    guard face.yawDegrees.isFinite, face.pitchDegrees.isFinite else {
+        return true
+    }
+    return abs(face.yawDegrees) > extremePoseYawDegrees || abs(face.pitchDegrees) > extremePosePitchDegrees
 }
 
 private func isFaceAtEdge(_ face: DetectedFace) -> Bool {
