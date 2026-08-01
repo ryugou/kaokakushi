@@ -83,11 +83,11 @@ func exportAccountingModeHasThreeCases(mode: ExportAccountingMode) {
 }
 
 @Test(
-    "ExportStartBlockReasonはmonthlyLimitReached/trialCreditsUnavailable/capabilityVerificationRequiredの3ケースを持ちSendable・Equatableである",
+    "ExportStartBlockReasonは3ケース（monthlyLimitReached/trialCreditsUnavailable/capabilityVerificationRequired）を持つ",
     arguments: [
         ExportStartBlockReason.monthlyLimitReached,
         .trialCreditsUnavailable,
-        .capabilityVerificationRequired,
+        .capabilityVerificationRequired
     ]
 )
 func exportStartBlockReasonHasThreeCases(reason: ExportStartBlockReason) {

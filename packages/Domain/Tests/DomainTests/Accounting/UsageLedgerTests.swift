@@ -26,7 +26,8 @@ func usageLedgerDerivesConsumedCounts() {
 
 @Test("UsageLedgerは消費が0件のときconsumed/trialConsumedが0になる")
 func usageLedgerDerivesZeroWhenEmpty() {
-    let subject = UsageLedger(period: YearMonth(year: 2026, month: 1), consumedExportIDs: [], trialConsumedExportIDs: [])
+    let subject = UsageLedger(
+        period: YearMonth(year: 2026, month: 1), consumedExportIDs: [], trialConsumedExportIDs: [])
     #expect(subject.consumed == 0)
     #expect(subject.trialConsumed == 0)
 }

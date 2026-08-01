@@ -10,7 +10,8 @@ import Foundation
 private func assertSendableEquatable<T: Sendable & Equatable>(_ value: T) -> T { value }
 
 private func sampleFailure() -> ExportQueueFailure {
-    ExportQueueFailure(errorCode: .renderFailed, isRetryable: true, occurredAt: Date(timeIntervalSince1970: 1_700_000_000))
+    ExportQueueFailure(
+        errorCode: .renderFailed, isRetryable: true, occurredAt: Date(timeIntervalSince1970: 1_700_000_000))
 }
 
 // MARK: - ExportQueueState.isTerminal
