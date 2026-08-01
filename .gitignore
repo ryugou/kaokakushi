@@ -51,3 +51,5 @@ GoogleService-Info.plist
 
 .pnpm-store/
 .build-ci-test/
+
+.superpowers/
