@@ -1,0 +1,334 @@
+import Foundation
+
+// レンダリングのコンパイル純粋関数群（Task 7）。
+//
+// image-pipeline.md 1章「拡張率の適用」（expand）、2章「二段階コンパイル」
+// （compileRenderDraft / bindRasterAssets）、4章「ピクセルへの丸め」「適用順」の規則を
+// 実装する。丸め・適用順・stampKeys 重複排除・欠落 assets での throw は正本が定めるとおり、
+// 正本にコードで明示されていない箇所（fit/fill の具体的な配置式）はオーケストレータが
+// 確定した仕様として下記の各関数コメントに明記する。
+//
+// `RasterizedStampAsset` は image-pipeline.md 3章「スタンプラスタライズ」の
+// 「ラスタ画像の受け渡し契約」小節からの転記。bindRasterAssets のシグネチャに必須のため
+// Task 7 で追加する。どのタスクにも明示割当が無いことをオーケストレータが確認済み。
+
+// MARK: - RasterizedStampAsset（image-pipeline.md 3章からの転記）
+
+/// スタンプラスタライズの戻り値。`CGImage` を Domain の型へ入れられないため、
+/// 実体を指す形式として定める（image-pipeline.md 3章「ラスタ画像の受け渡し契約」）。
+public struct RasterizedStampAsset: Sendable {
+    public let bitmapID: String
+    public let rasterFile: RasterFileRef
+    public let descriptor: RawBitmapDescriptor
+
+    public init(bitmapID: String, rasterFile: RasterFileRef, descriptor: RawBitmapDescriptor) {
+        self.bitmapID = bitmapID
+        self.rasterFile = rasterFile
+        self.descriptor = descriptor
+    }
+}
+
+// MARK: - expand（image-pipeline.md 1章「拡張率の適用」）
+
+/// 顔矩形へ拡張率を適用する。画像外へはみ出す場合もクランプしない
+/// （クランプすると顔が露出する方向へ倒れるため。はみ出しはマスク描画側で処理する）。
+public func expand(face: NormalizedRect, effect: EffectSetting) -> NormalizedRect {
+    let width = face.rightExclusive - face.left
+    let height = face.bottomExclusive - face.top
+
+    let top = face.top - height * effect.expansion.top.value
+    let bottom = face.bottomExclusive + height * effect.expansion.bottom.value
+    let left = face.left - width * effect.expansion.leading.value
+    let right = face.rightExclusive + width * effect.expansion.trailing.value
+
+    // try! の根拠: face は有効な NormalizedRect（left<right, top<bottom, 全て有限）であり
+    // ExpansionRatio は有限かつ 0<=v<=2.0 に検証済み。width・height は常に正、拡張率は有限の
+    // ため、拡張後も left<right・top<bottom・全て有限が数学的に保証される
+    // （このinitが失敗することは設計上ありえない）。expand() 自体は正本どおり non-throwing の
+    // シグネチャを維持する。
+    // swiftlint:disable:next force_try
+    return try! NormalizedRect(left: left, top: top, rightExclusive: right, bottomExclusive: bottom)
+}
+
+// MARK: - compileRenderDraft（image-pipeline.md 2章「二段階コンパイル」）
+
+/// `RenderSpec`（正規化座標・相対強度）を、対象解像度における絶対ピクセル値のみを持つ
+/// `RenderDraft` へコンパイルする。
+public func compileRenderDraft(
+    spec: RenderSpec,
+    sourceSize: PixelSize,
+    targetSize: PixelSize
+) throws -> RenderDraft {
+    guard sourceSize.width > 0, sourceSize.height > 0, targetSize.width > 0, targetSize.height > 0 else {
+        throw RenderValidationError.invalidPixelSize
+    }
+    try validateSourceCropBounds(spec.sourceCrop)
+
+    let canvasSize = targetSize
+    let sourceRect = pixelRect(from: spec.sourceCrop, in: sourceSize)
+    let sourcePlacement = makeSourcePlacement(sourceRect: sourceRect, canvasSize: canvasSize, scaleMode: spec.scaleMode)
+    let background = try makeBackgroundOp(spec.background, sourceSize: sourceSize, canvasSize: canvasSize)
+
+    var stampKeys: Set<StampRasterKey> = []
+    var regions: [RenderRegionDraft] = []
+    for (order, region) in orderedRegions(spec.regions).enumerated() {
+        regions.append(try compileRegionDraft(region, canvasSize: canvasSize, order: order, stampKeys: &stampKeys))
+    }
+
+    return RenderDraft(
+        canvasSize: canvasSize,
+        sourcePlacement: sourcePlacement,
+        background: background,
+        regions: regions,
+        stampKeys: stampKeys
+    )
+}
+
+/// `sourceCrop` の不変条件（image-pipeline.md 2章「`sourceCrop` の不変条件」）。
+/// 顔の拡張領域と違い、`sourceCrop` が元画像の外へ出る理由はない。クランプで黙って
+/// 直さず throw する。
+private func validateSourceCropBounds(_ crop: NormalizedRect) throws {
+    guard crop.left >= 0.0, crop.rightExclusive <= 1.0, crop.top >= 0.0, crop.bottomExclusive <= 1.0 else {
+        throw RenderValidationError.sourceCropOutOfBounds
+    }
+}
+
+/// 適用順（image-pipeline.md 4章）: `auto`（自動検出）を先、`manual`（利用者追加）を後に
+/// する。`filter` は要素の相対順序を保つため、各区分内で `RenderSpec.regions` の並び順が
+/// 保たれる。
+private func orderedRegions(_ regions: [RenderRegionSpec]) -> [RenderRegionSpec] {
+    regions.filter { $0.origin == .auto } + regions.filter { $0.origin == .manual }
+}
+
+private func floorToInt(_ value: Double) -> Int { Int(value.rounded(.down)) }
+private func ceilToInt(_ value: Double) -> Int { Int(value.rounded(.up)) }
+
+/// `NormalizedRect` を `size` に対して絶対ピクセルへ変換する（image-pipeline.md 4章
+/// 「ピクセルへの丸め」）。`left`/`top` は floor、`right`/`bottom` は ceil。領域が必ず
+/// 外側へ広がる方向へ丸められる（内側へ丸めると顔の縁が露出しうるため）。
+private func pixelRect(from rect: NormalizedRect, in size: PixelSize) -> PixelRect {
+    PixelRect(
+        left: floorToInt(rect.left * Double(size.width)),
+        top: floorToInt(rect.top * Double(size.height)),
+        rightExclusive: ceilToInt(rect.rightExclusive * Double(size.width)),
+        bottomExclusive: ceilToInt(rect.bottomExclusive * Double(size.height))
+    )
+}
+
+/// 前景の配置（`SourcePlacement`）。正本に fit/fill の具体的な計算式が無いため、
+/// 標準的な contain（fit）／cover（fill）としてオーケストレータが確定した式を用いる。
+private func makeSourcePlacement(
+    sourceRect: PixelRect,
+    canvasSize: PixelSize,
+    scaleMode: SourceScaleMode
+) -> SourcePlacement {
+    switch scaleMode {
+    case .fill:
+        // fill: 真の cover。destinationRect はキャンバス全面。sourceRect はそのまま使うと
+        // sourceCrop とキャンバスの縦横比が異なる場合に非一様な引き伸ばしが起きるため、
+        // キャンバス縦横比に合わせて中央で切り詰める（MediaKit へ比率計算を漏らさないという
+        // image-pipeline.md の原則に基づき、fill の cover 計算をオーケストレータが確定した仕様）。
+        let destinationRect = PixelRect(
+            left: 0, top: 0, rightExclusive: canvasSize.width, bottomExclusive: canvasSize.height
+        )
+        return SourcePlacement(
+            sourceRect: fillSourceRect(sourceRect: sourceRect, canvasSize: canvasSize),
+            destinationRect: destinationRect,
+            scaleMode: .fill
+        )
+    case .fit:
+        // fit: 縦横比を保ったままキャンバスへ収まる最大サイズへ縮小し、中央配置する。
+        return SourcePlacement(
+            sourceRect: sourceRect,
+            destinationRect: fitDestinationRect(sourceRect: sourceRect, canvasSize: canvasSize),
+            scaleMode: .fit
+        )
+    }
+}
+
+private func fitDestinationRect(sourceRect: PixelRect, canvasSize: PixelSize) -> PixelRect {
+    let sourceWidth = sourceRect.rightExclusive - sourceRect.left
+    let sourceHeight = sourceRect.bottomExclusive - sourceRect.top
+    let scale = min(
+        Double(canvasSize.width) / Double(sourceWidth),
+        Double(canvasSize.height) / Double(sourceHeight)
+    )
+    let scaledWidth = Int((Double(sourceWidth) * scale).rounded())
+    let scaledHeight = Int((Double(sourceHeight) * scale).rounded())
+    let left = (canvasSize.width - scaledWidth) / 2
+    let top = (canvasSize.height - scaledHeight) / 2
+    return PixelRect(left: left, top: top, rightExclusive: left + scaledWidth, bottomExclusive: top + scaledHeight)
+}
+
+/// fill（cover）用に `sourceRect` をキャンバス縦横比へ中央で切り詰める。`fitDestinationRect`
+/// が fit の配置式を担うのに対し、こちらは fill の切り詰め式を担う。
+/// 計算は元画像ピクセル空間の `Double` で行い、最終結果のみ `floorToInt`/`ceilToInt`
+/// （4章「ピクセルへの丸め」と同じ外側へ広がる丸め）で `PixelRect` 化する。
+private func fillSourceRect(sourceRect: PixelRect, canvasSize: PixelSize) -> PixelRect {
+    let sourceWidth = Double(sourceRect.rightExclusive - sourceRect.left)
+    let sourceHeight = Double(sourceRect.bottomExclusive - sourceRect.top)
+    let canvasAspect = Double(canvasSize.width) / Double(canvasSize.height)
+    let sourceAspect = sourceWidth / sourceHeight
+
+    let cropWidth: Double
+    let cropHeight: Double
+    if sourceAspect > canvasAspect {
+        // source の方がキャンバスより横長 → 幅方向を切り詰める。
+        cropHeight = sourceHeight
+        cropWidth = sourceHeight * canvasAspect
+    } else {
+        // source の方がキャンバスより縦長（または同じ縦横比） → 高さ方向を切り詰める。
+        cropWidth = sourceWidth
+        cropHeight = sourceWidth / canvasAspect
+    }
+
+    let insetX = (sourceWidth - cropWidth) / 2
+    let insetY = (sourceHeight - cropHeight) / 2
+    let left = Double(sourceRect.left) + insetX
+    let top = Double(sourceRect.top) + insetY
+
+    return PixelRect(
+        left: floorToInt(left),
+        top: floorToInt(top),
+        rightExclusive: ceilToInt(left + cropWidth),
+        bottomExclusive: ceilToInt(top + cropHeight)
+    )
+}
+
+/// 背景の変換（`BackgroundSpec` → `BackgroundOp`）。`.blur` は正本 L266「一般的な用途では
+/// sourceRect に元画像全体を指定し、fill でキャンバス全面へ拡大します」に従い、
+/// `sourceRect` は元画像全体・`scaleMode` は常に `.fill`（前景の `spec.scaleMode` に関わらず）。
+/// `sigmaPx` は「キャンバス短辺に対する比」（image-pipeline.md 2章コメント）。
+private func makeBackgroundOp(
+    _ background: BackgroundSpec,
+    sourceSize: PixelSize,
+    canvasSize: PixelSize
+) throws -> BackgroundOp {
+    switch background {
+    case .none:
+        return .none
+    case .solid(let color):
+        return .solid(color: color)
+    case .blur(let sigmaRatio):
+        let shortSide = min(canvasSize.width, canvasSize.height)
+        let sigmaPx = try SigmaPx(sigmaRatio.value * Double(shortSide))
+        let wholeSourceRect = PixelRect(
+            left: 0, top: 0, rightExclusive: sourceSize.width, bottomExclusive: sourceSize.height
+        )
+        return .blurFromSource(sourceRect: wholeSourceRect, sigmaPx: sigmaPx, scaleMode: .fill)
+    }
+}
+
+private func compileRegionDraft(
+    _ region: RenderRegionSpec,
+    canvasSize: PixelSize,
+    order: Int,
+    stampKeys: inout Set<StampRasterKey>
+) throws -> RenderRegionDraft {
+    let boundsPx = pixelRect(from: region.bounds, in: canvasSize)
+    let regionWidth = boundsPx.rightExclusive - boundsPx.left
+    let regionHeight = boundsPx.bottomExclusive - boundsPx.top
+    let shortSide = min(regionWidth, regionHeight)
+    // featherPx は「領域短辺に対する比」（image-pipeline.md 2章コメント）。
+    let featherPx = try FeatherPx(region.featherRatio.value * Double(shortSide))
+    let opDraft = try makeOpDraft(
+        region.op,
+        shortSide: shortSide,
+        regionWidth: regionWidth,
+        regionHeight: regionHeight,
+        stampKeys: &stampKeys
+    )
+
+    return RenderRegionDraft(
+        bounds: boundsPx,
+        rotationDegrees: region.rotationDegrees,
+        shape: region.shape,
+        featherPx: featherPx,
+        order: order,
+        op: opDraft
+    )
+}
+
+private func makeOpDraft(
+    _ op: RenderOpSpec,
+    shortSide: Int,
+    regionWidth: Int,
+    regionHeight: Int,
+    stampKeys: inout Set<StampRasterKey>
+) throws -> RenderOpDraft {
+    switch op {
+    case .mosaic(let cellRatio):
+        return .mosaic(cellSizePx: try makeCellSizePx(cellRatio: cellRatio, shortSide: shortSide))
+    case .blur(let sigmaRatio):
+        return .blur(sigmaPx: try SigmaPx(sigmaRatio.value * Double(shortSide)))
+    case .solid(let color, let opacity):
+        return .solid(color: color, opacity: opacity)
+    case .stamp(let source, let opacity):
+        let key = StampRasterKey(source: source, rasterSize: PixelSize(width: regionWidth, height: regionHeight))
+        stampKeys.insert(key)
+        return .stamp(key: key, opacity: opacity)
+    }
+}
+
+/// `cellSizePx = max(2, floor(cellRatio * shortSide))`（image-pipeline.md 3章）。
+/// 引き上げても領域が 2px 未満なら隠せないため throw する。
+private func makeCellSizePx(cellRatio: MosaicRatio, shortSide: Int) throws -> CellSizePx {
+    guard shortSide >= 2 else {
+        throw RenderValidationError.invalidCellSize
+    }
+    let raw = Int((cellRatio.value * Double(shortSide)).rounded(.down))
+    let clamped = max(2, raw)
+    return try CellSizePx(clamped)
+}
+
+// MARK: - bindRasterAssets（image-pipeline.md 2章「二段階コンパイル」）
+
+/// `RenderDraft` のスタンプ実体を束ねて `RenderPlan` にする（第2段階）。
+/// `draft.stampKeys` に対応する `assets` が1件でも欠けていれば throw する。
+public func bindRasterAssets(
+    draft: RenderDraft,
+    assets: [StampRasterKey: RasterizedStampAsset]
+) throws -> RenderPlan {
+    guard draft.stampKeys.allSatisfy({ assets[$0] != nil }) else {
+        throw RenderValidationError.unresolvedStampAsset
+    }
+
+    let regions = try draft.regions.map { regionDraft in
+        RenderRegion(
+            bounds: regionDraft.bounds,
+            rotationDegrees: regionDraft.rotationDegrees,
+            shape: regionDraft.shape,
+            featherPx: regionDraft.featherPx,
+            order: regionDraft.order,
+            op: try resolveOp(regionDraft.op, assets: assets)
+        )
+    }
+
+    return RenderPlan(
+        canvasSize: draft.canvasSize,
+        sourcePlacement: draft.sourcePlacement,
+        background: draft.background,
+        regions: regions
+    )
+}
+
+/// `RenderDraft` は `public init` を公開しており、`compileRenderDraft` を経由しない
+/// 不整合な入力（`stampKeys` に含まれない `.stamp` op を持つ `regions`）を呼び出し元が
+/// 構築できてしまう。`bindRasterAssets` の外側 guard は `draft.stampKeys` 基準のため、
+/// そのケースをすり抜けうる。回復不能な `preconditionFailure` ではなく、他の不変条件違反と
+/// 同じ `throw` で扱う。
+private func resolveOp(_ op: RenderOpDraft, assets: [StampRasterKey: RasterizedStampAsset]) throws -> RenderOp {
+    switch op {
+    case .mosaic(let cellSizePx):
+        return .mosaic(cellSizePx: cellSizePx)
+    case .blur(let sigmaPx):
+        return .blur(sigmaPx: sigmaPx)
+    case .solid(let color, let opacity):
+        return .solid(color: color, opacity: opacity)
+    case .stamp(let key, let opacity):
+        guard let asset = assets[key] else {
+            throw RenderValidationError.unresolvedStampAsset
+        }
+        return .stamp(bitmapID: asset.bitmapID, opacity: opacity)
+    }
+}
