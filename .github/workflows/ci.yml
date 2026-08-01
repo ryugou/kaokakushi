@@ -28,6 +28,17 @@ jobs:
       - name: Run SwiftLint (strict)
         run: swiftlint lint --strict
 
+  import-scan:
+    name: import 許可リスト走査 (Domain / Application)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: scripts/check-imports.sh
+        run: bash scripts/check-imports.sh
+
   package-tests:
     name: swift test (全パッケージ)
     runs-on: macos-15
@@ -61,19 +72,24 @@ jobs:
     name: xcodegen + xcodebuild (iOS Simulator)
     runs-on: macos-15
     timeout-minutes: 30
-    needs:
-      - swiftlint
-      - package-tests
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Select Xcode 26
+        id: select_xcode
         run: |
           set -euo pipefail
           app=$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)
           sudo xcode-select -s "$app/Contents/Developer"
           xcodebuild -version
+          # DerivedData のキャッシュキーに Xcode の版（ディレクトリ名 + ビルド番号）を
+          # 含めるための識別子を作る。Xcode バージョンが変わると DerivedData の
+          # 内部フォーマットに互換性がない場合があり、キーにバージョンを含めないと
+          # 「別バージョンでビルドした DerivedData を復元してビルドが壊れる」事故になる。
+          build_number=$(xcodebuild -version | awk '/^Build version/{print $3}')
+          xcode_id="$(basename "$app" .app)-${build_number}"
+          echo "xcode_id=${xcode_id}" >> "$GITHUB_OUTPUT"
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -82,9 +98,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/Library/Developer/Xcode/DerivedData
-          key: deriveddata-${{ runner.os }}-${{ hashFiles('project.yml', 'App/**', 'packages/**') }}
+          key: deriveddata-${{ runner.os }}-${{ steps.select_xcode.outputs.xcode_id }}-${{ hashFiles('project.yml', 'App/**', 'packages/**') }}
           restore-keys: |
-            deriveddata-${{ runner.os }}-
+            deriveddata-${{ runner.os }}-${{ steps.select_xcode.outputs.xcode_id }}-
 
       - name: xcodegen generate
         run: xcodegen generate
