@@ -2,12 +2,12 @@ import Testing
 @testable import Domain
 import Foundation
 
-/// Task 1: 識別子と共通値型（architecture.md 6.5 / 6.3）。
-///
-/// `Identifiers.swift`（ID 型群）と `CommonValues.swift`（`YearMonth` / ハッシュ型群）を
-/// まとめて検証する。両ファイルとも専用のテストファイルが計画に無いため、この 1 ファイルへ
-/// 集約する（ManagedFileRef 系のみ振る舞い＝failable init が複雑なため
-/// `ManagedFileRefTests.swift` を分離している）。
+// Task 1: 識別子と共通値型（architecture.md 6.5 / 6.3）。
+//
+// `Identifiers.swift`（ID 型群）と `CommonValues.swift`（`YearMonth` / ハッシュ型群）を
+// まとめて検証する。両ファイルとも専用のテストファイルが計画に無いため、この 1 ファイルへ
+// 集約する（ManagedFileRef 系のみ振る舞い＝failable init が複雑なため
+// `ManagedFileRefTests.swift` を分離している）。
 
 // MARK: - ID 型（rawValue: UUID の Sendable & Hashable struct）
 
@@ -66,10 +66,10 @@ func exportQueueItemIDHoldsRawValue() {
 
 @Test("異なるUUIDから作ったID同士はHashableとして区別される")
 func distinctRawValuesProduceDistinctIdentifiers() {
-    let a = ProjectID(rawValue: UUID())
-    let b = ProjectID(rawValue: UUID())
-    #expect(a != b)
-    #expect(Set([a, b]).count == 2)
+    let first = ProjectID(rawValue: UUID())
+    let second = ProjectID(rawValue: UUID())
+    #expect(first != second)
+    #expect(Set([first, second]).count == 2)
 }
 
 // MARK: - YearMonth（architecture.md 6.3。バリデーションは正本に存在しないため実装しない）
