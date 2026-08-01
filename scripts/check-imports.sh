@@ -81,13 +81,14 @@ strip_comments() {
       }
       print out
     }
-    END { if (depth > 0) { print "UNTERMINATED_COMMENT" > "/dev/stderr"; exit 3 } }
-  ' "$1" 2>"${TMPDIR:-/tmp}/check_imports_stderr.$$" || {
-    if grep -q UNTERMINATED_COMMENT "${TMPDIR:-/tmp}/check_imports_stderr.$$" 2>/dev/null; then
-      echo "__CHECK_IMPORTS_UNTERMINATED__"
-    fi
+    END { if (depth > 0) { exit 3 } }
+  ' "$1" || {
+    # awk が失敗した場合は理由を問わず（未終端コメント exit 3 でも、それ以外の
+    # 予期しない失敗でも）センチネルを出力し、呼び出し側で fail-closed に違反扱い
+    # させる。ここで握りつぶすと「正規化に失敗したファイルが素通りする」fail-open
+    # になる（Copilot レビュー指摘）。
+    echo "__CHECK_IMPORTS_UNTERMINATED__"
   }
-  rm -f "${TMPDIR:-/tmp}/check_imports_stderr.$$"
 }
 
 overall_fail=0
