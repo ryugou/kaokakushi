@@ -47,6 +47,45 @@ set -euo pipefail
 # 修飾キーワードを0回以上・任意の順序で許容し、最終的に "import <Identifier>" にマッチする。
 IMPORT_REGEX='^[[:space:]]*(@testable[[:space:]]+|@_implementationOnly[[:space:]]+|@preconcurrency[[:space:]]+|@_exported[[:space:]]+|public[[:space:]]+|internal[[:space:]]+|package[[:space:]]+|private[[:space:]]+|fileprivate[[:space:]]+)*import[[:space:]]+[A-Za-z_][A-Za-z0-9_]*'
 
+# モジュール名を伴わない import で行が終わるケース（複数行分割）の検出用。
+DANGLING_IMPORT_REGEX='^[[:space:]]*(@testable[[:space:]]+|@_implementationOnly[[:space:]]+|@preconcurrency[[:space:]]+|@_exported[[:space:]]+|public[[:space:]]+|internal[[:space:]]+|package[[:space:]]+|private[[:space:]]+|fileprivate[[:space:]]+)*import[[:space:]]*$'
+
+# strip_comments <file>
+# Swift のコメントを空白へ正規化して出力する（行構造は保持）。
+#   - ブロックコメント /* */ は Swift 仕様どおり**ネストを数えて**除去する
+#   - 行コメント // 以降は行末まで除去する
+#   - 文字列リテラル "..."（同一行）内は保護し、内部の /* や // を無視する
+#   - EOF 時にコメント深度が残っている場合（未終端。複数行文字列内の /* 等でも起こる）は
+#     見逃しに倒さず fail-closed で違反として報告する
+strip_comments() {
+  awk '
+    BEGIN { depth = 0 }
+    {
+      line = $0; out = ""; i = 1; n = length(line); instr = 0
+      while (i <= n) {
+        two = substr(line, i, 2); one = substr(line, i, 1)
+        if (depth == 0 && instr == 0 && one == "\"") { instr = 1; out = out one; i++; continue }
+        if (instr == 1) {
+          if (one == "\\") { out = out substr(line, i, 2); i += 2; continue }
+          if (one == "\"") { instr = 0 }
+          out = out one; i++; continue
+        }
+        if (depth == 0 && two == "//") { break }
+        if (two == "/*") { depth++; out = out "  "; i += 2; continue }
+        if (depth > 0 && two == "*/") { depth--; out = out "  "; i += 2; continue }
+        if (depth > 0) { out = out " "; i++ } else { out = out one; i++ }
+      }
+      print out
+    }
+    END { if (depth > 0) { print "UNTERMINATED_COMMENT" > "/dev/stderr"; exit 3 } }
+  ' "$1" 2>"${TMPDIR:-/tmp}/check_imports_stderr.$$" || {
+    if grep -q UNTERMINATED_COMMENT "${TMPDIR:-/tmp}/check_imports_stderr.$$" 2>/dev/null; then
+      echo "__CHECK_IMPORTS_UNTERMINATED__"
+    fi
+  }
+  rm -f "${TMPDIR:-/tmp}/check_imports_stderr.$$"
+}
+
 overall_fail=0
 
 # scan_scope <dir> <comma-separated allowed modules>
@@ -73,15 +112,35 @@ scan_scope() {
   fi
 
   local matches=""
-  # 行内ブロックコメント（/* ... */）を空白へ置換してから import 行を検査する。
-  # コメント挿入（`import/*x*/UIKit`）による正規表現の迂回を防ぐため。
-  # sed 出力へファイル名を自前で前置し "file:line:content" 形式を保つ。
+  # ブロックコメントを空白へ正規化してから import 行を検査する。
+  # コメント挿入（`import/*x*/UIKit`）・ネストコメント（`/*/**/*/import UIKit`。Swift は
+  # ネスト可）・複数行コメントによる迂回を防ぐため、行単位の sed ではなく
+  # 深度カウンタつきの awk 正規化器（strip_comments）を通す。
+  # 正規化後に "NN:content" 形式で出力し、ファイル名を前置して "file:line:content" を保つ。
   # grep が「マッチなし」で exit 1 を返すのは正常系（違反なし）なので `|| true` で吸収する。
-  local f m
+  local f m norm dangling
   while IFS= read -r f; do
-    m=$(sed -E 's@/\*([^*]|\*+[^*/])*\*+/@ @g' "$f" | grep -nE "$IMPORT_REGEX" | sed "s@^@${f}:@" || true)
+    norm=$(strip_comments "$f")
+
+    # 未終端コメント（複数行文字列内のコメント記号でも起こる）は見逃しに倒さず
+    # fail-closed で違反として報告する。
+    if [[ "$norm" == *"__CHECK_IMPORTS_UNTERMINATED__"* ]]; then
+      echo "check-imports: 違反: ${f}: 閉じられていないブロックコメントを検出しました（複数行文字列内に /* を含む場合も該当）。fail-closed で違反扱いとします" >&2
+      overall_fail=1
+      continue
+    fi
+
+    m=$(printf '%s\n' "$norm" | grep -nE "$IMPORT_REGEX" | sed "s@^@${f}:@" || true)
     if [[ -n "$m" ]]; then
       matches+="${m}"$'\n'
+    fi
+
+    # 正規化後、モジュール名を伴わず行末が import で終わる行は、複数行コメント等で
+    # import 文が分割されている可能性がある。見逃しに倒さず fail-closed で報告する。
+    dangling=$(printf '%s\n' "$norm" | grep -nE "$DANGLING_IMPORT_REGEX" | sed "s@^@${f}:@" || true)
+    if [[ -n "$dangling" ]]; then
+      echo "check-imports: 違反: ${dangling%%$'\n'*}: モジュール名を伴わない import 行を検出（コメント等による分割の可能性。1 行の import へ書き直してください）" >&2
+      overall_fail=1
     fi
   done <<< "$swift_files"
 
@@ -125,13 +184,19 @@ scan_scope() {
   done <<< "$matches"
 }
 
-scan_scope "packages/Domain/Sources" "Foundation"
-scan_scope "packages/Application/Sources" "Foundation,Domain"
+# 引数 2 つ（<dir> <allowlist>）が与えられた場合は、そのスコープだけを検査する
+# （scripts/check-imports-test.sh の回帰テストが使う）。引数なしが通常運用。
+if [[ $# -eq 2 ]]; then
+  scan_scope "$1" "$2"
+else
+  scan_scope "packages/Domain/Sources" "Foundation"
+  scan_scope "packages/Application/Sources" "Foundation,Domain"
+fi
 
 if [[ "$overall_fail" -ne 0 ]]; then
   echo "check-imports: FAIL — 許可リスト外の import を検出しました。architecture.md 3.3 / 4.3 を参照してください。" >&2
   exit 1
 fi
 
-echo "check-imports: OK — Domain / Application の import はすべて許可リスト内です。"
+echo "check-imports: OK — 検査対象の import はすべて許可リスト内です。"
 exit 0

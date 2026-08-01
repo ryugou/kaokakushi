@@ -39,6 +39,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: scripts/check-imports-test.sh（回帰テスト）
+        run: bash scripts/check-imports-test.sh
+
       - name: scripts/check-imports.sh
         run: bash scripts/check-imports.sh
 
