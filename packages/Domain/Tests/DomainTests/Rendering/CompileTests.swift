@@ -63,16 +63,18 @@ func compileRenderDraftSetsCanvasSizeToTargetSizeVerbatim() throws {
 
 @Test("compileRenderDraftはsourceSizeを使いsourceCropを絶対ピクセルのsourceRectへ変換する")
 func compileRenderDraftConvertsSourceCropToAbsoluteSourceRect() throws {
-    // 0.25/0.5/0.75 は 2 の冪の逆数の和なので IEEE754 double で厳密に表現でき、
-    // × 100 も厳密に 25/50/75 になる（0.1 や 0.55 のような 10 進小数は近似になり、
-    // ceil 丸めで期待値が 1 ずれるため使わない）。
-    let spec = makeSpec(sourceCrop: try makeRect(left: 0.25, top: 0.25, right: 0.5, bottom: 0.75))
+    // 0.25/0.75 は 2 の冪の逆数の和なので IEEE754 double で厳密に表現でき、
+    // × 100 も厳密に 25/75 になる（0.1 や 0.55 のような 10 進小数は近似になり、
+    // ceil 丸めで期待値が 1 ずれるため使わない）。crop はキャンバスと同じ正方形に
+    // して、fill の cover 切り詰めが発生しない条件で純粋な座標変換だけを検証する
+    // （切り詰めの挙動は CompilePlacementTests.swift が担当）。
+    let spec = makeSpec(sourceCrop: try makeRect(left: 0.25, top: 0.25, right: 0.75, bottom: 0.75))
     let draft = try compileRenderDraft(
         spec: spec,
         sourceSize: makeSize(100, 100),
         targetSize: makeSize(100, 100)
     )
-    let expected = PixelRect(left: 25, top: 25, rightExclusive: 50, bottomExclusive: 75)
+    let expected = PixelRect(left: 25, top: 25, rightExclusive: 75, bottomExclusive: 75)
     #expect(draft.sourcePlacement.sourceRect == expected)
 }
 
