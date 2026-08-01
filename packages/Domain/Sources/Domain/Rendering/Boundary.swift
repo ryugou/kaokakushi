@@ -16,9 +16,10 @@ import Foundation
 // `PickedPhotoLoader` プロトコルは、どのタスクにも明示割当が無い、または Task 4 の
 // 担当であるため今回は追加しない。
 //
-// `PickedPhotoLoader` / `FaceDetector` / `ImageEffectRenderer` 等のプロトコル、
-// `StampRasterizer` / `RasterizedStampAsset`（3 章）、`WorkingSourceRecord` 系（Task 4）は
-// スコープ外（spec 参照）。
+// `PickedPhotoLoader` / `FaceDetector` / `ImageEffectRenderer` 等のプロトコルと
+// `WorkingSourceRecord` 系（Task 4）はスコープ外（spec 参照）。
+// `StampRasterizer` は Rendering/StampRasterizer.swift、`RasterizedStampAsset` は
+// Rendering/Compile.swift に実装済み（3 章）。
 
 /// 画像フォーマット。
 public enum ImageFormat: Sendable, Hashable {
