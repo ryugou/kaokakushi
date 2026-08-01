@@ -22,6 +22,14 @@ DerivedData/
 iosApp/Pods/
 iosApp/*.xcworkspace/xcuserdata/
 
+# XcodeGen 生成物（project.yml から再生成するためコミットしない）
+*.xcodeproj
+App/Info.plist
+
+# SwiftPM
+.build/
+.swiftpm/
+
 # Rust
 server/target/
 

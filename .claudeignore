@@ -1,19 +1,21 @@
 # ビルド成果物・依存物。読み取り対象から除外する
-build/
-.gradle/
-.kotlin/
 DerivedData/
+.build/
+.swiftpm/
+*.xcodeproj
 xcuserdata/
-iosApp/Pods/
-server/target/
 node_modules/
+ui-mock/.next/
+ui-mock/tsconfig.tsbuildinfo
+.pnpm-store/
+.vibepod/
+.worktrees/
 
 # ロックファイル
 pnpm-lock.yaml
 package-lock.json
 yarn.lock
-Cargo.lock
-Podfile.lock
+Package.resolved
 
 # バイナリ素材
 *.png
@@ -23,5 +25,3 @@ Podfile.lock
 *.heic
 *.mp4
 *.mov
-*.keystore
-*.jks
