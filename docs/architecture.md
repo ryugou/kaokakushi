@@ -183,7 +183,7 @@ Composition Root（DI の組み立て）:
 
 | 手段 | 内容 |
 | --- | --- |
-| SwiftLint の `forbidden_imports` | `Domain/Sources/**` に対し上記の禁止モジュールを検出する |
+| SwiftLint の `custom_rules`（禁止 import の正規表現検出） | `Domain/Sources/**` に対し上記の禁止モジュールを検出する |
 | CI のチェック | `Domain/Sources` 配下の `import` 行を走査し、許可リスト（`Foundation` のみ）以外で失敗させる |
 | SwiftLint のカスタムルール | `Domain` ターゲット内の `Date()` を禁止する（6.3 の時刻規約） |
 
