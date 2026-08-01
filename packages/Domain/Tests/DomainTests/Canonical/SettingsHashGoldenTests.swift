@@ -88,36 +88,42 @@ private func fixtureExportSetting(
 
 // MARK: - 期待バイト列（CanonicalEncoder のプリミティブを field 順で手動に呼び出す）
 
+// 期待バイト列の組み立ては var への逐次追加で書く（長い + 連鎖は Swift の
+// 型チェッカが時間内に解決できずコンパイルエラーになる）。
 private func expectedRegion1Bytes() throws -> Data {
     let bounds = try NormalizedRect(left: 0.1, top: 0.1, rightExclusive: 0.4, bottomExclusive: 0.4)
-    return CanonicalEncoder.double(bounds.left)
-        + CanonicalEncoder.double(bounds.top)
-        + CanonicalEncoder.double(bounds.rightExclusive)
-        + CanonicalEncoder.double(bounds.bottomExclusive)
-        + CanonicalEncoder.double(0)                          // rotationDegrees
-        + CanonicalEncoder.bigEndianUInt32(1)                 // shape = ellipse
-        + CanonicalEncoder.double(0.05)                       // featherRatio
-        + CanonicalEncoder.bigEndianUInt32(1)                 // origin = auto
-        + CanonicalEncoder.bigEndianUInt32(3)                 // op = solid
-        + CanonicalEncoder.bigEndianUInt32(0xFFFF_0000)       // color
-        + CanonicalEncoder.double(0.8)                        // opacity
+    var bytes = Data()
+    bytes += CanonicalEncoder.double(bounds.left)
+    bytes += CanonicalEncoder.double(bounds.top)
+    bytes += CanonicalEncoder.double(bounds.rightExclusive)
+    bytes += CanonicalEncoder.double(bounds.bottomExclusive)
+    bytes += CanonicalEncoder.double(0)                       // rotationDegrees
+    bytes += CanonicalEncoder.bigEndianUInt32(1)              // shape = ellipse
+    bytes += CanonicalEncoder.double(0.05)                    // featherRatio
+    bytes += CanonicalEncoder.bigEndianUInt32(1)              // origin = auto
+    bytes += CanonicalEncoder.bigEndianUInt32(3)              // op = solid
+    bytes += CanonicalEncoder.bigEndianUInt32(0xFFFF_0000)    // color
+    bytes += CanonicalEncoder.double(0.8)                     // opacity
+    return bytes
 }
 
 private func expectedRegion2Bytes() throws -> Data {
     let bounds = try NormalizedRect(left: 0.5, top: 0.5, rightExclusive: 0.9, bottomExclusive: 0.9)
-    return CanonicalEncoder.double(bounds.left)
-        + CanonicalEncoder.double(bounds.top)
-        + CanonicalEncoder.double(bounds.rightExclusive)
-        + CanonicalEncoder.double(bounds.bottomExclusive)
-        + CanonicalEncoder.double(15)                         // rotationDegrees
-        + CanonicalEncoder.bigEndianUInt32(4)                 // shape = rounded
-        + CanonicalEncoder.double(0.25)                       // cornerRatio
-        + CanonicalEncoder.double(0.1)                        // featherRatio
-        + CanonicalEncoder.bigEndianUInt32(2)                 // origin = manual
-        + CanonicalEncoder.bigEndianUInt32(4)                 // op = stamp
-        + CanonicalEncoder.bigEndianUInt32(1)                 // StampSource = builtIn
-        + CanonicalEncoder.string("cat")                      // code
-        + CanonicalEncoder.double(1.0)                        // opacity
+    var bytes = Data()
+    bytes += CanonicalEncoder.double(bounds.left)
+    bytes += CanonicalEncoder.double(bounds.top)
+    bytes += CanonicalEncoder.double(bounds.rightExclusive)
+    bytes += CanonicalEncoder.double(bounds.bottomExclusive)
+    bytes += CanonicalEncoder.double(15)                      // rotationDegrees
+    bytes += CanonicalEncoder.bigEndianUInt32(4)              // shape = rounded
+    bytes += CanonicalEncoder.double(0.25)                    // cornerRatio
+    bytes += CanonicalEncoder.double(0.1)                     // featherRatio
+    bytes += CanonicalEncoder.bigEndianUInt32(2)              // origin = manual
+    bytes += CanonicalEncoder.bigEndianUInt32(4)              // op = stamp
+    bytes += CanonicalEncoder.bigEndianUInt32(1)              // StampSource = builtIn
+    bytes += CanonicalEncoder.string("cat")                   // code
+    bytes += CanonicalEncoder.double(1.0)                     // opacity
+    return bytes
 }
 
 private func expectedRegionsBytes() throws -> Data {
@@ -128,71 +134,79 @@ private func expectedRegionsBytes() throws -> Data {
 
 private func expectedProjectSettingsBytes() throws -> Data {
     let sourceCrop = try fixtureSourceCrop()
-    return CanonicalEncoder.double(sourceCrop.left)
-        + CanonicalEncoder.double(sourceCrop.top)
-        + CanonicalEncoder.double(sourceCrop.rightExclusive)
-        + CanonicalEncoder.double(sourceCrop.bottomExclusive)
-        + CanonicalEncoder.bigEndianUInt32(1)                 // scaleMode = fit
-        + CanonicalEncoder.bigEndianUInt32(1)                 // background = none
-        + (try expectedRegionsBytes())
-        + CanonicalEncoder.bigEndianUInt32(1)                 // outputAspect = original
-        + CanonicalEncoder.bigEndianUInt32(1)                 // outputFormat = jpeg
-        + CanonicalEncoder.double(1.0)                        // compressionQuality
-        + CanonicalEncoder.bool(false)                        // removeLocation
-        + CanonicalEncoder.bool(false)                        // removeDeviceInfo
-        + CanonicalEncoder.bool(false)                        // removeSoftwareInfo
-        + CanonicalEncoder.bool(false)                        // keepCaptureDate
+    var bytes = Data()
+    bytes += CanonicalEncoder.double(sourceCrop.left)
+    bytes += CanonicalEncoder.double(sourceCrop.top)
+    bytes += CanonicalEncoder.double(sourceCrop.rightExclusive)
+    bytes += CanonicalEncoder.double(sourceCrop.bottomExclusive)
+    bytes += CanonicalEncoder.bigEndianUInt32(1)              // scaleMode = fit
+    bytes += CanonicalEncoder.bigEndianUInt32(1)              // background = none
+    bytes += try expectedRegionsBytes()
+    bytes += CanonicalEncoder.bigEndianUInt32(1)              // outputAspect = original
+    bytes += CanonicalEncoder.bigEndianUInt32(1)              // outputFormat = jpeg
+    bytes += CanonicalEncoder.double(1.0)                     // compressionQuality
+    bytes += CanonicalEncoder.bool(false)                     // removeLocation
+    bytes += CanonicalEncoder.bool(false)                     // removeDeviceInfo
+    bytes += CanonicalEncoder.bool(false)                     // removeSoftwareInfo
+    bytes += CanonicalEncoder.bool(false)                     // keepCaptureDate
+    return bytes
 }
 
 private func expectedPreviewRenderBytes(renderRevision: UInt32) throws -> Data {
     let sourceCrop = try fixtureSourceCrop()
-    return CanonicalEncoder.bigEndianUInt32(renderRevision)
-        + CanonicalEncoder.double(sourceCrop.left)
-        + CanonicalEncoder.double(sourceCrop.top)
-        + CanonicalEncoder.double(sourceCrop.rightExclusive)
-        + CanonicalEncoder.double(sourceCrop.bottomExclusive)
-        + CanonicalEncoder.bigEndianUInt32(1)                 // scaleMode = fit
-        + CanonicalEncoder.bigEndianUInt32(1)                 // background = none
-        + (try expectedRegionsBytes())
-        + CanonicalEncoder.bigEndianUInt32(1)                 // outputAspect = original
+    var bytes = Data()
+    bytes += CanonicalEncoder.bigEndianUInt32(renderRevision)
+    bytes += CanonicalEncoder.double(sourceCrop.left)
+    bytes += CanonicalEncoder.double(sourceCrop.top)
+    bytes += CanonicalEncoder.double(sourceCrop.rightExclusive)
+    bytes += CanonicalEncoder.double(sourceCrop.bottomExclusive)
+    bytes += CanonicalEncoder.bigEndianUInt32(1)              // scaleMode = fit
+    bytes += CanonicalEncoder.bigEndianUInt32(1)              // background = none
+    bytes += try expectedRegionsBytes()
+    bytes += CanonicalEncoder.bigEndianUInt32(1)              // outputAspect = original
+    return bytes
 }
 
 // stamp(.custom) 検証用の単一領域フィクスチャ
 // （32バイト固定長・長さ前置きなしの確認）。
 private func expectedStampCustomRegionBytes(assetHash: StampAssetHash) throws -> Data {
     let bounds = try fixtureSourceCrop()
-    return CanonicalEncoder.double(bounds.left)
-        + CanonicalEncoder.double(bounds.top)
-        + CanonicalEncoder.double(bounds.rightExclusive)
-        + CanonicalEncoder.double(bounds.bottomExclusive)
-        + CanonicalEncoder.double(0)                          // rotationDegrees
-        + CanonicalEncoder.bigEndianUInt32(2)                 // shape = circle
-        + CanonicalEncoder.double(0.0)                        // featherRatio
-        + CanonicalEncoder.bigEndianUInt32(1)                 // origin = auto
-        + CanonicalEncoder.bigEndianUInt32(4)                 // op = stamp
-        + CanonicalEncoder.bigEndianUInt32(2)                 // StampSource = custom
-        + assetHash.bytes                                     // 32バイト固定長。長さ前置きなし
-        + CanonicalEncoder.double(1.0)                        // opacity
+    var bytes = Data()
+    bytes += CanonicalEncoder.double(bounds.left)
+    bytes += CanonicalEncoder.double(bounds.top)
+    bytes += CanonicalEncoder.double(bounds.rightExclusive)
+    bytes += CanonicalEncoder.double(bounds.bottomExclusive)
+    bytes += CanonicalEncoder.double(0)                       // rotationDegrees
+    bytes += CanonicalEncoder.bigEndianUInt32(2)              // shape = circle
+    bytes += CanonicalEncoder.double(0.0)                     // featherRatio
+    bytes += CanonicalEncoder.bigEndianUInt32(1)              // origin = auto
+    bytes += CanonicalEncoder.bigEndianUInt32(4)              // op = stamp
+    bytes += CanonicalEncoder.bigEndianUInt32(2)              // StampSource = custom
+    bytes += assetHash.bytes                                  // 32バイト固定長。長さ前置きなし
+    bytes += CanonicalEncoder.double(1.0)                     // opacity
+    return bytes
 }
 
 private func expectedStampCustomProjectSettingsBytes(assetHash: StampAssetHash) throws -> Data {
     let sourceCrop = try fixtureSourceCrop()
     let regionBytes = try expectedStampCustomRegionBytes(assetHash: assetHash)
-    return CanonicalEncoder.double(sourceCrop.left)
-        + CanonicalEncoder.double(sourceCrop.top)
-        + CanonicalEncoder.double(sourceCrop.rightExclusive)
-        + CanonicalEncoder.double(sourceCrop.bottomExclusive)
-        + CanonicalEncoder.bigEndianUInt32(1)                 // scaleMode = fit
-        + CanonicalEncoder.bigEndianUInt32(1)                 // background = none
-        + CanonicalEncoder.bigEndianUInt32(1)                 // regions.count = 1
-        + CanonicalEncoder.lengthPrefixed(regionBytes)
-        + CanonicalEncoder.bigEndianUInt32(1)                 // outputAspect = original
-        + CanonicalEncoder.bigEndianUInt32(1)                 // outputFormat = jpeg
-        + CanonicalEncoder.double(1.0)                        // compressionQuality
-        + CanonicalEncoder.bool(false)
-        + CanonicalEncoder.bool(false)
-        + CanonicalEncoder.bool(false)
-        + CanonicalEncoder.bool(false)
+    var bytes = Data()
+    bytes += CanonicalEncoder.double(sourceCrop.left)
+    bytes += CanonicalEncoder.double(sourceCrop.top)
+    bytes += CanonicalEncoder.double(sourceCrop.rightExclusive)
+    bytes += CanonicalEncoder.double(sourceCrop.bottomExclusive)
+    bytes += CanonicalEncoder.bigEndianUInt32(1)              // scaleMode = fit
+    bytes += CanonicalEncoder.bigEndianUInt32(1)              // background = none
+    bytes += CanonicalEncoder.bigEndianUInt32(1)              // regions.count = 1
+    bytes += CanonicalEncoder.lengthPrefixed(regionBytes)
+    bytes += CanonicalEncoder.bigEndianUInt32(1)              // outputAspect = original
+    bytes += CanonicalEncoder.bigEndianUInt32(1)              // outputFormat = jpeg
+    bytes += CanonicalEncoder.double(1.0)                     // compressionQuality
+    bytes += CanonicalEncoder.bool(false)
+    bytes += CanonicalEncoder.bool(false)
+    bytes += CanonicalEncoder.bool(false)
+    bytes += CanonicalEncoder.bool(false)
+    return bytes
 }
 
 // MARK: - ゴールデンテスト本体
