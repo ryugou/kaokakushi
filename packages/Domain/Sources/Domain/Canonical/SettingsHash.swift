@@ -185,30 +185,35 @@ public func canonicalPreviewRenderBytes(
 
 /// 認可用。出力へ影響する全設定の正準ハッシュ（canonical-schema.md 5.2 最終式）。
 /// ドメイン分離子は長さ前置きしない UTF-8 バイト列として先頭に置く。
+/// digest の戻り値長検証は ProjectSettingsHash.init(bytes:) の throws init を再利用する
+/// （canonical-schema.md 5.2「ハッシュ計算関数は注入された digest の戻り値長も検証します」の
+/// 実装方法自体はオーケストレータ判断。検証ロジックの二重実装を避けるため）。
 public func projectSettingsHash(
     renderSpec: RenderSpec,
     exportSetting: ExportSetting,
     digest: Sha256Digest
-) -> ProjectSettingsHash {
+) throws -> ProjectSettingsHash {
     let input = Data(projectSettingsDomainSeparator.utf8)
         + canonicalProjectSettingsBytes(renderSpec: renderSpec, exportSetting: exportSetting)
-    return ProjectSettingsHash(bytes: digest.digest(input))
+    return try ProjectSettingsHash(bytes: digest.digest(input))
 }
 
 /// プレビュー確認用。見た目に影響する値だけの正準ハッシュ
 /// （canonical-schema.md 5.2 最終式）。
 /// ドメイン分離子は長さ前置きしない UTF-8 バイト列として先頭に置く。
+/// digest の戻り値長検証は PreviewRenderHash.init(bytes:) の throws init を再利用する
+/// （projectSettingsHash と同じ設計判断）。
 public func previewRenderHash(
     renderSpec: RenderSpec,
     exportSetting: ExportSetting,
     renderRevision: UInt32,
     digest: Sha256Digest
-) -> PreviewRenderHash {
+) throws -> PreviewRenderHash {
     let input = Data(previewRenderDomainSeparator.utf8)
         + canonicalPreviewRenderBytes(
             renderSpec: renderSpec,
             exportSetting: exportSetting,
             renderRevision: renderRevision
         )
-    return PreviewRenderHash(bytes: digest.digest(input))
+    return try PreviewRenderHash(bytes: digest.digest(input))
 }

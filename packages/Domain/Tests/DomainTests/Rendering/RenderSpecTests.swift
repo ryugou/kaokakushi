@@ -39,9 +39,9 @@ func sourceScaleModeDistinguishesFitAndFill() {
 // MARK: - StampSource（組み込みとカスタムを文字列で混ぜない）
 
 @Test("StampSourceはbuiltInとcustomを別の値として区別する")
-func stampSourceDistinguishesBuiltInAndCustom() {
+func stampSourceDistinguishesBuiltInAndCustom() throws {
     let builtIn = assertSendableHashable(StampSource.builtIn(code: "cat"))
-    let custom = StampSource.custom(assetHash: StampAssetHash(bytes: Data(repeating: 0x11, count: 32)))
+    let custom = StampSource.custom(assetHash: try StampAssetHash(bytes: Data(repeating: 0x11, count: 32)))
     #expect(builtIn != custom)
 }
 

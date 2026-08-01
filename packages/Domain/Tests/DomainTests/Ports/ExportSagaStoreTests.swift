@@ -25,11 +25,11 @@ private func makeExportSetting() -> ExportSetting {
     )
 }
 
-private func makePreviewConfirmation(projectID: ProjectID) -> PreviewConfirmation {
+private func makePreviewConfirmation(projectID: ProjectID) throws -> PreviewConfirmation {
     PreviewConfirmation(
         projectID: projectID,
         detectionRevision: 1,
-        previewRenderHash: PreviewRenderHash(bytes: Data(repeating: 0x01, count: 32))
+        previewRenderHash: try PreviewRenderHash(bytes: Data(repeating: 0x01, count: 32))
     )
 }
 
@@ -62,7 +62,7 @@ func startExportInputHoldsAllFieldsAndAllowsNilForSingleExport() throws {
     let projectID = makeProjectID()
     let renderSpec = try makeRenderSpec()
     let exportSetting = makeExportSetting()
-    let previewConfirmation = makePreviewConfirmation(projectID: projectID)
+    let previewConfirmation = try makePreviewConfirmation(projectID: projectID)
 
     let subject = StartExportInput(
         projectID: projectID,
@@ -93,7 +93,7 @@ func startExportInputHoldsBatchAndQueueItemIDsWhenPresent() throws {
         queueItemID: queueItemID,
         renderSpec: try makeRenderSpec(),
         exportSetting: makeExportSetting(),
-        previewConfirmation: makePreviewConfirmation(projectID: projectID)
+        previewConfirmation: try makePreviewConfirmation(projectID: projectID)
     )
 
     #expect(subject.batchID == batchID)
@@ -204,7 +204,7 @@ func fakeExportSagaStoreForwardsArguments() async throws {
         queueItemID: nil,
         renderSpec: try makeRenderSpec(),
         exportSetting: makeExportSetting(),
-        previewConfirmation: makePreviewConfirmation(projectID: projectID)
+        previewConfirmation: try makePreviewConfirmation(projectID: projectID)
     )
     let decision = try await store.startExport(input, expectedProjectRevision: 7)
     guard case let .blocked(block) = decision else {

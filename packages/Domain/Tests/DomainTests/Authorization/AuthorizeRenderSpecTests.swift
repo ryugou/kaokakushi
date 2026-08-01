@@ -94,7 +94,7 @@ func premiumBuiltInStampIgnoresEnabledStampPacks() throws {
 
 @Test("カスタムスタンプはcanUseCustomStampsがfalseならblocked(.customStampNotAvailable)になる")
 func customStampBlockedWhenCapabilityMissing() throws {
-    let assetHash = StampAssetHash(bytes: Data(repeating: 0x22, count: 32))
+    let assetHash = try StampAssetHash(bytes: Data(repeating: 0x22, count: 32))
     let spec = try makeSpec(ops: [.stamp(source: .custom(assetHash: assetHash), opacity: try EffectOpacity(1.0))])
     let capabilities = makeCapabilities(canUseCustomStamps: false)
     let catalog = FixedStampCatalog(requirements: [:])
@@ -105,7 +105,7 @@ func customStampBlockedWhenCapabilityMissing() throws {
 
 @Test("カスタムスタンプはcanUseCustomStampsがtrueならauthorizedになる")
 func customStampAuthorizedWhenCapabilityPresent() throws {
-    let assetHash = StampAssetHash(bytes: Data(repeating: 0x22, count: 32))
+    let assetHash = try StampAssetHash(bytes: Data(repeating: 0x22, count: 32))
     let spec = try makeSpec(ops: [.stamp(source: .custom(assetHash: assetHash), opacity: try EffectOpacity(1.0))])
     let capabilities = makeCapabilities(canUseCustomStamps: true)
     let catalog = FixedStampCatalog(requirements: [:])
@@ -175,7 +175,7 @@ func mosaicBlurSolidAuthorizedWithoutAnyCapability() throws {
 
 @Test("複数regionのうち先頭で見つかったblock理由が返る（regions配列順を採用）")
 func firstBlockedRegionReasonWins() throws {
-    let assetHash = StampAssetHash(bytes: Data(repeating: 0x33, count: 32))
+    let assetHash = try StampAssetHash(bytes: Data(repeating: 0x33, count: 32))
     let ops: [RenderOpSpec] = [
         .stamp(source: .custom(assetHash: assetHash), opacity: try EffectOpacity(1.0)),
         .stamp(source: .builtIn(code: "seasonal-cat"), opacity: try EffectOpacity(1.0))

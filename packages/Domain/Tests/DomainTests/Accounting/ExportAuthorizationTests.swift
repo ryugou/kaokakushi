@@ -9,9 +9,9 @@ import Foundation
 /// `ExportStartBlockReason` の3ケース、`ExportStartBlock` のフィールド保持を検証する。
 
 @Test("PreviewConfirmationが全フィールドを保持する")
-func previewConfirmationHoldsAllFields() {
+func previewConfirmationHoldsAllFields() throws {
     let projectID = ProjectID(rawValue: UUID())
-    let hash = PreviewRenderHash(bytes: Data(repeating: 0x01, count: 32))
+    let hash = try PreviewRenderHash(bytes: Data(repeating: 0x01, count: 32))
     let subject = assertSendableEquatable(PreviewConfirmation(
         projectID: projectID,
         detectionRevision: 3,

@@ -31,9 +31,9 @@ func usageLedgerDerivesZeroWhenEmpty() {
 }
 
 @Test("ExportedSettingsEntryが全フィールドを保持する")
-func exportedSettingsEntryHoldsFields() {
+func exportedSettingsEntryHoldsFields() throws {
     let projectID = ProjectID(rawValue: UUID())
-    let hash = ProjectSettingsHash(bytes: Data(repeating: 0xAB, count: 32))
+    let hash = try ProjectSettingsHash(bytes: Data(repeating: 0xAB, count: 32))
     let exportedAt = Date(timeIntervalSince1970: 1_700_000_000)
     let subject = assertSendableEquatable(ExportedSettingsEntry(
         projectID: projectID,

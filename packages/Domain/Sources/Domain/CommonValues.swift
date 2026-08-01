@@ -27,19 +27,48 @@ public struct YearMonth: Sendable, Hashable, Comparable {
     }
 }
 
+/// ハッシュ値型の initializer が拒否する不正な入力長（canonical-schema.md 5.2
+/// 「32 バイト固定を型で強制します」）。ProjectSettingsHash / PreviewRenderHash /
+/// StampAssetHash の3型と、ハッシュ計算関数（SettingsHash.swift）が注入された digest の
+/// 戻り値長を検証する際に共有する（エラー型の分離自体は正本に明示が無いオーケストレータ判断）。
+public enum HashByteLengthError: Error, Sendable, Equatable {
+    case invalidLength(actual: Int)
+}
+
+/// ハッシュ値の固定長（32 バイト。canonical-schema.md 5.2）。
+private let hashByteLength = 32
+
 /// 認可用。出力へ影響する全設定の正準ハッシュ（正準スキーマ 5.2）
 public struct ProjectSettingsHash: Sendable, Hashable {
-    public let bytes: Data   // 32 バイト
-    public init(bytes: Data) { self.bytes = bytes }
+    public let bytes: Data   // 32 バイト固定（throws init で強制）
+
+    public init(bytes: Data) throws {
+        guard bytes.count == hashByteLength else {
+            throw HashByteLengthError.invalidLength(actual: bytes.count)
+        }
+        self.bytes = bytes
+    }
 }
 
 /// プレビュー確認用。見た目に影響する値だけ（正準スキーマ 5.2）
 public struct PreviewRenderHash: Sendable, Hashable {
-    public let bytes: Data     // 32 バイト
-    public init(bytes: Data) { self.bytes = bytes }
+    public let bytes: Data   // 32 バイト固定（throws init で強制）
+
+    public init(bytes: Data) throws {
+        guard bytes.count == hashByteLength else {
+            throw HashByteLengthError.invalidLength(actual: bytes.count)
+        }
+        self.bytes = bytes
+    }
 }
 
 public struct StampAssetHash: Sendable, Hashable {
-    public let bytes: Data        // 32 バイト（正準スキーマ 5.3）
-    public init(bytes: Data) { self.bytes = bytes }
+    public let bytes: Data   // 32 バイト固定（正準スキーマ 5.3。throws init で強制）
+
+    public init(bytes: Data) throws {
+        guard bytes.count == hashByteLength else {
+            throw HashByteLengthError.invalidLength(actual: bytes.count)
+        }
+        self.bytes = bytes
+    }
 }

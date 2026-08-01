@@ -110,34 +110,43 @@ func yearMonthEqualityRequiresBothFields() {
     #expect(YearMonth(year: 2026, month: 8) != YearMonth(year: 2026, month: 7))
 }
 
-// MARK: - ハッシュ型（architecture.md 6.5。32バイト検証は正本に無いため実装しない）
+// MARK: - ハッシュ型（architecture.md 6.5。32バイト検証は canonical-schema.md 5.2 が正本）
 
 @Test("StampAssetHashがSendable/Hashableでbytesを保持する")
-func stampAssetHashHoldsBytes() {
+func stampAssetHashHoldsBytes() throws {
     let bytes = Data(repeating: 0xAB, count: 32)
-    let subject = assertSendableHashable(StampAssetHash(bytes: bytes))
+    let subject = try assertSendableHashable(StampAssetHash(bytes: bytes))
     #expect(subject.bytes == bytes)
 }
 
 @Test("ProjectSettingsHashがSendable/Hashableでbytesを保持する")
-func projectSettingsHashHoldsBytes() {
+func projectSettingsHashHoldsBytes() throws {
     let bytes = Data(repeating: 0xCD, count: 32)
-    let subject = assertSendableHashable(ProjectSettingsHash(bytes: bytes))
+    let subject = try assertSendableHashable(ProjectSettingsHash(bytes: bytes))
     #expect(subject.bytes == bytes)
 }
 
 @Test("PreviewRenderHashがSendable/Hashableでbytesを保持する")
-func previewRenderHashHoldsBytes() {
+func previewRenderHashHoldsBytes() throws {
     let bytes = Data(repeating: 0xEF, count: 32)
-    let subject = assertSendableHashable(PreviewRenderHash(bytes: bytes))
+    let subject = try assertSendableHashable(PreviewRenderHash(bytes: bytes))
     #expect(subject.bytes == bytes)
 }
 
-@Test("ハッシュ型は32バイト長のバリデーションを持たない（正本に throwing init が無いため）")
-func hashTypesAcceptArbitraryLengthWithoutValidation() {
-    // architecture.md 6.5 / canonical-schema.md 5.3 のいずれにも throwing initializer は
-    // 定義されていない。32バイト制約の実行時強制は将来タスク（正準エンコーダ）の管轄。
-    let shortBytes = Data(repeating: 0x01, count: 1)
-    let subject = StampAssetHash(bytes: shortBytes)
-    #expect(subject.bytes.count == 1)
+@Test(
+    "ハッシュ型は32バイト以外の長さを拒否する（canonical-schema.md 5.2）",
+    arguments: [0, 31, 33]
+)
+func hashTypesRejectNonThirtyTwoByteLength(length: Int) throws {
+    let bytes = Data(repeating: 0x01, count: length)
+
+    #expect(throws: HashByteLengthError.invalidLength(actual: length)) {
+        try StampAssetHash(bytes: bytes)
+    }
+    #expect(throws: HashByteLengthError.invalidLength(actual: length)) {
+        try ProjectSettingsHash(bytes: bytes)
+    }
+    #expect(throws: HashByteLengthError.invalidLength(actual: length)) {
+        try PreviewRenderHash(bytes: bytes)
+    }
 }

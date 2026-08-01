@@ -8,8 +8,8 @@ import Foundation
 /// 最小準拠（`importCustomStamp` のジェネリック body 呼び出しを含む）を検証する。
 /// `StampAssetHash` は Task 1 で実装済みのためここでは組み立てにのみ使う。
 
-private func makeStampAssetHash(fill: UInt8) -> StampAssetHash {
-    StampAssetHash(bytes: Data(repeating: fill, count: 32))
+private func makeStampAssetHash(fill: UInt8) throws -> StampAssetHash {
+    try StampAssetHash(bytes: Data(repeating: fill, count: 32))
 }
 
 private func makeThumbnailRef() -> ManagedFileRef {
@@ -19,9 +19,9 @@ private func makeThumbnailRef() -> ManagedFileRef {
 // MARK: - CustomStamp
 
 @Test("CustomStampが全フィールドを保持し値として比較できる")
-func customStampHoldsAllFieldsAndIsEquatable() {
+func customStampHoldsAllFieldsAndIsEquatable() throws {
     let customStampID = CustomStampID(rawValue: UUID())
-    let assetHash = makeStampAssetHash(fill: 0x01)
+    let assetHash = try makeStampAssetHash(fill: 0x01)
     let thumbnail = makeThumbnailRef()
 
     let subject = CustomStamp(
@@ -109,7 +109,7 @@ private actor FakeStampStore: StampStore {
 func fakeStampStoreForwardsArguments() async throws {
     let expectedStamp = CustomStamp(
         customStampID: CustomStampID(rawValue: UUID()),
-        assetHash: makeStampAssetHash(fill: 0x02),
+        assetHash: try makeStampAssetHash(fill: 0x02),
         name: "スター",
         sortOrder: 1,
         thumbnail: makeThumbnailRef()
@@ -129,7 +129,7 @@ func fakeStampStoreForwardsArguments() async throws {
     try await store.removeCustomStamp(removedID)
 
     let projectID = ProjectID(rawValue: UUID())
-    let assetHash = makeStampAssetHash(fill: 0x03)
+    let assetHash = try makeStampAssetHash(fill: 0x03)
     try await store.attachStampReference(projectID: projectID, assetHash: assetHash)
     try await store.releaseStampReference(projectID: projectID, assetHash: assetHash)
 

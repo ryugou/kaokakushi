@@ -209,6 +209,37 @@ private func expectedStampCustomProjectSettingsBytes(assetHash: StampAssetHash) 
     return bytes
 }
 
+/// 戻り値長を意図的に壊すフェイク（不正長 digest 注入の拒否テスト用）。
+private final class WrongLengthSha256Digest: Sha256Digest, @unchecked Sendable {
+    func digest(_ input: Data) -> Data {
+        Data(repeating: 0x00, count: 31)
+    }
+}
+
+@Test("projectSettingsHashは注入digestの戻り値が32バイトでなければ拒否する")
+func projectSettingsHashRejectsWrongLengthDigest() throws {
+    let renderSpec = try fixtureRenderSpec(regions: [try fixtureRegion1()])
+    let exportSetting = fixtureExportSetting()
+    let wrongDigest = WrongLengthSha256Digest()
+
+    #expect(throws: HashByteLengthError.invalidLength(actual: 31)) {
+        try projectSettingsHash(renderSpec: renderSpec, exportSetting: exportSetting, digest: wrongDigest)
+    }
+}
+
+@Test("previewRenderHashは注入digestの戻り値が32バイトでなければ拒否する")
+func previewRenderHashRejectsWrongLengthDigest() throws {
+    let renderSpec = try fixtureRenderSpec(regions: [try fixtureRegion1()])
+    let exportSetting = fixtureExportSetting()
+    let wrongDigest = WrongLengthSha256Digest()
+
+    #expect(throws: HashByteLengthError.invalidLength(actual: 31)) {
+        try previewRenderHash(
+            renderSpec: renderSpec, exportSetting: exportSetting, renderRevision: 1, digest: wrongDigest
+        )
+    }
+}
+
 // MARK: - ゴールデンテスト本体
 
 @Test("ProjectSettingsHashのcanonical bytesとdigest入力がフィールド順どおりに一致する")
@@ -221,7 +252,7 @@ func projectSettingsHashMatchesGoldenCanonicalBytes() throws {
     #expect(actualBytes == expectedBytes)
 
     let fake = FakeSha256Digest()
-    _ = projectSettingsHash(renderSpec: renderSpec, exportSetting: exportSetting, digest: fake)
+    _ = try projectSettingsHash(renderSpec: renderSpec, exportSetting: exportSetting, digest: fake)
     #expect(fake.capturedInput == Data("project-settings-v1".utf8) + expectedBytes)
 }
 
@@ -240,7 +271,7 @@ func previewRenderHashMatchesGoldenCanonicalBytes() throws {
     #expect(actualBytes == expectedBytes)
 
     let fake = FakeSha256Digest()
-    _ = previewRenderHash(
+    _ = try previewRenderHash(
         renderSpec: renderSpec,
         exportSetting: exportSetting,
         renderRevision: renderRevision,
@@ -251,7 +282,7 @@ func previewRenderHashMatchesGoldenCanonicalBytes() throws {
 
 @Test("StampSource.customは内容ハッシュを32バイト固定長・長さ前置きなしで符号化する")
 func stampSourceCustomEncodesAssetHashWithoutLengthPrefix() throws {
-    let assetHash = StampAssetHash(bytes: Data(repeating: 0x7A, count: 32))
+    let assetHash = try StampAssetHash(bytes: Data(repeating: 0x7A, count: 32))
     let region = RenderRegionSpec(
         bounds: try fixtureSourceCrop(),
         rotationDegrees: try RotationDegrees(0),
