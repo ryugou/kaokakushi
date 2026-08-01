@@ -79,6 +79,23 @@ func triageReturnsOneSmallFaceIssuePerSmallFace() throws {
     #expect(issues[0].affectedFaceTrackIDs == [smallOne.faceTrackID])
 }
 
+@Test("小さい顔が3人ならsmallFaceが3件になり各件が対象顔1つだけを指す")
+func triageReturnsThreeSmallFaceIssuesForThreeSmallFaces() throws {
+    let smallFaces = [
+        try face(left: 0.15, top: 0.15, right: 0.25, bottom: 0.25, isSmallFace: true),
+        try face(left: 0.4, top: 0.4, right: 0.5, bottom: 0.5, isSmallFace: true),
+        try face(left: 0.65, top: 0.65, right: 0.75, bottom: 0.75, isSmallFace: true)
+    ]
+    let result = detectionResult(smallFaces)
+
+    let issues = triage(result, projectID: ProjectID(rawValue: UUID()), detectionRevision: 1)
+
+    #expect(issues.count == 3)
+    #expect(issues.allSatisfy { $0.id.reason == .smallFace })
+    #expect(Set(issues.flatMap(\.affectedFaceTrackIDs)) == Set(smallFaces.map(\.faceTrackID)))
+    #expect(issues.allSatisfy { $0.affectedFaceTrackIDs.count == 1 })
+}
+
 @Test(
     "yaw/pitchの絶対値が45度ちょうどでは発火せず45.01度で発火する（境界値）",
     arguments: [
