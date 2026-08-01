@@ -44,7 +44,12 @@ run_case 0 "行コメント内の import は無視" '// import UIKit' 'import Fo
 run_case 0 "複数行コメントで無効化された import" '/*' 'import UIKit' '*/' 'import Foundation'
 run_case 0 "文字列リテラル内のコメント記号" 'let s = "/* not a comment */"' 'import Foundation'
 
+run_case 0 "エスケープされた引用符を含む文字列" 'let s = "a\"b/*"' 'import Foundation'
+run_case 0 "連続バックスラッシュを含む文字列" 'let s = "\\\\"' 'import Foundation'
+
 # --- 否定ケース（違反あり = exit 1） ---
+run_case 1 "同一行の複数 import（2つ目が禁止）" 'import Foundation; import UIKit'
+run_case 1 "複数行文字列内のコメント記号（fail-closed）" 'let s = """' '/*' '"""' 'import Foundation'
 run_case 1 "禁止 import" 'import UIKit'
 run_case 1 "修飾つき禁止 import" '@preconcurrency import UIKit'
 run_case 1 "種別つき禁止 import" 'import struct UIKit.CGRect'

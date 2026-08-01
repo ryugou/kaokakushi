@@ -73,6 +73,10 @@ strip_comments() {
         if (depth == 0 && two == "//") { break }
         if (two == "/*") { depth++; out = out "  "; i += 2; continue }
         if (depth > 0 && two == "*/") { depth--; out = out "  "; i += 2; continue }
+        # コメント・文字列の外の「;」は改行へ展開し、同一行に並べた複数文（
+        # `import Foundation; import UIKit` 等）を1文ずつ検査できるようにする。
+        # この展開により、以降の報告行番号は物理行と最大「展開数」だけずれうる。
+        if (depth == 0 && one == ";") { out = out "\n"; i++; continue }
         if (depth > 0) { out = out " "; i++ } else { out = out one; i++ }
       }
       print out
