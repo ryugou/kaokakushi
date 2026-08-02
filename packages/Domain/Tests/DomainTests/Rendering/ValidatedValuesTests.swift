@@ -290,6 +290,43 @@ func normalizedRectThrowsOnNonFiniteCoordinates() {
     }
 }
 
+// MARK: - NormalizedRect（座標絶対値の構造的上限。image-pipeline.md 4章「NormalizedRect」節）
+//
+// 拡張率2.0でも正当な値は[-2, 3]に収まるため、絶対値16は十分な余裕を持った構造的上限。
+// 16.0ちょうどは許容し、超過（16.1・-16.1）はinvalidRectをthrowする。
+
+@Test("NormalizedRectは4座標すべてが絶対値16ちょうどで成功する")
+func normalizedRectSucceedsAtAbsoluteValueSixteenBoundary() throws {
+    let subject = try NormalizedRect(left: -16.0, top: -16.0, rightExclusive: 16.0, bottomExclusive: 16.0)
+    #expect(subject.left == -16.0)
+    #expect(subject.top == -16.0)
+    #expect(subject.rightExclusive == 16.0)
+    #expect(subject.bottomExclusive == 16.0)
+}
+
+@Test("NormalizedRectはいずれかの座標が16を超えるとinvalidRectをthrowする")
+func normalizedRectThrowsWhenAnyCoordinateExceedsSixteen() {
+    #expect(throws: RenderValidationError.invalidRect) {
+        try NormalizedRect(left: 0.0, top: 0.0, rightExclusive: 16.1, bottomExclusive: 1.0)
+    }
+    #expect(throws: RenderValidationError.invalidRect) {
+        try NormalizedRect(left: 0.0, top: 16.1, rightExclusive: 1.0, bottomExclusive: 17.0)
+    }
+}
+
+@Test("NormalizedRectはいずれかの座標が-16を下回るとinvalidRectをthrowする")
+func normalizedRectThrowsWhenAnyCoordinateBelowNegativeSixteen() {
+    #expect(throws: RenderValidationError.invalidRect) {
+        try NormalizedRect(left: -16.1, top: 0.0, rightExclusive: 1.0, bottomExclusive: 1.0)
+    }
+    // top < bottomExclusive の順序ガードを満たしたまま bottomExclusive のみ -16 未満にする
+    // ため top も -16 未満にする（そうしないと順序ガードで先に invalidRect になり、
+    // 新設した絶対値ガードの検証にならない）。
+    #expect(throws: RenderValidationError.invalidRect) {
+        try NormalizedRect(left: 0.0, top: -17.0, rightExclusive: 1.0, bottomExclusive: -16.1)
+    }
+}
+
 // MARK: - SrgbArgb8888 / VisibleColor（アルファが0より大きい）
 
 @Test("SrgbArgb8888はアルファが0より大きければ成功する")

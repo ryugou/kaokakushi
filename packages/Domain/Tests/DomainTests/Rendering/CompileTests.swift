@@ -333,7 +333,7 @@ func expandDoesNotClampOutOfUnitRangeResults() throws {
         expansion: expansion
     )
 
-    let expanded = expand(face: face, effect: effect)
+    let expanded = try expand(face: face, effect: effect)
 
     #expect(expanded.top == -0.0625)
     #expect(expanded.rightExclusive == 1.125)

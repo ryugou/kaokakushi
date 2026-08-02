@@ -204,7 +204,9 @@ public struct CornerRatio: Sendable, Hashable {
 
 /// 元画像またはキャンバスに対する正規化矩形。左上原点（image-pipeline.md 4 章）。
 /// `left` / `top` は inclusive、`right` / `bottom` は exclusive。
-/// 画像外へのはみ出し（負数・1.0 超過）は許す。
+/// 画像外へのはみ出し（負数・1.0 超過）は許すが、各座標の絶対値は 16 以下に制限する
+/// （image-pipeline.md 4 章「NormalizedRect」節。拡張率 2.0 でも正当な値は [-2, 3] に
+/// 収まるため、16 は十分な余裕を持った構造的上限であり、超過は不正な入力とみなす）。
 public struct NormalizedRect: Sendable, Hashable {
     public let left: Double
     public let top: Double
@@ -214,6 +216,9 @@ public struct NormalizedRect: Sendable, Hashable {
     public init(left: Double, top: Double, rightExclusive: Double, bottomExclusive: Double) throws {
         guard left.isFinite, top.isFinite, rightExclusive.isFinite, bottomExclusive.isFinite,
               left < rightExclusive, top < bottomExclusive else {
+            throw RenderValidationError.invalidRect
+        }
+        guard abs(left) <= 16, abs(top) <= 16, abs(rightExclusive) <= 16, abs(bottomExclusive) <= 16 else {
             throw RenderValidationError.invalidRect
         }
         self.left = left

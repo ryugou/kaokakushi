@@ -61,7 +61,10 @@ func expandedEdges(
 
 /// 顔矩形へ拡張率を適用する。画像外へはみ出す場合もクランプしない
 /// （クランプすると顔が露出する方向へ倒れるため。はみ出しはマスク描画側で処理する）。
-public func expand(face: NormalizedRect, effect: EffectSetting) -> NormalizedRect {
+/// 拡張後の座標が `NormalizedRect` の上限（絶対値 16。image-pipeline.md 4 章）を超える場合は
+/// `invalidRect` を throw する（クランプで黙って直さない。検出結果の顔（[0, 1]）に既定拡張率を
+/// 適用する通常経路では起こらない。image-pipeline.md 1 章「拡張率の適用」）。
+public func expand(face: NormalizedRect, effect: EffectSetting) throws -> NormalizedRect {
     let edges = expandedEdges(
         of: face,
         top: effect.expansion.top.value,
@@ -70,13 +73,7 @@ public func expand(face: NormalizedRect, effect: EffectSetting) -> NormalizedRec
         trailing: effect.expansion.trailing.value
     )
 
-    // try! の根拠: face は有効な NormalizedRect（left<right, top<bottom, 全て有限）であり
-    // ExpansionRatio は有限かつ 0<=v<=2.0 に検証済み。width・height は常に正、拡張率は有限の
-    // ため、拡張後も left<right・top<bottom・全て有限が数学的に保証される
-    // （このinitが失敗することは設計上ありえない）。expand() 自体は正本どおり non-throwing の
-    // シグネチャを維持する。
-    // swiftlint:disable:next force_try
-    return try! NormalizedRect(
+    return try NormalizedRect(
         left: edges.left, top: edges.top, rightExclusive: edges.right, bottomExclusive: edges.bottom
     )
 }
@@ -262,6 +259,18 @@ private func makeBackgroundOp(
     }
 }
 
+/// `Int` 減算を overflow チェック付きで行う。`pixelRect` は `left`/`rightExclusive` 等の
+/// 各フィールドを個別に Int 範囲内と検証済みだが、正負反対側の極端な値の組み合わせでは
+/// 差分自体が Int64 の表現範囲を超えうる（`pixelRect` の Int 変換ガードと同じ理由で、
+/// trap ではなく検証エラーとして返す）。
+private func subtractingChecked(_ minuend: Int, _ subtrahend: Int) throws -> Int {
+    let (difference, overflow) = minuend.subtractingReportingOverflow(subtrahend)
+    guard !overflow else {
+        throw RenderValidationError.invalidRect
+    }
+    return difference
+}
+
 private func compileRegionDraft(
     _ region: RenderRegionSpec,
     canvasSize: PixelSize,
@@ -269,8 +278,8 @@ private func compileRegionDraft(
     stampKeys: inout Set<StampRasterKey>
 ) throws -> RenderRegionDraft {
     let boundsPx = try pixelRect(from: region.bounds, in: canvasSize)
-    let regionWidth = boundsPx.rightExclusive - boundsPx.left
-    let regionHeight = boundsPx.bottomExclusive - boundsPx.top
+    let regionWidth = try subtractingChecked(boundsPx.rightExclusive, boundsPx.left)
+    let regionHeight = try subtractingChecked(boundsPx.bottomExclusive, boundsPx.top)
     let shortSide = min(regionWidth, regionHeight)
     // featherPx は「領域短辺に対する比」（image-pipeline.md 2章コメント）。
     let featherPx = try FeatherPx(region.featherRatio.value * Double(shortSide))

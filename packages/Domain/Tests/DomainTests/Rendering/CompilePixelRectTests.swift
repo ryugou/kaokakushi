@@ -23,17 +23,18 @@ private func makeRegion(bounds: NormalizedRect) throws -> RenderRegionSpec {
     )
 }
 
-// MARK: - 1. region.bounds経路: 座標自体を極端にして積がDoubleの範囲を超え非有限になる
+// MARK: - 1. region.bounds経路(floor側): 座標は16以下、canvasSize側をInt.maxにしてInt範囲外にする
 
-@Test("compileRenderDraftはregion.bounds×canvasSizeの積が非有限だとinvalidRectをthrowする")
-func compileRenderDraftThrowsInvalidRectWhenRegionBoundsIsNonFinite() throws {
-    // region.boundsはsourceCropと違い0.0〜1.0への範囲制約を受けない（NormalizedRect.init
-    // は有限性とleft<right/top<bottomのみ検証）。1.5e308（Double.greatestFiniteMagnitude
-    // 未満で有効）× canvasSize.width(100) は Double の最大有限値を超え +infinity になる。
-    let region = try makeRegion(bounds: try makeRect(left: 1.5e308, top: 0.0, right: 1.6e308, bottom: 1.0))
+@Test("compileRenderDraftはregion.bounds(floor側)×canvasSizeの積がInt範囲外だとinvalidRectをthrowする")
+func compileRenderDraftThrowsInvalidRectWhenRegionBoundsFloorOverflowsInt() throws {
+    // NormalizedRectの絶対値上限（16）導入後は、座標自体を極端にしてDoubleの積を
+    // 非有限にする経路は構築できない（16超はinit段階でinvalidRectになりpixelRectへ
+    // 到達しない）。座標は16以下に保ち、canvasSize.width(Int.max)によりfloor(left)側の
+    // 積がInt64表現範囲を超えることでpixelRectのInt変換ガードに到達させる。
+    let region = try makeRegion(bounds: try makeRect(left: -16.0, top: 0.0, right: 16.0, bottom: 1.0))
     let spec = makeSpec(sourceCrop: try makeRect(left: 0, top: 0, right: 1, bottom: 1), regions: [region])
     #expect(throws: RenderValidationError.invalidRect) {
-        try compileRenderDraft(spec: spec, sourceSize: makeSize(100, 100), targetSize: makeSize(100, 100))
+        try compileRenderDraft(spec: spec, sourceSize: makeSize(100, 100), targetSize: makeSize(Int.max, 100))
     }
 }
 
@@ -63,5 +64,23 @@ func compileRenderDraftThrowsInvalidRectWhenRegionBoundsOverflowsInt() throws {
     let spec = makeSpec(sourceCrop: try makeRect(left: 0, top: 0, right: 1, bottom: 1), regions: [region])
     #expect(throws: RenderValidationError.invalidRect) {
         try compileRenderDraft(spec: spec, sourceSize: makeSize(100, 100), targetSize: makeSize(Int.max, 100))
+    }
+}
+
+// MARK: - 4. regionWidthの減算自体がInt64表現範囲を超えてオーバーフローする
+
+@Test("compileRenderDraftはregionWidthの減算がオーバーフローするとinvalidRectをthrowする")
+func compileRenderDraftThrowsInvalidRectWhenRegionWidthSubtractionOverflows() throws {
+    // pixelRect自体は各フィールド(left/right)を個別にInt範囲内と検証済みで通過するが、
+    // 正負反対側の極端な値の組み合わせでは差分(regionWidth)自体がInt64の表現範囲を
+    // 超えうる。coordは16以下(絶対値8)に保ちwidthを800000000000000000にすることで、
+    // left(=floor(-8*width))とright(=ceil(8*width))はそれぞれ単独ではInt64に収まるが
+    // (約6.4e18 < Int64.max約9.223e18)、right - left(約1.28e19)はInt64.maxを超える。
+    let bounds = try makeRect(left: -8.0, top: 0.0, right: 8.0, bottom: 1.0)
+    let region = try makeRegion(bounds: bounds)
+    let spec = makeSpec(sourceCrop: try makeRect(left: 0, top: 0, right: 1, bottom: 1), regions: [region])
+    let hugeCanvasSize = makeSize(800_000_000_000_000_000, 100)
+    #expect(throws: RenderValidationError.invalidRect) {
+        try compileRenderDraft(spec: spec, sourceSize: makeSize(100, 100), targetSize: hugeCanvasSize)
     }
 }
