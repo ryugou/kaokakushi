@@ -9,7 +9,8 @@ import GRDB
 // （journal_modeはファイルヘッダに記録される場合があり、他接続の状態次第で
 // 切り替えが反映されないことがある）ため、起動時に必ず実際の値を読み返して
 // 検証し、加えて PRAGMA foreign_key_check で外部キー違反の有無を確認する。
-// スキーマ（テーブル定義）はまだ無い（Task 2の担当）。
+// スキーマ（テーブル定義・制約）は Schema.swift の AppSchema.makeMigrator() が
+// 単一の DatabaseMigrator として提供する（Issue #6 Task 2）。
 
 /// AppDatabase.open(at:) が送出する復旧エラー。
 /// 運用者が次のアクションを判断できるよう、期待値と実際の値、または違反件数を持つ。
@@ -94,6 +95,13 @@ public struct AppDatabase: Sendable {
 
         try validatePragmas(dbQueue: dbQueue)
         try validateForeignKeyIntegrity(dbQueue: dbQueue)
+
+        // スキーマ（全テーブル・制約）を単一トランザクションのマイグレーションで
+        // 確定する（Schema.swift / test-plan.md 4.2「スキーマ移行が単一トランザク
+        // ションで確定し、途中適用が観測されないこと」）。PRAGMA検証・
+        // foreign_key_check検証より後に置くのは、テーブルが無い新規DBでもこの2つの
+        // 検証自体は意味を持つため（Task 1時点の挙動を変えない）。
+        try AppSchema.makeMigrator().migrate(dbQueue)
 
         return AppDatabase(dbQueue: dbQueue)
     }
@@ -188,7 +196,13 @@ public struct AppDatabase: Sendable {
 
     /// 設定したPRAGMAを実際に読み返し、期待値と一致するか検証する。
     /// 一致しない場合は復旧エラーとしてthrowする（握りつぶさない）。
-    private static func validatePragmas(dbQueue: DatabaseQueue) throws {
+    ///
+    /// internal（モジュール内既定アクセス）にしているのは、AppDatabaseTests が
+    /// AppDatabase.open(at:) を経由せず生の GRDB DatabaseQueue を直接開いて
+    /// journal_mode = PERSIST を再現し、この関数を直接呼び出して復旧エラーを
+    /// 固定するため（TRUNCATE/PERSISTはファイルヘッダに残らずヘッダ検査
+    /// では検出できない。Issue #6 Task 1 レビュー指摘）。
+    static func validatePragmas(dbQueue: DatabaseQueue) throws {
         try dbQueue.read { database in
             let journalMode = try String.fetchOne(database, sql: "PRAGMA journal_mode") ?? ""
             guard journalMode.lowercased() == "delete" else {

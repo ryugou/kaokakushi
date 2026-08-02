@@ -250,4 +250,49 @@ struct AppDatabaseTests {
 
         #expect(genericDescription?.contains("PRAGMA synchronous の検証に失敗しました") == true)
     }
+
+    @Test(
+        "journal_modeがPERSIST/TRUNCATEのDBに対しvalidatePragmasを直接呼ぶと復旧エラーになること",
+        arguments: ["PERSIST", "TRUNCATE"]
+    )
+    func validatePragmasThrowsWhenJournalModeIsNotDelete(mode: String) throws {
+        // TRUNCATE/PERSISTはSQLiteファイルヘッダに永続記録されない接続ごとの実行時
+        // 設定であり、AppDatabase.rejectIfExistingFileUsesWAL のヘッダ読み取り検査
+        // (WAL専用)は素通りする。このテストは「ヘッダ検査を素通りしたドリフトを
+        // 検出する最後の砦は validatePragmas の読み返し検証である」ことを固定する
+        // （既存の openThrowsWhenJournalModeWasChangedExternally 等はWALのみを
+        // 検証しており、TRUNCATE/PERSISTの検出は未カバーだった。Issue #6 Task 1
+        // レビュー指摘）。
+        let url = makeTemporaryDatabaseURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        // AppDatabase.open(at:) を経由せず、生のGRDB接続で対象モードへ切り替える。
+        // PERSIST / TRUNCATE は接続ごとの実行時設定でファイルに永続されない（永続されるのは
+        // WAL のみ）ため、validatePragmas と**同じ接続**で切り替えて検証する。
+        // synchronous はこのテストの対象外なので規約値（EXTRA）へ合わせ、
+        // journal_mode の検証だけを踏むようにする。
+        let rawQueue = try DatabaseQueue(path: url.path)
+        try rawQueue.writeWithoutTransaction { database in
+            try database.execute(sql: "PRAGMA synchronous = EXTRA")
+            try database.execute(sql: "PRAGMA journal_mode = \(mode)")
+        }
+        // 前提の確認: この接続で対象モードが実際に効いていること。
+        try rawQueue.read { database in
+            let journalMode = try String.fetchOne(database, sql: "PRAGMA journal_mode")
+            #expect(journalMode?.lowercased() == mode.lowercased())
+        }
+
+        do {
+            try AppDatabase.validatePragmas(dbQueue: rawQueue)
+            Issue.record("journal_modeが\(mode)のDBに対しvalidatePragmasがエラーを送出しなかった")
+        } catch let error as AppDatabaseError {
+            #expect(error == AppDatabaseError.pragmaValidationFailed(
+                pragma: "journal_mode",
+                expected: "delete",
+                actual: mode.lowercased()
+            ))
+        } catch {
+            Issue.record("AppDatabaseError以外がthrowされた: \(error)")
+        }
+    }
 }
