@@ -363,6 +363,7 @@ struct NormalizedRect: Sendable, Hashable {
     init(left: Double, top: Double, rightExclusive: Double, bottomExclusive: Double) throws {
         // すべて有限。left < rightExclusive、top < bottomExclusive
         // 画像外へのはみ出し（負数・1.0 超過）は許す
+        // ただし各座標の絶対値は 16 以下（下記）
     }
 }
 ```
@@ -560,8 +561,11 @@ struct RasterizedStampAsset: Sendable {
 | +Y | **下方向** |
 | `left` / `top` | 含む（inclusive） |
 | `right` / `bottom` | **含まない（exclusive）** |
+| 各座標の絶対値 | **16 以下**（違反は `invalidRect`） |
 
 原点を「向き正規化後」と明記するのは、EXIF の回転を適用する前後で左上の位置が変わるためです。
+
+**絶対値 16 の上限は正規化座標空間として意味を持つ範囲の構造的保証です。** 正当な値は元画像・キャンバス基準の [0, 1] とそこからのはみ出し（`expand()` の最大拡張率 2.0 でも [-2, 3]）に収まります。上限が無いと `expand()` の non-throwing 契約（1 章）が浮動小数点オーバーフローで破れるため、入力型で保証します。
 
 値域は段階によって異なります。
 
