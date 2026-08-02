@@ -361,6 +361,8 @@ func triage(
 
 **非有限（`NaN` / 無限大）の `yawDegrees` / `pitchDegrees` は `extremePose` として扱う**（`NaN` は比較が常に偽になるため、素通しすると破損した検出結果が要確認判定を通過する。安全側へ倒す）。
 
+**`faceAtEdge` は、既定拡張率（上 25% / 下 15% / 左右 15%。[画像処理](image-pipeline.md) 1 章）を顔矩形へ適用した結果が画像境界（0 以下または 1 以上）に接する場合に発生する**（拡張式は `expand` と共有する。利用者が拡張率を変更しても判定は既定拡張率で行う — 要確認判定は「既定でも隠しきれない可能性」の検出であり、設定に追従させると判定が利用者操作で変わる）。
+
 ##### 再検出時は対応づけを試みない
 
 **「再検出しても同じ顔へ同じ ID が付く」とは保証できない**（検出順が変わるだけで別の `faceTrackID` になりうる）。誤った対応づけは別人の顔の判断をこの顔の判断として扱うことになり、匿名化確認として最悪の失敗となる。
@@ -575,6 +577,23 @@ func resolveCapabilities(
 **`verificationRequired` は「Free として動かす」ことではない。** 有料機能を新規に付与せず、書き出しの認可も開始しない（未検証での有料機能付与と、正当な利用者の無言降格の両方を避ける）。
 
 **`enabledStampPacks` を能力解決の内側で `ResolvedCapabilities` へ写す**（`Domain` の判定関数は設定定数の型を参照しないため。3.3）。
+
+##### `Entitlement` → `ResolvedCapabilities` の導出
+
+1. **`expiresAt` を過ぎていれば `status` に関わらず Free 相当**（失効判定を最初に行う）
+2. **`status` が `pending` / `expired` / `revoked` なら Free 相当**（`pending` では有料機能を付与しない。仕様 5.4）
+3. `status` が `active` / `grace` なら `plan` の行を適用する
+
+| 能力 | `free`（および Free 相当） | `standard` | `pro` |
+| --- | --- | --- | --- |
+| `singleExportAccess` | `metered` | `unlimited` | `unlimited` |
+| `canUsePremiumStamps` | ✕ | ○ | ○ |
+| `canUseCustomStamps` | ✕ | ○ | ○ |
+| `canUseProBatch` | ✕ | ✕ | ○ |
+| `canUseBatchTrial` | ○ | ○ | **✕**（通常一括が使えるため） |
+| `shouldShowAds` | ○ | ✕ | ✕ |
+
+`enabledStampPacks` はどの行でも設定定数（10 章）の値をそのまま写す。
 
 **`Plan` を参照してよいのは能力解決の内側だけとする**（クォータ判定・広告頻度・開始ゲート・一括可否・編集可否・UI 活性制御はすべて `ResolvedCapabilities` を見る。`Plan` を渡すと `status = pending` でも `plan != free` が成立し規則を迂回する）。**「確認できない」を型で表す**（`ResolvedCapabilities` を必ず返す関数では `metered` は暗黙降格、`unlimited` は未検証付与になるため `verificationRequired` を独立させる）。
 
