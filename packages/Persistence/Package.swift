@@ -26,6 +26,7 @@ let package = Package(
             name: "PersistenceTests",
             dependencies: [
                 "Persistence",
+                "Domain",
                 .product(name: "GRDB", package: "GRDB.swift")
             ]
         )
