@@ -9,17 +9,7 @@ import Foundation
 // canUseBatchTrial だけの利用者は残クレジットがある間だけ参入できる。
 // どちらの能力も無ければ remainingCredits に関わらず参入できない。
 
-private func capabilities(canUseProBatch: Bool, canUseBatchTrial: Bool) -> ResolvedCapabilities {
-    ResolvedCapabilities(
-        singleExportAccess: .metered,
-        canUsePremiumStamps: false,
-        canUseCustomStamps: false,
-        enabledStampPacks: [],
-        canUseProBatch: canUseProBatch,
-        canUseBatchTrial: canUseBatchTrial,
-        shouldShowAds: true
-    )
-}
+// capabilities(...) ビルダーは TestSupport.swift の共有ヘルパーを使う。
 
 // MARK: - canUseProBatchを持てばremainingCreditsに関わらず常に参入できる
 

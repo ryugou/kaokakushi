@@ -13,24 +13,7 @@ private func requirement(_ stampRequirements: Set<StampRequirement>) -> ProjectC
     ProjectCapabilityRequirement(stampRequirements: stampRequirements)
 }
 
-private func capabilities(
-    canUsePremiumStamps: Bool = false,
-    canUseCustomStamps: Bool = false,
-    singleExportAccess: SingleExportAccess = .metered,
-    canUseProBatch: Bool = false,
-    canUseBatchTrial: Bool = false,
-    shouldShowAds: Bool = true
-) -> ResolvedCapabilities {
-    ResolvedCapabilities(
-        singleExportAccess: singleExportAccess,
-        canUsePremiumStamps: canUsePremiumStamps,
-        canUseCustomStamps: canUseCustomStamps,
-        enabledStampPacks: [],
-        canUseProBatch: canUseProBatch,
-        canUseBatchTrial: canUseBatchTrial,
-        shouldShowAds: shouldShowAds
-    )
-}
+// capabilities(...) ビルダーは TestSupport.swift の共有ヘルパーを使う。
 
 // MARK: - requiredPlan: premium/custom を含めば standard、それ以外は free
 

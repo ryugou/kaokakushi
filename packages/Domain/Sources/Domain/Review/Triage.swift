@@ -216,11 +216,7 @@ private func overlappingFacesIssues(
 // UUID の16バイトを符号なしバイト列として辞書順に比較するための配列化
 // （canonical-schema.md 2.1「unordered な集合に UUID を含む場合」の規則）。
 private func faceTrackIDBytes(_ faceTrackID: FaceTrackID) -> [UInt8] {
-    let raw = faceTrackID.rawValue.uuid
-    return [
-        raw.0, raw.1, raw.2, raw.3, raw.4, raw.5, raw.6, raw.7,
-        raw.8, raw.9, raw.10, raw.11, raw.12, raw.13, raw.14, raw.15
-    ]
+    withUnsafeBytes(of: faceTrackID.rawValue.uuid) { Array($0) }
 }
 
 private func overlaps(_ lhs: NormalizedRect, _ rhs: NormalizedRect) -> Bool {

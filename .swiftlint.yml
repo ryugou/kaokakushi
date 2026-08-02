@@ -57,18 +57,9 @@ custom_rules:
 # （RenderRegionSpec.op / EffectSetting.op / RenderRegionDraft.op / RenderRegion.op）。
 # 正本との一字一句一致を優先するため改名せず、identifier_name(min_length) の対象から除外する。
 # excluded の指定は SwiftLint 既定の除外リスト（id を含む）を置き換えるため、id も明示する。
-#
-# 除外を packages/Domain 限定へ絞れないか調査済み（Issue #20 Task 3）: identifier_name は
-# SwiftLint の組み込みルールであり、custom_rules が持つ included/excluded（正規表現による
-# パス限定）を持たない。組み込みルールの設定項目は min_length / max_length /
-# allowed_symbols / excluded（識別子名の許可リスト）のみで、パスは対象外。トップレベルの
-# included/excluded（本ファイル冒頭）は「どのファイルをリントするか」の全ルール共通設定で
-# あり、ルール単位の対象パス限定ではないため、この用途には使えない。
-# よって `op` の除外は現状維持（リポジトリ全体対象）とする。App / packages 内で `op` を
-# 識別子名に使っている箇所は Domain 以外に無いことを確認済み。
-# CI（.github/workflows/ci.yml）は `brew install swiftlint` でバージョン固定せず最新版を
-# 取得するため、この判断は調査時点（Issue #20 Task 3）の SwiftLint 仕様に基づく。将来
-# identifier_name にルール単位のパス限定が追加された場合は本コメントの再調査が必要。
+# identifier_name は組み込みルールでルール単位のパス限定を持たないため、op の除外は
+# リポジトリ全体対象のまま維持する（op を識別子に使う箇所は Domain 以外に無いことを
+# 確認済み。Issue #20 Task 3）。
 identifier_name:
   excluded:
     - id

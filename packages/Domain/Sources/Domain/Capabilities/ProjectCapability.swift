@@ -48,21 +48,16 @@ public func requiredPlan(_ requirement: ProjectCapabilityRequirement) -> Plan {
 /// unknownBuiltInStampCode と同じ安全側）。requiredPlan の戻り値とは比較しない
 /// （ResolvedCapabilities のフラグを直接見る）。
 public func canEdit(_ requirement: ProjectCapabilityRequirement, capabilities: ResolvedCapabilities) -> Bool {
-    for stampRequirement in requirement.stampRequirements {
+    requirement.stampRequirements.allSatisfy { stampRequirement in
         switch stampRequirement {
         case .free:
-            continue
+            return true
         case .premium:
-            if !capabilities.canUsePremiumStamps {
-                return false
-            }
+            return capabilities.canUsePremiumStamps
         case .custom:
-            if !capabilities.canUseCustomStamps {
-                return false
-            }
+            return capabilities.canUseCustomStamps
         case .unknownBuiltIn:
             return false
         }
     }
-    return true
 }

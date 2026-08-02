@@ -26,3 +26,23 @@ func makeRenderSpec() throws -> RenderSpec {
     let rect = try NormalizedRect(left: 0, top: 0, rightExclusive: 1, bottomExclusive: 1)
     return RenderSpec(sourceCrop: rect, scaleMode: .fit, background: .none, regions: [])
 }
+
+/// Free 相当を既定とした ResolvedCapabilities のビルダー。必要なフラグだけ上書きする。
+func capabilities(
+    canUsePremiumStamps: Bool = false,
+    canUseCustomStamps: Bool = false,
+    singleExportAccess: SingleExportAccess = .metered,
+    canUseProBatch: Bool = false,
+    canUseBatchTrial: Bool = false,
+    shouldShowAds: Bool = true
+) -> ResolvedCapabilities {
+    ResolvedCapabilities(
+        singleExportAccess: singleExportAccess,
+        canUsePremiumStamps: canUsePremiumStamps,
+        canUseCustomStamps: canUseCustomStamps,
+        enabledStampPacks: [],
+        canUseProBatch: canUseProBatch,
+        canUseBatchTrial: canUseBatchTrial,
+        shouldShowAds: shouldShowAds
+    )
+}

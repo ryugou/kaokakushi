@@ -17,6 +17,22 @@ import Foundation
 private let testExtremePoseYawDegrees = 45.0
 private let testExtremePosePitchDegrees = 45.0
 
+// 暫定閾値を固定したテスト専用ラッパー。閾値注入で全呼び出しへ同じ2引数を
+// 複写しないための委譲（閾値そのものの検証は境界値テストが本体シグネチャで行う）。
+private func triage(
+    _ result: DetectionResult,
+    projectID: ProjectID,
+    detectionRevision: Int64
+) -> [ReviewIssue] {
+    Domain.triage(
+        result,
+        projectID: projectID,
+        detectionRevision: detectionRevision,
+        extremePoseYawDegrees: testExtremePoseYawDegrees,
+        extremePosePitchDegrees: testExtremePosePitchDegrees
+    )
+}
+
 private func face(
     trackID: FaceTrackID = FaceTrackID(rawValue: UUID()),
     left: Double = 0.4,
@@ -58,9 +74,7 @@ func triageReturnsEmptyWhenNoIssues() throws {
     let issues = triage(
         result,
         projectID: ProjectID(rawValue: UUID()),
-        detectionRevision: 1,
-        extremePoseYawDegrees: testExtremePoseYawDegrees,
-        extremePosePitchDegrees: testExtremePosePitchDegrees
+        detectionRevision: 1
     )
 
     #expect(issues.isEmpty)
@@ -74,9 +88,7 @@ func triageReturnsNoFaceDetectedWhenFacesEmpty() {
     let issues = triage(
         result,
         projectID: projectID,
-        detectionRevision: 1,
-        extremePoseYawDegrees: testExtremePoseYawDegrees,
-        extremePosePitchDegrees: testExtremePosePitchDegrees
+        detectionRevision: 1
     )
 
     #expect(issues.count == 1)
@@ -93,9 +105,7 @@ func triageReturnsOneSmallFaceIssuePerSmallFace() throws {
     let issues = triage(
         result,
         projectID: ProjectID(rawValue: UUID()),
-        detectionRevision: 1,
-        extremePoseYawDegrees: testExtremePoseYawDegrees,
-        extremePosePitchDegrees: testExtremePosePitchDegrees
+        detectionRevision: 1
     )
 
     #expect(issues.count == 1)
@@ -115,9 +125,7 @@ func triageReturnsThreeSmallFaceIssuesForThreeSmallFaces() throws {
     let issues = triage(
         result,
         projectID: ProjectID(rawValue: UUID()),
-        detectionRevision: 1,
-        extremePoseYawDegrees: testExtremePoseYawDegrees,
-        extremePosePitchDegrees: testExtremePosePitchDegrees
+        detectionRevision: 1
     )
 
     #expect(issues.count == 3)
@@ -143,9 +151,7 @@ func triageExtremePoseBoundary(yawDegrees: Double, pitchDegrees: Double, expecte
     let issues = triage(
         result,
         projectID: ProjectID(rawValue: UUID()),
-        detectionRevision: 1,
-        extremePoseYawDegrees: testExtremePoseYawDegrees,
-        extremePosePitchDegrees: testExtremePosePitchDegrees
+        detectionRevision: 1
     )
 
     let fired = issues.contains { $0.id.reason == .extremePose }
@@ -170,9 +176,7 @@ func triageExtremePoseFiresOnNonFiniteYawOrPitch(yawDegrees: Double, pitchDegree
     let issues = triage(
         result,
         projectID: ProjectID(rawValue: UUID()),
-        detectionRevision: 1,
-        extremePoseYawDegrees: testExtremePoseYawDegrees,
-        extremePosePitchDegrees: testExtremePosePitchDegrees
+        detectionRevision: 1
     )
 
     #expect(issues.contains { $0.id.reason == .extremePose })
@@ -189,9 +193,7 @@ func triageNeverFiresLowConfidence(confidence: Double) throws {
     let issues = triage(
         result,
         projectID: ProjectID(rawValue: UUID()),
-        detectionRevision: 1,
-        extremePoseYawDegrees: testExtremePoseYawDegrees,
-        extremePosePitchDegrees: testExtremePosePitchDegrees
+        detectionRevision: 1
     )
 
     #expect(issues.allSatisfy { $0.id.reason != .lowConfidence })
@@ -211,9 +213,7 @@ func triageFaceAtEdgeBoundary(top: Double, bottom: Double, expectedFires: Bool) 
     let issues = triage(
         result,
         projectID: ProjectID(rawValue: UUID()),
-        detectionRevision: 1,
-        extremePoseYawDegrees: testExtremePoseYawDegrees,
-        extremePosePitchDegrees: testExtremePosePitchDegrees
+        detectionRevision: 1
     )
 
     let fired = issues.contains { $0.id.reason == .faceAtEdge }
@@ -230,9 +230,7 @@ func triageOverlappingFacesProducesOnePerPairSortedByUUIDString() throws {
     let issues = triage(
         result,
         projectID: ProjectID(rawValue: UUID()),
-        detectionRevision: 1,
-        extremePoseYawDegrees: testExtremePoseYawDegrees,
-        extremePosePitchDegrees: testExtremePosePitchDegrees
+        detectionRevision: 1
     )
 
     let overlapIssues = issues.filter { $0.id.reason == .overlappingFaces }
@@ -255,9 +253,7 @@ func triageReturnsMultipleIssuesWhenSeveralReasonsCoOccur() throws {
     let issues = triage(
         result,
         projectID: ProjectID(rawValue: UUID()),
-        detectionRevision: 1,
-        extremePoseYawDegrees: testExtremePoseYawDegrees,
-        extremePosePitchDegrees: testExtremePosePitchDegrees
+        detectionRevision: 1
     )
 
     #expect(issues.contains { $0.id.reason == .smallFace })
@@ -276,16 +272,12 @@ func reviewIssueIDDiffersByDetectionRevision() throws {
     let issuesAtRevisionOne = triage(
         result,
         projectID: projectID,
-        detectionRevision: 1,
-        extremePoseYawDegrees: testExtremePoseYawDegrees,
-        extremePosePitchDegrees: testExtremePosePitchDegrees
+        detectionRevision: 1
     )
     let issuesAtRevisionTwo = triage(
         result,
         projectID: projectID,
-        detectionRevision: 2,
-        extremePoseYawDegrees: testExtremePoseYawDegrees,
-        extremePosePitchDegrees: testExtremePosePitchDegrees
+        detectionRevision: 2
     )
 
     #expect(issuesAtRevisionOne[0].id != issuesAtRevisionTwo[0].id)
@@ -300,16 +292,12 @@ func reviewIssueIDDiffersByProjectIDForNoFaceDetected() {
     let issuesForProjectOne = triage(
         result,
         projectID: projectOne,
-        detectionRevision: 1,
-        extremePoseYawDegrees: testExtremePoseYawDegrees,
-        extremePosePitchDegrees: testExtremePosePitchDegrees
+        detectionRevision: 1
     )
     let issuesForProjectTwo = triage(
         result,
         projectID: projectTwo,
-        detectionRevision: 1,
-        extremePoseYawDegrees: testExtremePoseYawDegrees,
-        extremePosePitchDegrees: testExtremePosePitchDegrees
+        detectionRevision: 1
     )
 
     #expect(issuesForProjectOne[0].id != issuesForProjectTwo[0].id)
@@ -325,9 +313,7 @@ func reviewIssueAffectedFaceTrackIDsDerivesFromID() throws {
     let issues = triage(
         result,
         projectID: ProjectID(rawValue: UUID()),
-        detectionRevision: 1,
-        extremePoseYawDegrees: testExtremePoseYawDegrees,
-        extremePosePitchDegrees: testExtremePosePitchDegrees
+        detectionRevision: 1
     )
 
     #expect(issues[0].affectedFaceTrackIDs == issues[0].id.affectedFaceTrackIDs)
@@ -344,16 +330,12 @@ func detectionStatusDerivesFromTriageResultCount() throws {
     let normalIssues = triage(
         detectionResult([normalFace]),
         projectID: projectID,
-        detectionRevision: 1,
-        extremePoseYawDegrees: testExtremePoseYawDegrees,
-        extremePosePitchDegrees: testExtremePosePitchDegrees
+        detectionRevision: 1
     )
     let reviewRequiredIssues = triage(
         detectionResult([smallFace]),
         projectID: projectID,
-        detectionRevision: 1,
-        extremePoseYawDegrees: testExtremePoseYawDegrees,
-        extremePosePitchDegrees: testExtremePosePitchDegrees
+        detectionRevision: 1
     )
 
     #expect(normalIssues.isEmpty)
@@ -368,9 +350,7 @@ func reviewDecisionHoldsResolutionsByIssueID() throws {
     let issues = triage(
         detectionResult([target]),
         projectID: ProjectID(rawValue: UUID()),
-        detectionRevision: 1,
-        extremePoseYawDegrees: testExtremePoseYawDegrees,
-        extremePosePitchDegrees: testExtremePosePitchDegrees
+        detectionRevision: 1
     )
     let issue = issues[0]
     let regionID = RegionID(rawValue: UUID())
