@@ -28,7 +28,7 @@ struct WorkingSourceStoreCreateTests {
         #expect(revisions?.detectionRevision == 0)
         let record = try workingSourceRecordFields(database, projectID: projectID.rawValue)
         #expect(record?.sourceFileID == fileID)
-        let queueItemCount = try database.dbQueue.read { connection in
+        let queueItemCount = try await database.dbQueue.read { connection in
             try Int.fetchOne(
                 connection,
                 sql: "SELECT count(*) FROM ExportQueueItem WHERE projectID = ?",

@@ -73,19 +73,24 @@ struct WorkingSourceStoreLifecycleTests {
         defer { try? FileManager.default.removeItem(at: url) }
         let store = WorkingSourceStoreLive(database: database)
         let projectID = ProjectID(rawValue: UUID())
-        let batchID = UUID()
+        // ExportQueueItem(batchID, projectID) は複合 UNIQUE（architecture.md 7.1）のため、
+        // 同一プロジェクトの「終端＋非終端」は別バッチとして再現する（過去バッチで完了済み・
+        // 現行バッチで書き出し中、という正当なシナリオ）。
+        let currentBatchID = UUID()
+        let pastBatchID = UUID()
         let exportingItemID = UUID()
         let completedItemID = UUID()
         try await database.dbQueue.write { connection in
             try insertProject(connection, projectID: projectID.rawValue)
             try insertWorkingSourceRecord(connection, projectID: projectID.rawValue, sourceFileID: UUID())
-            try insertBatch(connection, batchID: batchID)
+            try insertBatch(connection, batchID: currentBatchID)
+            try insertBatch(connection, batchID: pastBatchID)
             try insertExportQueueItemWithState(
-                connection, queueItemID: exportingItemID, projectID: projectID.rawValue, batchID: batchID,
+                connection, queueItemID: exportingItemID, projectID: projectID.rawValue, batchID: currentBatchID,
                 state: ExportQueueStateColumn.exporting.rawValue
             )
             try insertExportQueueItemWithState(
-                connection, queueItemID: completedItemID, projectID: projectID.rawValue, batchID: batchID,
+                connection, queueItemID: completedItemID, projectID: projectID.rawValue, batchID: pastBatchID,
                 state: ExportQueueStateColumn.completed.rawValue
             )
         }
