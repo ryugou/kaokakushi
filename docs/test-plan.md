@@ -56,6 +56,7 @@
 - `ReviewIssue` が**発生単位**で列挙され、小さい顔が 3 人なら 3 件になること
 - `lowConfidence` が顔ごとに 1 件の `ReviewIssue` になること
 - 非有限（`NaN` / 無限大）の `yawDegrees` / `pitchDegrees` が `extremePose` として安全側（要確認）に倒れること
+- `triage` が `extremePose` の閾値（yaw / pitch）を引数で受け取り、`Domain` が設定定数の型を参照しないこと
 - `ReviewIssueID` が `detectionRevision` を含み、`overlappingFaces` では顔 ID が辞書順に並ぶこと
 - `ReviewIssueID` が `projectID` を含み、同じ revision の別写真の `noFaceDetected` が別 ID になること
 - `FaceTrack` が `confidence` / `yawDegrees` / `pitchDegrees` / `rollDegrees` / `isSmallFace` を列として持ち、`triage` を再実行できること
@@ -84,7 +85,7 @@
 
 - `canEnterBatch` が `canUseProBatch` / `canUseBatchTrial` / 残クレジットから導かれること
 - `canUseProBatch` / `canUseBatchTrial` が能力で判定され、`plan = pro` かつ `status = pending` が通常一括にならないこと
-- `resolve(snapshot:usageNow:)`（`CustomerInfoSnapshot` の全状態）
+- `resolve`（`CustomerInfoSnapshot` の全状態。entitlement ID は引数注入で `Domain` が設定定数の型を参照しないこと）
 - `resolveCapabilities` が `enabledStampPacks` を引数で受け取り、`Domain` が設定定数の型を参照しないこと
 - `Plan`（`free = 1` / `standard = 2` / `pro = 3`）と `PlanStatus`（`active = 1` 〜 `revoked = 5`）の DB 列値が固定され、`case` 宣言順の変更で解釈が変わらないこと（[アーキテクチャ設計](architecture.md) の 6.2）
 - `plan = standard` かつ `status = pending` で `singleExportAccess == .metered` になること

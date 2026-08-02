@@ -352,6 +352,32 @@ func rotationDegreesNormalizationProducesSameCanonicalBytes() throws {
     #expect(bytes370 == bytes10)
 }
 
+// MARK: - 16進数リテラル固定（フィールド順の変更を検出する回帰テスト）
+
+// Data → 16進数文字列変換ヘルパ（canonicalProjectSettingsBytes の戻り値全体を1本のリテラルと比較するため）。
+private func hexString(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
+
+@Test("ProjectSettingsHashのcanonical bytesが手計算した既知の16進数リテラルと一致する")
+func projectSettingsBytesMatchesKnownHexLiteral() throws {
+    let renderSpec = try fixtureRenderSpec(regions: [try fixtureRegion1()])
+    let exportSetting = fixtureExportSetting()
+
+    let actualBytes = canonicalProjectSettingsBytes(renderSpec: renderSpec, exportSetting: exportSetting)
+
+    // 140バイトを perl の pack('N',...)/pack('d>',...) で独立に手計算（Swift 実行なし）。
+    // フィールド順は expectedProjectSettingsBytes() と同一（sourceCrop→scaleMode→background→regions→…→metadataPolicy）。
+    var expectedHex = ""
+    expectedHex += "000000000000000000000000000000003ff00000000000003ff0000000000000"   // sourceCrop=(0,0,1,1)
+    expectedHex += "00000001000000010000000100000048"   // scaleMode/background/regions.count/region1len
+    expectedHex += "3fb999999999999a3fb999999999999a3fd999999999999a3fd999999999999a"   // region1.bounds
+    expectedHex += "0000000000000000000000013fa999999999999a00000001"   // region1 rotation/shape/feather/origin
+    expectedHex += "00000003ffff00003fe999999999999a"   // region1.op=solid color/opacity
+    expectedHex += "00000001000000013ff0000000000000"   // outputAspect/outputFormat/compressionQuality
+    expectedHex += "00000000"   // metadataPolicy 4bool=false
+
+    #expect(hexString(actualBytes) == expectedHex)
+}
+
 @Test("手動領域の追加でregionsの要素数が変わりcanonical bytesが変わる")
 func addingManualRegionChangesCanonicalBytes() throws {
     let exportSetting = fixtureExportSetting()

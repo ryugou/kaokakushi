@@ -340,7 +340,9 @@ extension ReviewIssue {
 func triage(
     _ result: DetectionResult,
     projectID: ProjectID,
-    detectionRevision: Int64
+    detectionRevision: Int64,
+    extremePoseYawDegrees: Double,    // 設定定数（10 章）。Domain は設定定数の型を参照しないため注入する
+    extremePosePitchDegrees: Double
 ) -> [ReviewIssue]
 ```
 
@@ -485,7 +487,12 @@ enum PlanStatus: UInt32, Sendable, Hashable {
     case revoked = 5
 }
 
-func resolve(snapshot: CustomerInfoSnapshot, usageNow: Date) -> Entitlement
+func resolve(
+    snapshot: CustomerInfoSnapshot,
+    usageNow: Date,
+    standardEntitlementID: String,   // 設定定数（10 章）。Domain は設定定数の型を参照しないため注入する
+    proEntitlementID: String
+) -> Entitlement
 
 struct Entitlement: Sendable, Equatable {
     let plan: Plan               // free / standard / pro
@@ -504,6 +511,15 @@ struct SubscriptionState: Sendable, Equatable {
 ```
 
 **購読キャッシュの鮮度管理は RevenueCat SDK の標準キャッシュ挙動にそのまま任せる**（ADR 0005）。`Purchases.getCustomerInfo()` を既定のキャッシュポリシーで呼び、返された `CustomerInfo` をそのまま `resolve` へ渡す。
+
+##### `resolve` の導出規則
+
+1. `plan`: `activeEntitlementIDs` に `proEntitlementID` があれば `pro`、なければ `standardEntitlementID` があれば `standard`、どちらも無ければ `free`
+2. `status`: `free` は常に `active`。有料プランは `isInBillingRetry` なら `pending`（支払い保留。仕様 5.4）、それ以外は `active`
+3. `expiresAt`: 該当 entitlement ID の `expirationDates` の値（無ければ `nil`）。`free` は `nil`
+4. `lastVerifiedAt = usageNow`、`isSandbox` は snapshot の値を写す
+
+**`resolve` は `grace` / `expired` / `revoked` を生成しない。** ストアの猶予期間は RevenueCat が `expirationDates` を猶予終了まで延ばした `active` として現れ、失効・取り消しは `activeEntitlementIDs` から消えることで `free` として現れる。`PlanStatus` の残りのケースは保存済み `Entitlement`（`SubscriptionState`）が失効判定（上記）で使うために存在する。
 
 **`Plan` / `PlanStatus` の列値を固定する**（値は上記コードブロックの raw value が正本。`SubscriptionState` の DB 列としてスキーマ移行をまたぐため、`case` 宣言順に依存させない。`BatchKind`（6.4）/ `OutputState`（7.5）と同じ規則）。
 
@@ -668,7 +684,14 @@ func canEdit(
 ) -> Bool
 ```
 
-**`RenderSpec` を直接受け取らない**（判定に必要なのはスタンプの必要能力だけであり座標や強度は無関係。同じ `ProjectCapabilityRequirement` を書き出し認可の `authorizeRenderSpec`〈同 1.3〉と共有し UI と認可で判定材料を一致させる）。**`requiredPlan` の戻り値で可否を決めない**（プラン名の比較だと `status = pending` が素通りする）。作成時のプランで判定すると、Standard 時代に作ったプロジェクトが Free で編集できないのに同じ元写真を選び直せば Free の機能で同じものを作れるという説明のつかない差が生まれるため、現在の設定内容で判定する。
+**`RenderSpec` を直接受け取らない**（判定に必要なのはスタンプの必要能力だけであり座標や強度は無関係。同じ判定規則〈`premium` は `canUsePremiumStamps`、`custom` は `canUseCustomStamps`、`unknownBuiltIn` は否〉を書き出し認可の `authorizeRenderSpec`〈同 1.3〉と共有し、UI と認可で判定を一致させる。一致は契約テストで固定する）。
+
+判定規則（要求能力の対応は [書き出し Saga](export-saga.md) 1.2 の表、プランごとの能力は 6.2 の能力導出表が正本）。
+
+- `canEdit`: `premium` は `canUsePremiumStamps`、`custom` は `canUseCustomStamps` で判定する。**`unknownBuiltIn` を含む場合は常に否**（どの能力でも解消しない。認可側の `unknownBuiltInStampCode` と同じ安全側）
+- `requiredPlan`: `premium` または `custom` を含めば `standard`、いずれも無ければ `free`（スタンプ能力は `standard` と `pro` で同一のため `pro` を要求する組み合わせは存在しない）。`unknownBuiltIn` は課金で解消しないため対象外（Paywall を提示しない。同 1.3）
+
+**`requiredPlan` の戻り値で可否を決めない**（プラン名の比較だと `status = pending` が素通りする）。作成時のプランで判定すると、Standard 時代に作ったプロジェクトが Free で編集できないのに同じ元写真を選び直せば Free の機能で同じものを作れるという説明のつかない差が生まれるため、現在の設定内容で判定する。
 
 | 操作 | Free 範囲のプロジェクト | 有料スタンプを含むプロジェクト |
 | --- | --- | --- |
@@ -853,9 +876,10 @@ let remainingCredits = max(0, policy.trialCreditCount - usageLedger.trialConsume
 **一括処理の制限なし利用は `canUseProBatch` が必要。** `canUseBatchTrial` だけを持つ利用者は、残クレジットの範囲で一括処理を実行できる。
 
 ```swift
-let canEnterBatch =
+func canEnterBatch(capabilities: ResolvedCapabilities, remainingCredits: Int) -> Bool {
     capabilities.canUseProBatch ||
     (capabilities.canUseBatchTrial && remainingCredits > 0)
+}
 ```
 
 **残クレジットが 0 になれば一括処理画面を閉じる**（勘定の単位は「受け渡した成果物」であり素材の同一性を問わないため、消費済みの写真を無料で再処理できる経路は無い。ADR 0006）。**判定に `Plan` を使わない**（料金表や説明文でのプラン名使用は構わないが、実装上の条件式はすべて能力で書く）。
@@ -2171,6 +2195,7 @@ struct CrashContext: Sendable, Equatable {
 | `customStampMaxEdgePixels` | 1,024 |
 | `interstitialAdExportInterval` | 3 |
 | `enabledStampPacks` | 同梱の全パック |
+| `standardEntitlementID` / `proEntitlementID` | `"standard"` / `"pro"`（RevenueCat の entitlement 識別子） |
 
 値の根拠・変更履歴は [運用](operations.md) が正本。**障害時は緊急アップデートで対応する**（ADR 0005）。取得失敗という状態が存在しないため、既定値へのフォールバックも不要。
 

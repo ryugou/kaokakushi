@@ -7,8 +7,9 @@ import Foundation
 // （architecture.md 12 章「未決事項」: 「暫定運用: v1 初期リリースでは lowConfidence の
 // トリアージを無効（閾値未設定）で出し、実測後の更新で有効化する」との確定済み方針）。
 //
-// `extremePose` の角度閾値は同じく 12 章の確定方針どおり yaw / pitch 45° を暫定値として使う
-// （「実測後に確定する」）。
+// `extremePose` の角度閾値（暫定 yaw / pitch 45°。12 章「実測後に確定する」）は Domain が
+// 設定定数の型を参照できないため、`triage` の引数として呼び出し側から注入する
+// （architecture.md 6.1 のシグネチャ）。
 
 public enum ReviewReason: Sendable, Hashable {
     case noFaceDetected
@@ -83,14 +84,12 @@ private let edgeCheckExpandTop = 0.25
 private let edgeCheckExpandBottom = 0.15
 private let edgeCheckExpandSide = 0.15
 
-// extremePose の暫定角度閾値（architecture.md 12 章「未決事項」。実測後に確定する）。
-private let extremePoseYawDegrees = 45.0
-private let extremePosePitchDegrees = 45.0
-
 public func triage(
     _ result: DetectionResult,
     projectID: ProjectID,
-    detectionRevision: Int64
+    detectionRevision: Int64,
+    extremePoseYawDegrees: Double,
+    extremePosePitchDegrees: Double
 ) -> [ReviewIssue] {
     if result.faces.isEmpty {
         let id = ReviewIssueID(
@@ -116,7 +115,13 @@ public func triage(
         reason: .extremePose,
         projectID: projectID,
         detectionRevision: detectionRevision,
-        matches: isExtremePose
+        matches: { face in
+            isExtremePose(
+                face,
+                extremePoseYawDegrees: extremePoseYawDegrees,
+                extremePosePitchDegrees: extremePosePitchDegrees
+            )
+        }
     )
     issues += singleFaceIssues(
         faces,
@@ -149,7 +154,11 @@ private func singleFaceIssues(
     }
 }
 
-private func isExtremePose(_ face: DetectedFace) -> Bool {
+private func isExtremePose(
+    _ face: DetectedFace,
+    extremePoseYawDegrees: Double,
+    extremePosePitchDegrees: Double
+) -> Bool {
     // 非有限（NaN/無限大）は安全側（extremePose扱い）へ倒す（architecture.md 6.1）。
     // NaNは`abs(NaN) > threshold`が常にfalseになり素通しされるため、先に明示チェックする。
     guard face.yawDegrees.isFinite, face.pitchDegrees.isFinite else {
@@ -191,7 +200,7 @@ private func overlappingFacesIssues(
             guard overlaps(first.bounds, second.bounds) else { continue }
 
             let pair = [first.faceTrackID, second.faceTrackID]
-                .sorted { $0.rawValue.uuidString < $1.rawValue.uuidString }
+                .sorted { faceTrackIDBytes($0).lexicographicallyPrecedes(faceTrackIDBytes($1)) }
             let id = ReviewIssueID(
                 projectID: projectID,
                 detectionRevision: detectionRevision,
@@ -202,6 +211,12 @@ private func overlappingFacesIssues(
         }
     }
     return issues
+}
+
+// UUID の16バイトを符号なしバイト列として辞書順に比較するための配列化
+// （canonical-schema.md 2.1「unordered な集合に UUID を含む場合」の規則）。
+private func faceTrackIDBytes(_ faceTrackID: FaceTrackID) -> [UInt8] {
+    withUnsafeBytes(of: faceTrackID.rawValue.uuid) { Array($0) }
 }
 
 private func overlaps(_ lhs: NormalizedRect, _ rhs: NormalizedRect) -> Bool {
