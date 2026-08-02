@@ -95,19 +95,17 @@ struct ManagedFileStoreTests {
         let store = ManagedFileStoreLive(directories: directories)
         let expectedDirectory = directories.directory(for: kind)
 
-        let expectedStandardized = expectedDirectory.standardizedFileURL
+        let expectedPath = expectedDirectory.standardizedFileURL.path
 
         let created = try await store.createFile(kind: kind) { url in
-            #expect(url.deletingLastPathComponent().standardizedFileURL == expectedStandardized)
+            #expect(url.deletingLastPathComponent().standardizedFileURL.path == expectedPath)
             try Data("payload".utf8).write(to: url)
         }
 
-        var observedReadURL: URL?
+        // 可変キャプチャは Swift 6 strict concurrency で不可のため、クロージャ内で直接検証する。
         _ = try await store.withReadAccess(created.ref) { url in
-            observedReadURL = url
+            #expect(url.deletingLastPathComponent().standardizedFileURL.path == expectedPath)
         }
-        let observedParent = observedReadURL?.deletingLastPathComponent().standardizedFileURL
-        #expect(observedParent == expectedStandardized)
     }
 
     @Test("deleteが対象ファイルを実際に削除すること")
