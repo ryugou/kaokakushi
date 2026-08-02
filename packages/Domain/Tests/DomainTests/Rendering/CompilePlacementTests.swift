@@ -121,3 +121,82 @@ func sourcePlacementFitThrowsInvalidRectWhenScaledSizeExceedsIntRange() throws {
         try compileRenderDraft(spec: spec, sourceSize: makeSize(1, 1), targetSize: makeSize(Int.max, Int.max))
     }
 }
+
+// MARK: - 5. fillのsourceRectは常に入力sourceRectの部分集合になる（丸め誤差での逸脱の回帰）
+//
+// バグ: cropHeight = sourceWidth / canvasAspect（またはcropWidthの対称式）は、sourceRectと
+// キャンバスの縦横比がほぼ一致する場合、浮動小数点誤差でcropHeightが実際のsourceHeightをごく
+// わずかに上回ることがある。この結果insetYが負の微小値になり、floorToInt(top)が入力
+// sourceRect.topより1小さい値になる。「中央で切り詰める（cover）」契約（image-pipeline.md
+// 2章）に反し、出力sourceRectが入力より広がってしまう（MediaKit側の範囲外アクセスに繋がる）。
+// source幅1×高さ49・canvas幅1×高さ49（縦横比完全一致）が既知の再現例（修正前はtop == -1）。
+
+@Test(
+    "scaleMode=fillの出力sourceRectは入力sourceRectの部分集合になる（縦横比一致・不一致の複数ケース）",
+    arguments: [
+        (1, 49, 1, 49),
+        (200, 100, 100, 100),
+        (100, 200, 100, 100),
+        (306, 101, 100, 100),
+        (200, 100, 2, 1)
+    ]
+)
+func fillSourceRectIsSubsetOfInputSourceRect(
+    sourceWidth: Int, sourceHeight: Int, canvasWidth: Int, canvasHeight: Int
+) throws {
+    let spec = makeSpec(sourceCrop: try makeRect(left: 0, top: 0, right: 1, bottom: 1), scaleMode: .fill)
+    let sourceSize = makeSize(sourceWidth, sourceHeight)
+    let canvasSize = makeSize(canvasWidth, canvasHeight)
+    let draft = try compileRenderDraft(spec: spec, sourceSize: sourceSize, targetSize: canvasSize)
+
+    let inputSourceRect = PixelRect(left: 0, top: 0, rightExclusive: sourceWidth, bottomExclusive: sourceHeight)
+    let outputSourceRect = draft.sourcePlacement.sourceRect
+
+    #expect(outputSourceRect.left >= inputSourceRect.left)
+    #expect(outputSourceRect.top >= inputSourceRect.top)
+    #expect(outputSourceRect.rightExclusive <= inputSourceRect.rightExclusive)
+    #expect(outputSourceRect.bottomExclusive <= inputSourceRect.bottomExclusive)
+}
+
+@Test(
+    "scaleMode=fillのdestinationRectは常にキャンバス内に収まる（縦横比一致・不一致の複数ケース）",
+    arguments: [
+        (1, 49, 1, 49),
+        (200, 100, 100, 100),
+        (100, 200, 100, 100),
+        (306, 101, 100, 100)
+    ]
+)
+func fillDestinationRectStaysWithinCanvasBounds(
+    sourceWidth: Int, sourceHeight: Int, canvasWidth: Int, canvasHeight: Int
+) throws {
+    let spec = makeSpec(sourceCrop: try makeRect(left: 0, top: 0, right: 1, bottom: 1), scaleMode: .fill)
+    let sourceSize = makeSize(sourceWidth, sourceHeight)
+    let canvasSize = makeSize(canvasWidth, canvasHeight)
+    let draft = try compileRenderDraft(spec: spec, sourceSize: sourceSize, targetSize: canvasSize)
+
+    let destinationRect = draft.sourcePlacement.destinationRect
+    #expect(destinationRect.left >= 0)
+    #expect(destinationRect.top >= 0)
+    #expect(destinationRect.rightExclusive <= canvasWidth)
+    #expect(destinationRect.bottomExclusive <= canvasHeight)
+}
+
+@Test(
+    "scaleMode=fillは縦横比が完全一致する場合、出力sourceRectが入力と完全一致する（切り詰めがno-op）",
+    arguments: [
+        (1, 49, 1, 49),
+        (200, 100, 2, 1)
+    ]
+)
+func fillSourceRectIsNoOpWhenAspectRatiosMatchExactly(
+    sourceWidth: Int, sourceHeight: Int, canvasWidth: Int, canvasHeight: Int
+) throws {
+    let spec = makeSpec(sourceCrop: try makeRect(left: 0, top: 0, right: 1, bottom: 1), scaleMode: .fill)
+    let sourceSize = makeSize(sourceWidth, sourceHeight)
+    let canvasSize = makeSize(canvasWidth, canvasHeight)
+    let draft = try compileRenderDraft(spec: spec, sourceSize: sourceSize, targetSize: canvasSize)
+
+    let inputSourceRect = PixelRect(left: 0, top: 0, rightExclusive: sourceWidth, bottomExclusive: sourceHeight)
+    #expect(draft.sourcePlacement.sourceRect == inputSourceRect)
+}

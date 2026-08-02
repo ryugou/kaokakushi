@@ -210,7 +210,9 @@ private func fitDestinationRect(sourceRect: PixelRect, canvasSize: PixelSize) th
 /// fill（cover）用に `sourceRect` をキャンバス縦横比へ中央で切り詰める。`fitDestinationRect`
 /// が fit の配置式を担うのに対し、こちらは fill の切り詰め式を担う。
 /// 計算は元画像ピクセル空間の `Double` で行い、最終結果のみ `floorToInt`/`ceilToInt`
-/// （4章「ピクセルへの丸め」と同じ外側へ広がる丸め）で `PixelRect` 化する。
+/// （4章「ピクセルへの丸め」と同じ外側へ広がる丸め）で `PixelRect` 化する。丸め後は入力
+/// `sourceRect` の範囲へクランプし、縦横比がほぼ一致するケースの浮動小数点誤差で
+/// 切り詰め結果が入力より広がらないことを保証する。
 private func fillSourceRect(sourceRect: PixelRect, canvasSize: PixelSize) -> PixelRect {
     let sourceWidth = Double(sourceRect.rightExclusive - sourceRect.left)
     let sourceHeight = Double(sourceRect.bottomExclusive - sourceRect.top)
@@ -234,11 +236,20 @@ private func fillSourceRect(sourceRect: PixelRect, canvasSize: PixelSize) -> Pix
     let left = Double(sourceRect.left) + insetX
     let top = Double(sourceRect.top) + insetY
 
+    // cropWidth/cropHeightが浮動小数点誤差でsourceWidth/sourceHeightをごくわずかに上回ると、
+    // floor/ceil後のleft/topが負に、right/bottomがsourceRectの外にはみ出しうる。「中央で
+    // 切り詰める」契約は出力が入力の部分集合であることを要求するため、その方向にのみ
+    // クランプする（丸め方向floor/ceil自体はここでは変更しない）。
+    let clampedLeft = max(floorToInt(left), sourceRect.left)
+    let clampedTop = max(floorToInt(top), sourceRect.top)
+    let clampedRight = min(ceilToInt(left + cropWidth), sourceRect.rightExclusive)
+    let clampedBottom = min(ceilToInt(top + cropHeight), sourceRect.bottomExclusive)
+
     return PixelRect(
-        left: floorToInt(left),
-        top: floorToInt(top),
-        rightExclusive: ceilToInt(left + cropWidth),
-        bottomExclusive: ceilToInt(top + cropHeight)
+        left: clampedLeft,
+        top: clampedTop,
+        rightExclusive: clampedRight,
+        bottomExclusive: clampedBottom
     )
 }
 
