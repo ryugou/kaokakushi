@@ -18,8 +18,8 @@ import Foundation
 //
 // `PickedPhotoLoader` / `FaceDetector` / `ImageEffectRenderer` 等のプロトコルと
 // `WorkingSourceRecord` 系（Task 4）はスコープ外（spec 参照）。
-// `StampRasterizer` は Rendering/StampRasterizer.swift、`RasterizedStampAsset` は
-// Rendering/Compile.swift に実装済み（3 章）。
+// `StampRasterizer` と `RasterizedStampAsset` は Rendering/StampRasterizer.swift に
+// 実装済み（3 章）。
 
 /// 画像フォーマット。
 public enum ImageFormat: Sendable, Hashable {
