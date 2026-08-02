@@ -116,12 +116,12 @@ func fakeStampStoreForwardsArguments() async throws {
     )
     let store = FakeStampStore(importResult: (expectedStamp, expectedStamp.assetHash))
 
-    nonisolated(unsafe) var bodyReceivedURL: URL?
+    // 可変キャプチャを作らず、渡された URL をクロージャ内で直接検証する
+    // （Swift 6 strict concurrency で nonisolated(unsafe) の回避を使わないため。Copilot 指摘）。
     let result = try await store.importCustomStamp { url in
-        bodyReceivedURL = url
+        #expect(url.lastPathComponent == "import")
     }
     #expect(result.stamp == expectedStamp)
-    #expect(bodyReceivedURL?.lastPathComponent == "import")
 
     _ = try await store.loadCustomStamps()
 

@@ -8,26 +8,6 @@ import Foundation
 // 正本にコードで明示されていない箇所（fit/fill の具体的な配置式）はオーケストレータが
 // 確定した仕様として下記の各関数コメントに明記する。
 //
-// `RasterizedStampAsset` は image-pipeline.md 3章「スタンプラスタライズ」の
-// 「ラスタ画像の受け渡し契約」小節からの転記。bindRasterAssets のシグネチャに必須のため
-// Task 7 で追加する。どのタスクにも明示割当が無いことをオーケストレータが確認済み。
-
-// MARK: - RasterizedStampAsset（image-pipeline.md 3章からの転記）
-
-/// スタンプラスタライズの戻り値。`CGImage` を Domain の型へ入れられないため、
-/// 実体を指す形式として定める（image-pipeline.md 3章「ラスタ画像の受け渡し契約」）。
-public struct RasterizedStampAsset: Sendable {
-    public let bitmapID: String
-    public let rasterFile: RasterFileRef
-    public let descriptor: RawBitmapDescriptor
-
-    public init(bitmapID: String, rasterFile: RasterFileRef, descriptor: RawBitmapDescriptor) {
-        self.bitmapID = bitmapID
-        self.rasterFile = rasterFile
-        self.descriptor = descriptor
-    }
-}
-
 // MARK: - expand（image-pipeline.md 1章「拡張率の適用」）
 
 /// 4 方向の拡張比を矩形へ適用した生座標。image-pipeline.md 1 章の拡張式の唯一の実装で、
