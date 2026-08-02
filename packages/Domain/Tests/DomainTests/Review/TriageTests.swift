@@ -358,3 +358,43 @@ func reviewDecisionHoldsResolutionsByIssueID() throws {
 
     #expect(decision.resolutions[issue.id] == .manualRegionAdded(regionID: regionID))
 }
+
+// MARK: - 閾値注入の直接検証（暫定ラッパーを経由せずDomain.triageを直接呼び出す）
+//
+// ファイル冒頭のprivate triage(...)は暫定閾値45.0を固定するラッパーであり、注入経路
+// そのものは検証しない。ここではDomain.triageを直接呼びyaw/pitchの閾値を変えて発火が
+// 切り替わることを固定する。
+
+// (yawDegrees, pitchDegrees, thresholdDegrees, expectedFires)
+// swiftlint:disable:next large_tuple
+private let triageThresholdInjectionCases: [(Double, Double, Double, Bool)] = [
+    (30.0, 0.0, 20.0, true),
+    (30.0, 0.0, 40.0, false),
+    (0.0, 30.0, 20.0, true),
+    (0.0, 30.0, 40.0, false)
+]
+
+@Test(
+    "extremePoseYawDegrees/extremePosePitchDegreesの注入値で発火が切り替わる",
+    arguments: triageThresholdInjectionCases
+)
+func triageExtremePoseRespectsInjectedThreshold(
+    yawDegrees: Double,
+    pitchDegrees: Double,
+    thresholdDegrees: Double,
+    expectedFires: Bool
+) throws {
+    let target = try face(yawDegrees: yawDegrees, pitchDegrees: pitchDegrees)
+    let result = detectionResult([target])
+
+    let issues = Domain.triage(
+        result,
+        projectID: ProjectID(rawValue: UUID()),
+        detectionRevision: 1,
+        extremePoseYawDegrees: thresholdDegrees,
+        extremePosePitchDegrees: thresholdDegrees
+    )
+
+    let fired = issues.contains { $0.id.reason == .extremePose }
+    #expect(fired == expectedFires)
+}
