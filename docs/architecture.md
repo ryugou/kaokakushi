@@ -359,6 +359,10 @@ func triage(
 | `lowConfidence` | `confidence` が閾値未満 | 検出器自身が確信を持てていない |
 | `extremePose` | `yawDegrees` または `pitchDegrees` の絶対値が閾値超過 | 検出はできているが、**拡張率の既定値では隠しきれない**可能性がある |
 
+**非有限（`NaN` / 無限大）の `yawDegrees` / `pitchDegrees` は `extremePose` として扱う**（`NaN` は比較が常に偽になるため、素通しすると破損した検出結果が要確認判定を通過する。安全側へ倒す）。
+
+**`faceAtEdge` は、既定拡張率（上 25% / 下 15% / 左右 15%。[画像処理](image-pipeline.md) 1 章）を顔矩形へ適用した結果が画像境界（0 以下または 1 以上）に接する場合に発生する**（拡張式は `expand` と共有する。利用者が拡張率を変更しても判定は既定拡張率で行う — 要確認判定は「既定でも隠しきれない可能性」の検出であり、設定に追従させると判定が利用者操作で変わる）。
+
 ##### 再検出時は対応づけを試みない
 
 **「再検出しても同じ顔へ同じ ID が付く」とは保証できない**（検出順が変わるだけで別の `faceTrackID` になりうる）。誤った対応づけは別人の顔の判断をこの顔の判断として扱うことになり、匿名化確認として最悪の失敗となる。
@@ -465,20 +469,20 @@ struct CustomerInfoSnapshot: Sendable, Equatable {
     let isSandbox: Bool                     // サンドボックス購読の区分（下記）
 }
 
-/// 契約の等級。固定番号は正準スキーマ 3 章
-enum Plan: Sendable, Hashable, Comparable {
-    case free
-    case standard
-    case pro
+/// 契約の等級。raw value は DB 列値（スキーマ移行をまたぐため固定。下記）
+enum Plan: UInt32, Sendable, Hashable, Comparable {
+    case free = 1
+    case standard = 2
+    case pro = 3
 }
 
-/// 契約の状態。pending は支払い保留（仕様 5.4）
-enum PlanStatus: Sendable, Hashable {
-    case active
-    case grace
-    case pending
-    case expired
-    case revoked
+/// 契約の状態。pending は支払い保留（仕様 5.4）。raw value は DB 列値
+enum PlanStatus: UInt32, Sendable, Hashable {
+    case active = 1
+    case grace = 2
+    case pending = 3
+    case expired = 4
+    case revoked = 5
 }
 
 func resolve(snapshot: CustomerInfoSnapshot, usageNow: Date) -> Entitlement
@@ -500,6 +504,8 @@ struct SubscriptionState: Sendable, Equatable {
 ```
 
 **購読キャッシュの鮮度管理は RevenueCat SDK の標準キャッシュ挙動にそのまま任せる**（ADR 0005）。`Purchases.getCustomerInfo()` を既定のキャッシュポリシーで呼び、返された `CustomerInfo` をそのまま `resolve` へ渡す。
+
+**`Plan` / `PlanStatus` の列値を固定する**（値は上記コードブロックの raw value が正本。`SubscriptionState` の DB 列としてスキーマ移行をまたぐため、`case` 宣言順に依存させない。`BatchKind`（6.4）/ `OutputState`（7.5）と同じ規則）。
 
 ##### `isSandbox` の用途
 
@@ -553,7 +559,8 @@ enum SubscriptionCacheState: Sendable {
 
 func resolveCapabilities(
     _ state: SubscriptionCacheState,
-    usageNow: Date
+    usageNow: Date,
+    enabledStampPacks: Set<String>   // 設定定数（10 章）。Domain は設定定数の型を参照しないため注入する
 ) -> CapabilityResolution
 ```
 
@@ -570,6 +577,23 @@ func resolveCapabilities(
 **`verificationRequired` は「Free として動かす」ことではない。** 有料機能を新規に付与せず、書き出しの認可も開始しない（未検証での有料機能付与と、正当な利用者の無言降格の両方を避ける）。
 
 **`enabledStampPacks` を能力解決の内側で `ResolvedCapabilities` へ写す**（`Domain` の判定関数は設定定数の型を参照しないため。3.3）。
+
+##### `Entitlement` → `ResolvedCapabilities` の導出
+
+1. **`expiresAt` を過ぎていれば `status` に関わらず Free 相当**（失効判定を最初に行う）
+2. **`status` が `pending` / `expired` / `revoked` なら Free 相当**（`pending` では有料機能を付与しない。仕様 5.4）
+3. `status` が `active` / `grace` なら `plan` の行を適用する
+
+| 能力 | `free`（および Free 相当） | `standard` | `pro` |
+| --- | --- | --- | --- |
+| `singleExportAccess` | `metered` | `unlimited` | `unlimited` |
+| `canUsePremiumStamps` | ✕ | ○ | ○ |
+| `canUseCustomStamps` | ✕ | ○ | ○ |
+| `canUseProBatch` | ✕ | ✕ | ○ |
+| `canUseBatchTrial` | ○ | ○ | **✕**（通常一括が使えるため） |
+| `shouldShowAds` | ○ | ✕ | ✕ |
+
+`enabledStampPacks` はどの行でも設定定数（10 章）の値をそのまま写す。
 
 **`Plan` を参照してよいのは能力解決の内側だけとする**（クォータ判定・広告頻度・開始ゲート・一括可否・編集可否・UI 活性制御はすべて `ResolvedCapabilities` を見る。`Plan` を渡すと `status = pending` でも `plan != free` が成立し規則を迂回する）。**「確認できない」を型で表す**（`ResolvedCapabilities` を必ず返す関数では `metered` は暗黙降格、`unlimited` は未検証付与になるため `verificationRequired` を独立させる）。
 
@@ -998,21 +1022,17 @@ struct BatchPolicySnapshot: Sendable, Equatable {
     let concurrencyLimit: Int32
 }
 
-/// このバッチが Pro の通常一括かトライアルか。作成時に確定する
-enum BatchKind: Sendable, Hashable {
-    case proBatch      // canUseProBatch による通常の一括処理
-    case trial         // クレジット消費による一括トライアル
+/// このバッチが Pro の通常一括かトライアルか。作成時に確定する。
+/// raw value は DB 列値（スキーマ移行をまたぐため固定。下記）
+enum BatchKind: UInt32, Sendable, Hashable {
+    case proBatch = 1  // canUseProBatch による通常の一括処理
+    case trial = 2     // クレジット消費による一括トライアル
 }
 ```
 
 `Batch` の行が保持し再起動後も同じ値を使う（読み直して適用すると復元したバッチの上限が実行中に変わってしまう）。
 
-| `BatchKind` | DB 列値 |
-| --- | --- |
-| `proBatch` | **1** |
-| `trial` | **2** |
-
-**列値を固定する**（`Batch` の DB 列としてスキーマ移行をまたぐため、`case` 宣言順に依存させると版によって `trial` のバッチが `proBatch` として上限 50 でクランプされうる。`OutputState` と同じ規則。7.5）。新しいバッチの作成時は、その時点の設定定数（10 章）から作る。
+**列値を固定する**（値は上記コードブロックの raw value が正本。`Batch` の DB 列としてスキーマ移行をまたぐため、`case` 宣言順に依存させると版によって `trial` のバッチが `proBatch` として上限 50 でクランプされうる。`OutputState` と同じ規則。7.5）。新しいバッチの作成時は、その時点の設定定数（10 章）から作る。
 
 ##### 読み出しのたびに hard max へクランプする
 
@@ -1526,7 +1546,8 @@ protocol ProtectedDataAvailability: Sendable {
 **消費は完了操作（単一トランザクション）で確定するため、生成そのものは何も消費しない**（ADR 0006）。**完了前（`settledAt == nil`）の出力は永続保護しない。** アプリの再起動やフローからの離脱で破棄する（消費していないため損失は操作の手間だけ。起動時復旧が未確定の `OutputRecord` を削除する）。**24 時間の保持規則は完了済みで未受け渡しの出力にのみ適用する。**
 
 ```swift
-enum OutputState: Sendable, Equatable { case generated, deliveryUnknown, delivered }
+// raw value は DB 列値（スキーマ移行をまたぐため固定。下表）
+enum OutputState: UInt32, Sendable, Equatable { case generated = 1, deliveryUnknown = 2, delivered = 3 }
 
 extension OutputRecord {
     /// 受け取れていない可能性がある。判定はすべてこの述語を使う（settledAt != nil が前提）
@@ -1536,11 +1557,11 @@ extension OutputRecord {
 }
 ```
 
-| 状態 | DB 列値 | 意味 | 保持する期間 |
-| --- | --- | --- | --- |
-| `generated` | 1 | 生成済み。受け渡しは未成功 | `settledAt == nil` の間は保護しない。完了後は明示的に破棄するまで、または 24 時間経過するまで |
-| `deliveryUnknown` | 2 | 写真ライブラリ保存の結果が不明（[書き出し Saga](export-saga.md)） | 完了済みの出力のみ到達する。同上 |
-| `delivered` | 3 | 保存または共有が 1 回以上成功した | **完了画面を離れるまで** |
+| 状態 | 意味 | 保持する期間 |
+| --- | --- | --- |
+| `generated` | 生成済み。受け渡しは未成功 | `settledAt == nil` の間は保護しない。完了後は明示的に破棄するまで、または 24 時間経過するまで |
+| `deliveryUnknown` | 写真ライブラリ保存の結果が不明（[書き出し Saga](export-saga.md)） | 完了済みの出力のみ到達する。同上 |
+| `delivered` | 保存または共有が 1 回以上成功した | **完了画面を離れるまで** |
 
 **`OutputRecord` は `settledAt: Date?` を持つ**（生成直後は `nil`。出力確認画面での明示的な完了操作で、消費・`ExportRecord` 作成などと同一トランザクションで確定する。[書き出し Saga](export-saga.md) が正本）。**保存・共有および 24 時間保持の対象は `settledAt != nil` の行に限る**（未確定の出力は受け渡しへ進めない。8 章）。**`OutputRecord.projectID` の一意性は未確定（`settledAt IS NULL`）の行に限る**（部分 UNIQUE。7.1）。
 
@@ -1971,7 +1992,7 @@ enum SourceRepresentation: Sendable, Equatable {
     case transcoded    // OS が変換した派生データしか取得できなかった
 }
 
-/// EXIF の撮影日時。ローカル表記とオフセットを分けて保持する（正準スキーマ 5.1.1）
+/// EXIF の撮影日時。ローカル表記とオフセットを分けて保持する（正準スキーマ 5.1）
 struct OriginalCaptureMetadata: Sendable, Equatable {
     let dateTimeOriginal: String?      // "YYYY:MM:DD HH:MM:SS"
     let subSecTimeOriginal: String?
@@ -1988,7 +2009,7 @@ struct OutputMetadata: Sendable, Equatable {
 }
 ```
 
-**`utcMillis` は `offsetTimeOriginal` がある場合にだけ入り、無い場合は `nil`（端末のタイムゾーンで補完しない。正準スキーマ 5.1.1）。** ローカル表記をそのまま持つのは出力 EXIF へ書き戻すため（UTC 変換後の再構築は往復誤差が出る）。**`representation` が `transcoded`（取得経路が元データを返さなかった）でも取得を拒否しない**（取得できた表現からそのまま処理する。9.1 の診断区分値としてのみ記録する）。
+**`utcMillis` は `offsetTimeOriginal` がある場合にだけ入り、無い場合は `nil`（端末のタイムゾーンで補完しない。正準スキーマ 5.1）。** ローカル表記をそのまま持つのは出力 EXIF へ書き戻すため（UTC 変換後の再構築は往復誤差が出る）。**`representation` が `transcoded`（取得経路が元データを返さなかった）でも取得を拒否しない**（取得できた表現からそのまま処理する。9.1 の診断区分値としてのみ記録する）。
 
 **`Project` は `capture: OriginalCaptureMetadata?` / `sourceRepresentation: SourceRepresentation` / `libraryCreationDate: Date?`（`PHAsset.creationDate` 由来。取得できる場合のみ）を直接フィールドとして持つ**（7.1。素材ごとの中間 snapshot は持たない）。
 

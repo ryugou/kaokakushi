@@ -83,12 +83,14 @@ DetectedFace(
 ##### 拡張率の適用
 
 ```swift
-func expand(face: NormalizedRect, effect: EffectSetting) -> NormalizedRect
+func expand(face: NormalizedRect, effect: EffectSetting) throws -> NormalizedRect
 ```
 
 既定値は上 25% / 下 15% / 左右 15%（仕様 8.4）。スタンプはモザイクより大きめの拡張率を用います。
 
 **画像外へはみ出す場合もクランプしません。** クランプすると顔が露出する方向へ倒れます。はみ出しはマスク描画側で処理します。
+
+**拡張後の座標が `NormalizedRect` の上限（絶対値 16。4 章）を超える場合は `invalidRect` を throw します**（クランプで黙って直さない。検出結果の顔（[0, 1]）に既定拡張率を適用する通常経路では起こらない）。
 
 ## 2. RenderSpec / RenderDraft / RenderPlan
 
@@ -265,6 +267,17 @@ enum BackgroundOp: Sendable {
 
 `BackgroundOp.blur(sigmaPx:)` ではなく `blurFromSource` にしたのは、`sigma` だけでは「元画像全体をぼかすのか、切り抜き範囲をぼかすのか、どの倍率で敷くのか」が決まらないためです。一般的な用途では `sourceRect` に元画像全体を指定し、`fill` でキャンバス全面へ拡大します。
 
+##### `SourcePlacement` の配置規則
+
+`compileRenderDraft` が配置を完全に確定し、`MediaKit` は比率計算を行いません。
+
+| `scaleMode` | 規則 |
+| --- | --- |
+| `fit` | 縦横比を保ったままキャンバスへ収まる最大サイズへスケールし、中央配置する。`sourceRect` は変更しない。スケール後の幅・高さは最近接整数へ丸め（`.5` は 0 から遠い方）、中央配置で 1px の端数が出る場合は余白を右・下側へ付ける（画像は左・上寄り） |
+| `fill` | `destinationRect` はキャンバス全面。**`sourceRect` をキャンバスの縦横比に合わせて中央で切り詰める**（cover）。切り詰めは元画像ピクセル空間の `Double` で計算してから「ピクセルへの丸め」（4 章）を適用する |
+
+いずれも `sourceRect → destinationRect` の変換は一様スケールになります。`fill` を単純な矩形間ストレッチにすると、`outputAspect` と `sourceCrop` の縦横比が異なる場合に写真が非一様に歪みます。
+
 `RenderRegion.bounds` の基準を出力キャンバスに確定します。元画像基準にすると `MediaKit` が切り抜き変換を再実装することになります。
 
 ##### `sourceCrop` の不変条件
@@ -352,6 +365,7 @@ struct NormalizedRect: Sendable, Hashable {
     init(left: Double, top: Double, rightExclusive: Double, bottomExclusive: Double) throws {
         // すべて有限。left < rightExclusive、top < bottomExclusive
         // 画像外へのはみ出し（負数・1.0 超過）は許す
+        // ただし各座標の絶対値は 16 以下（下記）
     }
 }
 ```
@@ -549,8 +563,11 @@ struct RasterizedStampAsset: Sendable {
 | +Y | **下方向** |
 | `left` / `top` | 含む（inclusive） |
 | `right` / `bottom` | **含まない（exclusive）** |
+| 各座標の絶対値 | **16 以下**（違反は `invalidRect`） |
 
 原点を「向き正規化後」と明記するのは、EXIF の回転を適用する前後で左上の位置が変わるためです。
+
+**絶対値 16 の上限は正規化座標空間として意味を持つ範囲の構造的保証です。** 正当な値は元画像・キャンバス基準の [0, 1] とそこからのはみ出し（`expand()` の最大拡張率 2.0 でも [-2, 3]）に収まります。上限が無いと拡張（1 章）やピクセル変換（本章）の演算が浮動小数点オーバーフローに達しうるため、入力型で保証します。
 
 値域は段階によって異なります。
 
@@ -572,9 +589,11 @@ struct RasterizedStampAsset: Sendable {
 
 領域が必ず**外側へ広がる**方向に丸められます。内側へ丸めると顔の縁が 1 ピクセル露出しえます。
 
+**変換結果が有限でない、または `Int` で表現できない場合は `compileRenderDraft` が `invalidRect` を throw します**（極端な座標×解像度の積が `Double` のオーバーフローや `Int` 変換の trap になる経路を、クラッシュではなく検証エラーとして返す）。
+
 ##### 適用順
 
-1. `sourceCrop` で元画像を切り出す
+1. `SourcePlacement.sourceRect` で元画像を切り出す（`fill` では `sourceCrop` をさらにキャンバス比率へ中央切り詰めした範囲。2 章「`SourcePlacement` の配置規則」）
 2. `canvasSize` のキャンバスへ配置し、余白を `background` で埋める
 3. `regions` を `order` の昇順に、前の結果へ重ねて適用する
 

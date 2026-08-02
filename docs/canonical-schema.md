@@ -3,7 +3,7 @@
 | 項目 | 内容 |
 | --- | --- |
 | 目的 | 確認用ハッシュ（設定変更検出・スタンプ重複排除）の入力バイト表現と、出力メタデータに使う撮影日時解釈を一意に定める |
-| 読者 | `Persistence` の実装者、ハッシュまわりのテスト作成者 |
+| 読者 | `Domain`（正準エンコーダ）と `Persistence` の実装者、ハッシュまわりのテスト作成者 |
 | 正本の範囲 | 符号化規則、ハッシュ入力に使う `enum` の固定番号、設定ハッシュ 2 種 / `StampAssetHash` の定義、EXIF 撮影日時の解釈 |
 | 関連 | [アーキテクチャ設計](architecture.md)、[画像処理](image-pipeline.md)（`RenderSpec` の型宣言）、[書き出し Saga](export-saga.md)（設定ハッシュの利用箇所）、[テスト計画](test-plan.md)（ゴールデンテスト） |
 
@@ -35,7 +35,7 @@
 | `Optional` | **`0` / `1` のタグ** ＋ 値（`nil` はタグのみ） |
 | `String` | **UTF-8** バイト列（長さ前置き） |
 | コレクション | **先頭に `UInt32` の要素数**、各要素は長さ前置き |
-| **unordered collection** | 各要素を符号化し、**バイト列の辞書順にソート**してから連結 |
+| **unordered collection** | 各要素を符号化（**長さ前置きを含む**）した後のバイト列を**辞書順にソート**してから連結 |
 | **ordered array** | **元の順序を保持する。ソートしない** |
 
 ### 2.1 ordered と unordered の分類
@@ -217,6 +217,21 @@ PreviewRenderHash =
 | スキーマ変更 | 分離子を `-v2` へ上げる |
 
 既知の `RenderSpec` と `ExportSetting` から生成したゴールデンバイト列を、**2 種類のハッシュそれぞれについて**テストへ埋め込みます。
+
+##### ハッシュ計算の実装分離
+
+`Domain` は正準バイト列の構築までを担い、SHA-256 の実体計算は持ちません（`Domain` は Foundation のみに依存するため。[アーキテクチャ設計](architecture.md) 3.3）。
+
+```swift
+protocol Sha256Digest: Sendable {
+    /// 入力バイト列の SHA-256 ダイジェスト（32 バイト）を返す
+    func digest(_ input: Data) -> Data
+}
+```
+
+ハッシュ計算関数はこのプロトコルを引数で受け取る純粋関数とし、実装（CryptoKit）は上位層がアダプタとして注入します。
+
+**32 バイト固定を型で強制します。** ハッシュ値型（`ProjectSettingsHash` / `PreviewRenderHash` / `StampAssetHash`）の initializer は 32 バイト以外の入力を拒否し（`throws`）、ハッシュ計算関数は注入された digest の戻り値長も検証します。`StampAssetHash` は長さ前置きなしで正準バイト列へ連結される（2 章）ため、長さの不変条件が崩れるとフィールド境界ごと壊れます。
 
 ### 5.3 `StampAssetHash`
 
