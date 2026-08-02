@@ -289,4 +289,28 @@ struct SchemaConstraintTests {
             try assertCascadeFixtureIsGone(database, projectID: projectID)
         }
     }
+
+    /// cascadeChainDeletesDependentRowsはProject削除経由の連鎖のみを確認しており、
+    /// FaceTrack単独の削除でEffectSettingがCASCADEで消えることは未検証だった
+    /// （Issue #6 Task 2レビューからの申し送り）。ここではProjectを経由せずFaceTrackを
+    /// 直接削除し、EffectSettingが単独でもCASCADEされることを確認する。
+    @Test("FaceTrackを単独削除するとEffectSettingがCASCADEで消えること")
+    func faceTrackDeletionCascadesEffectSetting() throws {
+        let (appDatabase, url) = try openTestDatabase()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let projectID = UUID()
+        let faceTrackID = UUID()
+
+        try appDatabase.dbQueue.write { database in
+            try insertProject(database, projectID: projectID)
+            try insertFaceTrack(database, faceTrackID: faceTrackID, projectID: projectID)
+            try insertEffectSetting(database, faceTrackID: faceTrackID, projectID: projectID)
+            try database.execute(sql: "DELETE FROM FaceTrack WHERE faceTrackID = ?", arguments: [faceTrackID])
+        }
+
+        let effectSettingCount = try appDatabase.dbQueue.read { database in
+            try countEffectSettingRows(database, projectID: projectID)
+        }
+        #expect(effectSettingCount == 0)
+    }
 }
