@@ -83,12 +83,14 @@ DetectedFace(
 ##### 拡張率の適用
 
 ```swift
-func expand(face: NormalizedRect, effect: EffectSetting) -> NormalizedRect
+func expand(face: NormalizedRect, effect: EffectSetting) throws -> NormalizedRect
 ```
 
 既定値は上 25% / 下 15% / 左右 15%（仕様 8.4）。スタンプはモザイクより大きめの拡張率を用います。
 
 **画像外へはみ出す場合もクランプしません。** クランプすると顔が露出する方向へ倒れます。はみ出しはマスク描画側で処理します。
+
+**拡張後の座標が `NormalizedRect` の上限（絶対値 16。4 章）を超える場合は `invalidRect` を throw します**（クランプで黙って直さない。検出結果の顔（[0, 1]）に既定拡張率を適用する通常経路では起こらない）。
 
 ## 2. RenderSpec / RenderDraft / RenderPlan
 
