@@ -19,7 +19,7 @@ private let testExtremePosePitchDegrees = 45.0
 
 // 暫定閾値を固定したテスト専用ラッパー。閾値注入で全呼び出しへ同じ2引数を
 // 複写しないための委譲（閾値そのものの検証は境界値テストが本体シグネチャで行う）。
-private func triage(
+private func triageWithProvisionalThresholds(
     _ result: DetectionResult,
     projectID: ProjectID,
     detectionRevision: Int64
@@ -33,36 +33,7 @@ private func triage(
     )
 }
 
-private func face(
-    trackID: FaceTrackID = FaceTrackID(rawValue: UUID()),
-    left: Double = 0.4,
-    top: Double = 0.3,
-    right: Double = 0.6,
-    bottom: Double = 0.7,
-    confidence: Double = 0.9,
-    yawDegrees: Double = 0,
-    pitchDegrees: Double = 0,
-    isSmallFace: Bool = false
-) throws -> DetectedFace {
-    let bounds = try NormalizedRect(left: left, top: top, rightExclusive: right, bottomExclusive: bottom)
-    return DetectedFace(
-        faceTrackID: trackID,
-        bounds: bounds,
-        confidence: confidence,
-        yawDegrees: yawDegrees,
-        pitchDegrees: pitchDegrees,
-        rollDegrees: 0,
-        isSmallFace: isSmallFace
-    )
-}
-
-private func detectionResult(_ faces: [DetectedFace]) -> DetectionResult {
-    DetectionResult(
-        faces: faces,
-        detectionPixelSize: PixelSize(width: 1000, height: 1000),
-        revision: FaceDetectorRevision(rawValue: 3)
-    )
-}
+// face(...) / detectionResult(...) フィクスチャは TestSupport.swift の共有ヘルパーを使う。
 
 // MARK: - 空集合・単独発生
 
@@ -71,7 +42,7 @@ func triageReturnsEmptyWhenNoIssues() throws {
     let normalFace = try face()
     let result = detectionResult([normalFace])
 
-    let issues = triage(
+    let issues = triageWithProvisionalThresholds(
         result,
         projectID: ProjectID(rawValue: UUID()),
         detectionRevision: 1
@@ -85,7 +56,7 @@ func triageReturnsNoFaceDetectedWhenFacesEmpty() {
     let result = detectionResult([])
     let projectID = ProjectID(rawValue: UUID())
 
-    let issues = triage(
+    let issues = triageWithProvisionalThresholds(
         result,
         projectID: projectID,
         detectionRevision: 1
@@ -102,7 +73,7 @@ func triageReturnsOneSmallFaceIssuePerSmallFace() throws {
     let normalOne = try face(left: 0.1, top: 0.1, right: 0.2, bottom: 0.2)
     let result = detectionResult([smallOne, normalOne])
 
-    let issues = triage(
+    let issues = triageWithProvisionalThresholds(
         result,
         projectID: ProjectID(rawValue: UUID()),
         detectionRevision: 1
@@ -122,7 +93,7 @@ func triageReturnsThreeSmallFaceIssuesForThreeSmallFaces() throws {
     ]
     let result = detectionResult(smallFaces)
 
-    let issues = triage(
+    let issues = triageWithProvisionalThresholds(
         result,
         projectID: ProjectID(rawValue: UUID()),
         detectionRevision: 1
@@ -148,7 +119,7 @@ func triageExtremePoseBoundary(yawDegrees: Double, pitchDegrees: Double, expecte
     let target = try face(yawDegrees: yawDegrees, pitchDegrees: pitchDegrees)
     let result = detectionResult([target])
 
-    let issues = triage(
+    let issues = triageWithProvisionalThresholds(
         result,
         projectID: ProjectID(rawValue: UUID()),
         detectionRevision: 1
@@ -173,7 +144,7 @@ func triageExtremePoseFiresOnNonFiniteYawOrPitch(yawDegrees: Double, pitchDegree
     let target = try face(yawDegrees: yawDegrees, pitchDegrees: pitchDegrees)
     let result = detectionResult([target])
 
-    let issues = triage(
+    let issues = triageWithProvisionalThresholds(
         result,
         projectID: ProjectID(rawValue: UUID()),
         detectionRevision: 1
@@ -190,7 +161,7 @@ func triageNeverFiresLowConfidence(confidence: Double) throws {
     let target = try face(confidence: confidence)
     let result = detectionResult([target])
 
-    let issues = triage(
+    let issues = triageWithProvisionalThresholds(
         result,
         projectID: ProjectID(rawValue: UUID()),
         detectionRevision: 1
@@ -210,7 +181,7 @@ func triageFaceAtEdgeBoundary(top: Double, bottom: Double, expectedFires: Bool) 
     let target = try face(left: 0.4, top: top, right: 0.6, bottom: bottom)
     let result = detectionResult([target])
 
-    let issues = triage(
+    let issues = triageWithProvisionalThresholds(
         result,
         projectID: ProjectID(rawValue: UUID()),
         detectionRevision: 1
@@ -220,14 +191,14 @@ func triageFaceAtEdgeBoundary(top: Double, bottom: Double, expectedFires: Bool) 
     #expect(fired == expectedFires)
 }
 
-@Test("3人が互いに重なる場合overlappingFacesはペアごとに3件になりaffectedFaceTrackIDsが辞書順になる")
-func triageOverlappingFacesProducesOnePerPairSortedByUUIDString() throws {
+@Test("3人が互いに重なる場合overlappingFacesはペアごとに3件になりaffectedFaceTrackIDsがバイト列辞書順になる")
+func triageOverlappingFacesProducesOnePerPairSortedByFaceTrackIDBytes() throws {
     let faceA = try face(left: 0.10, top: 0.15, right: 0.50, bottom: 0.55)
     let faceB = try face(left: 0.20, top: 0.15, right: 0.60, bottom: 0.55)
     let faceC = try face(left: 0.30, top: 0.15, right: 0.70, bottom: 0.55)
     let result = detectionResult([faceA, faceB, faceC])
 
-    let issues = triage(
+    let issues = triageWithProvisionalThresholds(
         result,
         projectID: ProjectID(rawValue: UUID()),
         detectionRevision: 1
@@ -238,7 +209,13 @@ func triageOverlappingFacesProducesOnePerPairSortedByUUIDString() throws {
     for issue in overlapIssues {
         let trackIDs = issue.affectedFaceTrackIDs
         #expect(trackIDs.count == 2)
-        #expect(trackIDs == trackIDs.sorted { $0.rawValue.uuidString < $1.rawValue.uuidString })
+        // canonical-schema.md 2.1「UUID の 16 バイトを符号なしバイト列として辞書順」の規則で検証する
+        // （uuidString の辞書順はバイト順とたまたま一致するが、規則そのものを固定する）。
+        let sortedByBytes = trackIDs.sorted {
+            withUnsafeBytes(of: $0.rawValue.uuid) { Array($0) }
+                .lexicographicallyPrecedes(withUnsafeBytes(of: $1.rawValue.uuid) { Array($0) })
+        }
+        #expect(trackIDs == sortedByBytes)
     }
 }
 
@@ -250,7 +227,7 @@ func triageReturnsMultipleIssuesWhenSeveralReasonsCoOccur() throws {
     let posed = try face(left: 0.05, top: 0.4, right: 0.15, bottom: 0.5, yawDegrees: 60)
     let result = detectionResult([small, posed])
 
-    let issues = triage(
+    let issues = triageWithProvisionalThresholds(
         result,
         projectID: ProjectID(rawValue: UUID()),
         detectionRevision: 1
@@ -269,12 +246,12 @@ func reviewIssueIDDiffersByDetectionRevision() throws {
     let result = detectionResult([target])
     let projectID = ProjectID(rawValue: UUID())
 
-    let issuesAtRevisionOne = triage(
+    let issuesAtRevisionOne = triageWithProvisionalThresholds(
         result,
         projectID: projectID,
         detectionRevision: 1
     )
-    let issuesAtRevisionTwo = triage(
+    let issuesAtRevisionTwo = triageWithProvisionalThresholds(
         result,
         projectID: projectID,
         detectionRevision: 2
@@ -289,12 +266,12 @@ func reviewIssueIDDiffersByProjectIDForNoFaceDetected() {
     let projectOne = ProjectID(rawValue: UUID())
     let projectTwo = ProjectID(rawValue: UUID())
 
-    let issuesForProjectOne = triage(
+    let issuesForProjectOne = triageWithProvisionalThresholds(
         result,
         projectID: projectOne,
         detectionRevision: 1
     )
-    let issuesForProjectTwo = triage(
+    let issuesForProjectTwo = triageWithProvisionalThresholds(
         result,
         projectID: projectTwo,
         detectionRevision: 1
@@ -310,7 +287,7 @@ func reviewIssueAffectedFaceTrackIDsDerivesFromID() throws {
     let target = try face(isSmallFace: true)
     let result = detectionResult([target])
 
-    let issues = triage(
+    let issues = triageWithProvisionalThresholds(
         result,
         projectID: ProjectID(rawValue: UUID()),
         detectionRevision: 1
@@ -327,12 +304,12 @@ func detectionStatusDerivesFromTriageResultCount() throws {
     let smallFace = try face(isSmallFace: true)
     let projectID = ProjectID(rawValue: UUID())
 
-    let normalIssues = triage(
+    let normalIssues = triageWithProvisionalThresholds(
         detectionResult([normalFace]),
         projectID: projectID,
         detectionRevision: 1
     )
-    let reviewRequiredIssues = triage(
+    let reviewRequiredIssues = triageWithProvisionalThresholds(
         detectionResult([smallFace]),
         projectID: projectID,
         detectionRevision: 1
@@ -347,7 +324,7 @@ func detectionStatusDerivesFromTriageResultCount() throws {
 @Test("ReviewDecisionがresolutionsをReviewIssueIDごとに保持する")
 func reviewDecisionHoldsResolutionsByIssueID() throws {
     let target = try face(isSmallFace: true)
-    let issues = triage(
+    let issues = triageWithProvisionalThresholds(
         detectionResult([target]),
         projectID: ProjectID(rawValue: UUID()),
         detectionRevision: 1
@@ -359,42 +336,5 @@ func reviewDecisionHoldsResolutionsByIssueID() throws {
     #expect(decision.resolutions[issue.id] == .manualRegionAdded(regionID: regionID))
 }
 
-// MARK: - 閾値注入の直接検証（暫定ラッパーを経由せずDomain.triageを直接呼び出す）
-//
-// ファイル冒頭のprivate triage(...)は暫定閾値45.0を固定するラッパーであり、注入経路
-// そのものは検証しない。ここではDomain.triageを直接呼びyaw/pitchの閾値を変えて発火が
-// 切り替わることを固定する。
-
-// (yawDegrees, pitchDegrees, thresholdDegrees, expectedFires)
-// swiftlint:disable:next large_tuple
-private let triageThresholdInjectionCases: [(Double, Double, Double, Bool)] = [
-    (30.0, 0.0, 20.0, true),
-    (30.0, 0.0, 40.0, false),
-    (0.0, 30.0, 20.0, true),
-    (0.0, 30.0, 40.0, false)
-]
-
-@Test(
-    "extremePoseYawDegrees/extremePosePitchDegreesの注入値で発火が切り替わる",
-    arguments: triageThresholdInjectionCases
-)
-func triageExtremePoseRespectsInjectedThreshold(
-    yawDegrees: Double,
-    pitchDegrees: Double,
-    thresholdDegrees: Double,
-    expectedFires: Bool
-) throws {
-    let target = try face(yawDegrees: yawDegrees, pitchDegrees: pitchDegrees)
-    let result = detectionResult([target])
-
-    let issues = Domain.triage(
-        result,
-        projectID: ProjectID(rawValue: UUID()),
-        detectionRevision: 1,
-        extremePoseYawDegrees: thresholdDegrees,
-        extremePosePitchDegrees: thresholdDegrees
-    )
-
-    let fired = issues.contains { $0.id.reason == .extremePose }
-    #expect(fired == expectedFires)
-}
+// 閾値注入の直接検証は TriageThresholdTests.swift（暫定ラッパーを経由せず
+// Domain.triage を直接呼ぶテスト群）に分離している。

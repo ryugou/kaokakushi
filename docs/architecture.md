@@ -684,12 +684,14 @@ func canEdit(
 ) -> Bool
 ```
 
-**`RenderSpec` を直接受け取らない**（判定に必要なのはスタンプの必要能力だけであり座標や強度は無関係。同じ `ProjectCapabilityRequirement` を書き出し認可の `authorizeRenderSpec`〈同 1.3〉と共有し UI と認可で判定材料を一致させる）。
+**`RenderSpec` を直接受け取らない**（判定に必要なのはスタンプの必要能力だけであり座標や強度は無関係。同じ判定規則〈`premium` は `canUsePremiumStamps`、`custom` は `canUseCustomStamps`、`unknownBuiltIn` は否〉を書き出し認可の `authorizeRenderSpec`〈同 1.3〉と共有し、UI と認可で判定を一致させる。一致は契約テストで固定する）。
 
 判定規則（要求能力の対応は [書き出し Saga](export-saga.md) 1.2 の表、プランごとの能力は 6.2 の能力導出表が正本）。
 
 - `canEdit`: `premium` は `canUsePremiumStamps`、`custom` は `canUseCustomStamps` で判定する。**`unknownBuiltIn` を含む場合は常に否**（どの能力でも解消しない。認可側の `unknownBuiltInStampCode` と同じ安全側）
-- `requiredPlan`: `premium` または `custom` を含めば `standard`、いずれも無ければ `free`（スタンプ能力は `standard` と `pro` で同一のため `pro` を要求する組み合わせは存在しない）。`unknownBuiltIn` は課金で解消しないため対象外（Paywall を提示しない。同 1.3）**`requiredPlan` の戻り値で可否を決めない**（プラン名の比較だと `status = pending` が素通りする）。作成時のプランで判定すると、Standard 時代に作ったプロジェクトが Free で編集できないのに同じ元写真を選び直せば Free の機能で同じものを作れるという説明のつかない差が生まれるため、現在の設定内容で判定する。
+- `requiredPlan`: `premium` または `custom` を含めば `standard`、いずれも無ければ `free`（スタンプ能力は `standard` と `pro` で同一のため `pro` を要求する組み合わせは存在しない）。`unknownBuiltIn` は課金で解消しないため対象外（Paywall を提示しない。同 1.3）
+
+**`requiredPlan` の戻り値で可否を決めない**（プラン名の比較だと `status = pending` が素通りする）。作成時のプランで判定すると、Standard 時代に作ったプロジェクトが Free で編集できないのに同じ元写真を選び直せば Free の機能で同じものを作れるという説明のつかない差が生まれるため、現在の設定内容で判定する。
 
 | 操作 | Free 範囲のプロジェクト | 有料スタンプを含むプロジェクト |
 | --- | --- | --- |

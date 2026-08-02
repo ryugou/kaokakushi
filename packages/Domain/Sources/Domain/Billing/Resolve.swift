@@ -6,9 +6,9 @@ import Foundation
 // `standardEntitlementID` / `proEntitlementID` は設定定数（architecture.md 10 章）を引数で
 // 注入する（Domain は設定定数の型を参照しないため）。
 //
-// この関数が生成しうる status は `.active` / `.pending` の2値のみ。`.grace` / `.expired` /
-// `.revoked` は生成しない（正本の導出規則2に明記。それらは別経路
-// （キャッシュ鮮度判定等）で付与される値であり、resolve の責務外）。
+// この関数が生成しうる status は `.active` / `.pending` の2値のみ（正本の導出規則2に明記）。
+// Entitlement を生成するのはこの関数だけであり、`.grace` / `.expired` / `.revoked` は
+// 現状どこからも生成されない（PlanStatus の扱いは Issue #22 で確定する）。
 
 public func resolve(
     snapshot: CustomerInfoSnapshot,

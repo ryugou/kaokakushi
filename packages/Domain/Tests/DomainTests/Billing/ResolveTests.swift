@@ -146,6 +146,8 @@ func resolveProExpiresAtUsesProEntitlementDate() {
     "該当entitlement IDのキーがexpirationDatesに無ければexpiresAtはnilになる",
     arguments: [Set([standardID]), Set([proID])]
 )
+// nil の expiresAt は resolveCapabilities の失効判定を素通りする＝無期限扱いになる
+// （買い切り lifetime の表現。導出規則3どおりで、異常データ由来の永続化は ADR 0005 の受容範囲）。
 func resolveExpiresAtIsNilWhenKeyMissing(activeIDs: Set<String>) {
     let subject = snapshot(activeEntitlementIDs: activeIDs, expirationDates: [:])
 

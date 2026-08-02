@@ -32,7 +32,7 @@
 
 **正本:** architecture.md 6.2 のシグネチャコードブロックと「`resolve` の導出規則」節（コミット dddc18d）。
 
-- [ ] **Step 1: 失敗するテストを書く。** 導出規則の全分岐を `@Test(arguments:)` で固定する:
+- [x] **Step 1: 失敗するテストを書く。** 導出規則の全分岐を `@Test(arguments:)` で固定する:
   - pro ID あり → `plan == .pro`（standard ID も同時にあっても pro 優先）
   - standard ID のみ → `.standard`、どちらも無し → `.free`
   - free は常に `status == .active`、`expiresAt == nil`
@@ -40,9 +40,9 @@
   - `expiresAt` が該当 ID の `expirationDates` の値になる（無ければ nil）
   - `lastVerifiedAt == usageNow`、`isSandbox` が写る
   - `grace` / `expired` / `revoked` を生成しない（全分岐の status が active / pending のいずれかであることを網羅的 switch で固定）
-- [ ] **Step 2: 実装する。** 正本シグネチャを一字一句転記し、導出規則 1〜4 を素直に実装する
-- [ ] **Step 3: `bash scripts/check-imports.sh` を実行して OK を確認する**
-- [ ] **Step 4: reviewer の一次レビュー → PASS / CONDITIONAL PASS でコミット** `feat: Domain の resolve（購読状態の畳み込み） (#20)`
+- [x] **Step 2: 実装する。** 正本シグネチャを一字一句転記し、導出規則 1〜4 を素直に実装する
+- [x] **Step 3: `bash scripts/check-imports.sh` を実行して OK を確認する**
+- [x] **Step 4: reviewer の一次レビュー → PASS / CONDITIONAL PASS でコミット** `feat: Domain の resolve（購読状態の畳み込み） (#20)`
 
 ### Task 2: ProjectCapabilityRequirement / requiredPlan / canEdit / canEnterBatch
 
@@ -62,13 +62,13 @@
 
 **正本:** architecture.md 6.2「解約・降格後の既存データ」のコードブロックと本文、6.4 の `canEnterBatch` コードブロック（dddc18d で関数化済み）、export-saga.md 1.2（StampRequirement の意味）。
 
-- [ ] **Step 1: 失敗するテストを書く。**
+- [x] **Step 1: 失敗するテストを書く。**
   - `requiredPlan`: stampRequirements が空 → `.free`、`.premiumStamp` を含む → `.standard` 以上、`.customStamp` を含む → 対応プラン（正本 6.2 本文と export-saga 1.2 から要求能力→最小プランの対応を確認して固定。**対応が正本から一意に導けない場合は実装せず差し戻す**）
   - `canEdit`: `.premiumStamp` 要求 × `canUsePremiumStamps == false` → false、要求空 → 常に true、`.customStamp` 要求 × `canUseCustomStamps == true` → true。**requiredPlan の戻り値比較を使わず能力で判定していること**（`plan = pro` かつ制限つき能力で false になるケースを固定）
   - `canEnterBatch`: `canUseProBatch` → 常に true、`canUseBatchTrial && remainingCredits > 0` → true、`remainingCredits == 0` → false、両能力なし → false（test-plan 2.3 の期待）
-- [ ] **Step 2: 実装する**（canEnterBatch は正本の式を一字一句転記）
-- [ ] **Step 3: `bash scripts/check-imports.sh` を実行して OK を確認する**
-- [ ] **Step 4: reviewer の一次レビュー → コミット** `feat: Domain の編集可否・一括開始判定 (#20)`
+- [x] **Step 2: 実装する**（canEnterBatch は正本の式を一字一句転記）
+- [x] **Step 3: `bash scripts/check-imports.sh` を実行して OK を確認する**
+- [x] **Step 4: reviewer の一次レビュー → コミット** `feat: Domain の編集可否・一括開始判定 (#20)`
 
 ### Task 3: トリアージ閾値の注入と Minor 5 件
 
@@ -83,15 +83,15 @@
 **Interfaces:**
 - Produces: `triage(_ result:projectID:detectionRevision:extremePoseYawDegrees:extremePosePitchDegrees:)`（正本 architecture.md 6.1 の新シグネチャ）
 
-- [ ] **Step 1: triage の閾値注入。** private 定数 `extremePoseYawDegrees` / `extremePosePitchDegrees` を削除し引数へ（既定値は付けない。呼び出し側が設定定数を渡す）。既存テストは 45.0 を渡す形へ追従。非有限の安全側判定（`!isFinite → true`）は維持
-- [ ] **Step 2: Minor 対応。**
+- [x] **Step 1: triage の閾値注入。** private 定数 `extremePoseYawDegrees` / `extremePosePitchDegrees` を削除し引数へ（既定値は付けない。呼び出し側が設定定数を渡す）。既存テストは 45.0 を渡す形へ追従。非有限の安全側判定（`!isFinite → true`）は維持
+- [x] **Step 2: Minor 対応。**
   - `RenderValidationError.emptyRegion` に「`NormalizedRect` が幅 0 を拒否するため現在は到達不能（正本転記のため残す）」コメントを追加
   - `overlappingFacesIssues` の UUID 文字列ソートを 16 バイトのバイト列辞書順比較へ（canonical-schema.md 2.1 の規則。`uuid` タプルから `[UInt8]` を作り `lexicographicallyPrecedes` で比較するヘルパを Triage.swift 内に置く）
   - `evaluateUpdate` へ「`usageNow < lastPromptedAt`（時計巻き戻し）では 24h 制限が続くが、端末時計をそのまま信頼する ADR 0005 の帰結として受容する」コメントを追加
   - `SettingsHashGoldenTests.swift` へ、既知の固定入力 1 件について `canonicalProjectSettingsBytes` 全体を 1 本の 16 進文字列リテラルと比較するテストを追加（バイト列は既存のプリミティブ組み立てヘルパの出力から生成してリテラル化する。`Data` → 16 進文字列のヘルパはテスト内に置く）
-- [ ] **Step 3: `.swiftlint.yml` の `identifier_name.excluded: [id, op]` を確認し、`op` を Domain 限定へ絞れるか検討。SwiftLint の `identifier_name` にパス限定機能が無い場合は現状維持とし、その旨をコメントで補強する（設定ファイルの変更は最小限に）**
-- [ ] **Step 4: `bash scripts/check-imports.sh` を実行して OK を確認する**
-- [ ] **Step 5: reviewer の一次レビュー → コミット** `refactor: トリアージ閾値の注入とレビュー持ち越しMinorの解消 (#20)`
+- [x] **Step 3: `.swiftlint.yml` の `identifier_name.excluded: [id, op]` を確認し、`op` を Domain 限定へ絞れるか検討。SwiftLint の `identifier_name` にパス限定機能が無い場合は現状維持とし、その旨をコメントで補強する（設定ファイルの変更は最小限に）**
+- [x] **Step 4: `bash scripts/check-imports.sh` を実行して OK を確認する**
+- [x] **Step 5: reviewer の一次レビュー → コミット** `refactor: トリアージ閾値の注入とレビュー持ち越しMinorの解消 (#20)`
 
 ---
 
