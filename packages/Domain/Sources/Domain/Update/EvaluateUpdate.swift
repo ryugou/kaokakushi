@@ -31,6 +31,9 @@ public func evaluateUpdate(
 
     // 3. usageNow - lastPromptedAt < 24h なら .none（1日1回まで）。
     //    lastPromptedAt が nil（未提示）の場合はこの制限を適用しない。
+    //    usageNow < lastPromptedAt（端末の時計が巻き戻った場合）は差分が負になり常に
+    //    24h 未満と判定され続けるが、端末時計をそのまま信頼する ADR 0005 の帰結として
+    //    受容する（Domain 側で時計の単調性を検証・補正しない）。
     if let lastPromptedAt, usageNow.timeIntervalSince(lastPromptedAt) < updatePromptIntervalSeconds {
         return .none
     }

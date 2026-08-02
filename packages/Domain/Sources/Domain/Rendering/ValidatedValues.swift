@@ -59,6 +59,8 @@ public enum RenderValidationError: Error, Sendable, Equatable {
     case invalidSigma
     case invalidFeather
     case nonVisibleColor
+    // NormalizedRect が幅 0 の矩形（left == rightExclusive 等）を invalidRect として拒否する
+    // ため、現在このケースへ到達する経路はない（正本コードブロックの全ケース転記として残す）。
     case emptyRegion
     case unresolvedStampAsset
     case sourceCropOutOfBounds
