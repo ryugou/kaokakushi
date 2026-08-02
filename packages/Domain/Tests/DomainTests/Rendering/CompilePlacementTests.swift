@@ -106,3 +106,18 @@ func backgroundBlurUsesWholeSourceAndCanvasShortSide() throws {
     #expect(sigmaPx.value == 5.0)
     #expect(scaleMode == .fill)
 }
+
+// MARK: - 4. fit経路のInt変換ガード（レビュー指摘の回帰）
+//
+// scale後の幅・高さは image-pipeline.md 4章「ピクセルへの丸め」により最近接整数へ丸めるが、
+// 丸め後の値が非有限、または`Int`の表現範囲を超える場合は`invalidRect`をthrowするのが正本
+// （586〜592行付近）。targetSizeにInt.maxを与え、scale = Double(Int.max)がInt表現範囲を
+// 超えて丸められることでこのガードを踏む回帰テスト。
+
+@Test("scaleMode=fitはscale後の値がInt範囲を超えるとinvalidRectをthrowする")
+func sourcePlacementFitThrowsInvalidRectWhenScaledSizeExceedsIntRange() throws {
+    let spec = makeSpec(sourceCrop: try makeRect(left: 0, top: 0, right: 1, bottom: 1), scaleMode: .fit)
+    #expect(throws: RenderValidationError.invalidRect) {
+        try compileRenderDraft(spec: spec, sourceSize: makeSize(1, 1), targetSize: makeSize(Int.max, Int.max))
+    }
+}

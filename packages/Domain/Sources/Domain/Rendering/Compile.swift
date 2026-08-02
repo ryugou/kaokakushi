@@ -94,7 +94,9 @@ public func compileRenderDraft(
 
     let canvasSize = targetSize
     let sourceRect = try pixelRect(from: spec.sourceCrop, in: sourceSize)
-    let sourcePlacement = makeSourcePlacement(sourceRect: sourceRect, canvasSize: canvasSize, scaleMode: spec.scaleMode)
+    let sourcePlacement = try makeSourcePlacement(
+        sourceRect: sourceRect, canvasSize: canvasSize, scaleMode: spec.scaleMode
+    )
     let background = try makeBackgroundOp(spec.background, sourceSize: sourceSize, canvasSize: canvasSize)
 
     var stampKeys: Set<StampRasterKey> = []
@@ -155,13 +157,12 @@ private func pixelRect(from rect: NormalizedRect, in size: PixelSize) throws -> 
     return PixelRect(left: left, top: top, rightExclusive: right, bottomExclusive: bottom)
 }
 
-/// 前景の配置（`SourcePlacement`）。配置規則は image-pipeline.md 2 章
-/// 「`SourcePlacement` の配置規則」が正本。
+/// 前景の配置（`SourcePlacement`）。配置規則は image-pipeline.md 2 章が正本。fit経路はthrows（`fitDestinationRect`参照）。
 private func makeSourcePlacement(
     sourceRect: PixelRect,
     canvasSize: PixelSize,
     scaleMode: SourceScaleMode
-) -> SourcePlacement {
+) throws -> SourcePlacement {
     switch scaleMode {
     case .fill:
         // fill: 真の cover。destinationRect はキャンバス全面。sourceRect はそのまま使うと
@@ -180,24 +181,30 @@ private func makeSourcePlacement(
         // fit: 縦横比を保ったままキャンバスへ収まる最大サイズへ縮小し、中央配置する。
         return SourcePlacement(
             sourceRect: sourceRect,
-            destinationRect: fitDestinationRect(sourceRect: sourceRect, canvasSize: canvasSize),
+            destinationRect: try fitDestinationRect(sourceRect: sourceRect, canvasSize: canvasSize),
             scaleMode: .fit
         )
     }
 }
 
-private func fitDestinationRect(sourceRect: PixelRect, canvasSize: PixelSize) -> PixelRect {
+/// fit の配置式（image-pipeline.md 2 章）。scale後の幅・高さを最近接整数へ丸め中央配置する。
+/// 非有限/`Int`範囲外・加算overflowの可能性があるため `safeRoundedInt`/`addingChecked` で検証し `invalidRect` を throw。
+private func fitDestinationRect(sourceRect: PixelRect, canvasSize: PixelSize) throws -> PixelRect {
     let sourceWidth = sourceRect.rightExclusive - sourceRect.left
     let sourceHeight = sourceRect.bottomExclusive - sourceRect.top
     let scale = min(
         Double(canvasSize.width) / Double(sourceWidth),
         Double(canvasSize.height) / Double(sourceHeight)
     )
-    let scaledWidth = Int((Double(sourceWidth) * scale).rounded())
-    let scaledHeight = Int((Double(sourceHeight) * scale).rounded())
+    guard let scaledWidth = safeRoundedInt(Double(sourceWidth) * scale, rule: .toNearestOrAwayFromZero),
+          let scaledHeight = safeRoundedInt(Double(sourceHeight) * scale, rule: .toNearestOrAwayFromZero) else {
+        throw RenderValidationError.invalidRect
+    }
     let left = (canvasSize.width - scaledWidth) / 2
     let top = (canvasSize.height - scaledHeight) / 2
-    return PixelRect(left: left, top: top, rightExclusive: left + scaledWidth, bottomExclusive: top + scaledHeight)
+    let right = try addingChecked(left, scaledWidth)
+    let bottom = try addingChecked(top, scaledHeight)
+    return PixelRect(left: left, top: top, rightExclusive: right, bottomExclusive: bottom)
 }
 
 /// fill（cover）用に `sourceRect` をキャンバス縦横比へ中央で切り詰める。`fitDestinationRect`
@@ -259,16 +266,23 @@ private func makeBackgroundOp(
     }
 }
 
-/// `Int` 減算を overflow チェック付きで行う。`pixelRect` は `left`/`rightExclusive` 等の
-/// 各フィールドを個別に Int 範囲内と検証済みだが、正負反対側の極端な値の組み合わせでは
-/// 差分自体が Int64 の表現範囲を超えうる（`pixelRect` の Int 変換ガードと同じ理由で、
-/// trap ではなく検証エラーとして返す）。
-private func subtractingChecked(_ minuend: Int, _ subtrahend: Int) throws -> Int {
-    let (difference, overflow) = minuend.subtractingReportingOverflow(subtrahend)
-    guard !overflow else {
+/// `Int` の checked 二項演算共通部。overflowならtrapではなく`invalidRect`をthrow（`subtractingChecked`/`addingChecked`が使用）。
+private func checkedInt(_ result: (partialValue: Int, overflow: Bool)) throws -> Int {
+    guard !result.overflow else {
         throw RenderValidationError.invalidRect
     }
-    return difference
+    return result.partialValue
+}
+
+/// `pixelRect` は `left`/`rightExclusive` 等を個別に Int 範囲内と検証済みだが、正負反対側の
+/// 極端な値の組み合わせでは差分自体が範囲を超えうるため checked 減算を使う。
+private func subtractingChecked(_ minuend: Int, _ subtrahend: Int) throws -> Int {
+    try checkedInt(minuend.subtractingReportingOverflow(subtrahend))
+}
+
+/// `fitDestinationRect` の destinationRect 計算（`left + scaledWidth` 等）で使う checked 加算。
+private func addingChecked(_ augend: Int, _ addend: Int) throws -> Int {
+    try checkedInt(augend.addingReportingOverflow(addend))
 }
 
 private func compileRegionDraft(
