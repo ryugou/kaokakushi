@@ -37,10 +37,11 @@ protocol ExportSagaStore: Sendable {
     /// settledAt は呼び出し側が渡した時刻で全件に統一する。事前条件は 3 章
     func settleBatch(_ batchID: BatchID, settledAt: Date) async throws
     /// 失敗・キャンセル・やり直し・中断。ExportJob 行を削除する。対応する OutputRecord が存在すれば
-    /// 同一トランザクションで削除し、その出力ファイル（存在すれば）と手順 1〜3 の一時ファイルを
+    /// 同一トランザクションで削除し、その出力ファイル（存在すれば）と temporaryFiles（手順 1〜3 で
+    /// 生成した一時ファイル。呼び出し元の生成パイプラインが保持する参照を渡す）を
     /// PendingFileDeletion へ登録する（実削除はコミット後。削除経路の正本はアーキテクチャ設計 7.5）。
     /// WorkingSourceRecord は削除しない（4 章）。台帳は未確定のため触れない
-    func discardExport(_ exportID: ExportID) async throws
+    func discardExport(_ exportID: ExportID, temporaryFiles: [ManagedFileRef]) async throws
     /// 起動時復旧の入力（5 章）
     func loadRunningJobs() async throws -> [ExportJob]
     /// 起動時復旧。ExportJob 行と、対応する未確定（settledAt IS NULL）OutputRecord をまとめて削除する（5 章）
@@ -209,7 +210,9 @@ struct ExportAuthorization: Sendable {
 }
 enum ExportStartBlockReason: Sendable, Equatable {
     case monthlyLimitReached, trialCreditsUnavailable
-    case capabilityVerificationRequired   // entitlementSnapshot.verificationRequired
+    case capabilityVerificationRequired   // entitlementSnapshot.verificationRequired、
+                                          // または開始時点の能力が勘定の前提（proBatch の
+                                          // canUseProBatch 等）を満たさない（1.5 の store 側ゲート）
 }
 struct ExportStartBlock: Sendable, Equatable {
     let reason: ExportStartBlockReason
