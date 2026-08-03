@@ -1879,8 +1879,15 @@ struct CustomStamp: Sendable, Equatable {
 // Domain — 永続化ポート
 protocol StampStore: Sendable {
     /// 取り込み。body が一時ファイルへ書いた内容の SHA-256 が既存の StampAsset と一致すれば
-    /// それを再利用し、新規に書いたファイルは破棄する。一致しなければ新規 StampAsset を作る
-    func importCustomStamp(_ body: @Sendable (URL) async throws -> Void) async throws -> (stamp: CustomStamp, assetHash: StampAssetHash)
+    /// それを再利用し、新規に書いたファイルは破棄する。一致しなければ新規 StampAsset を作る。
+    /// thumbnailBody は一覧サムネイル（.stampThumbnail）を書き込む（ラスタライズは
+    /// 呼び出し元が MediaKit で行う。重複取り込みでも CustomStamp 行ごとに作る）。
+    /// sortOrder は既存の最大値 + 1 を store が採番する（呼び出し側の競合と採番漏れを防ぐ）
+    func importCustomStamp(
+        name: String,
+        body: @Sendable (URL) async throws -> Void,
+        thumbnailBody: @Sendable (URL) async throws -> Void
+    ) async throws -> (stamp: CustomStamp, assetHash: StampAssetHash)
 
     /// スタンプ一覧
     func loadCustomStamps() async throws -> [CustomStamp]
