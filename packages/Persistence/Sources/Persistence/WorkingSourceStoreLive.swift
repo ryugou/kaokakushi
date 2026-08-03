@@ -21,9 +21,10 @@ import GRDB
 //   - WorkingSourceStoreLive+Lifecycle.swift: loadWorkingSource / deleteWorkingSource /
 //     invalidateWorkingSource
 //
-// スコープ外（今回のTask 4では実装しない。理由をここに残す）:
-// - StampStore（Domain ポートの戻り値契約に構造的ギャップがあり別途エスカレーション予定。
-//   本ファイル・分割先ファイルのいずれにも手を付けない）。
+// StampStoreは別ファイル（StampStoreLive.swift以下）で実装する（旧セッションで
+// importCustomStampの戻り値契約に構造的ギャップがあるとして差し戻され、
+// docs/architecture.mdの正本更新（コミット1c04e47）後に別途実装済み。本ファイルの
+// 対象はWorkingSourceStoreのみで変わらない）。
 
 /// WorkingSourceStoreLiveが送出する専用エラー。運用者が次のアクションを判断できるよう、
 /// 契約違反の詳細を持つ（AppDatabaseError/ManagedFileStoreErrorと同じ方針:

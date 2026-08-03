@@ -60,6 +60,7 @@ func stampStorageBreakdownHoldsAllFields() {
 
 private actor FakeStampStore: StampStore {
     private(set) var importCustomStampCallCount = 0
+    private(set) var importCustomStampNames: [String] = []
     private(set) var loadCustomStampsCallCount = 0
     private(set) var removeCustomStampCalls: [CustomStampID] = []
     private(set) var attachStampReferenceCalls: [(projectID: ProjectID, assetHash: StampAssetHash)] = []
@@ -75,10 +76,14 @@ private actor FakeStampStore: StampStore {
     }
 
     func importCustomStamp(
-        _ body: @Sendable (URL) async throws -> Void
+        name: String,
+        body: @Sendable (URL) async throws -> Void,
+        thumbnailBody: @Sendable (URL) async throws -> Void
     ) async throws -> (stamp: CustomStamp, assetHash: StampAssetHash) {
         importCustomStampCallCount += 1
+        importCustomStampNames.append(name)
         try await body(URL(fileURLWithPath: "/tmp/stamp-store-tests/import"))
+        try await thumbnailBody(URL(fileURLWithPath: "/tmp/stamp-store-tests/thumbnail"))
         return importResult
     }
 
@@ -118,10 +123,13 @@ func fakeStampStoreForwardsArguments() async throws {
 
     // 可変キャプチャを作らず、渡された URL をクロージャ内で直接検証する
     // （Swift 6 strict concurrency で nonisolated(unsafe) の回避を使わないため。Copilot 指摘）。
-    let result = try await store.importCustomStamp { url in
-        #expect(url.lastPathComponent == "import")
-    }
+    let result = try await store.importCustomStamp(
+        name: "スター",
+        body: { url in #expect(url.lastPathComponent == "import") },
+        thumbnailBody: { url in #expect(url.lastPathComponent == "thumbnail") }
+    )
     #expect(result.stamp == expectedStamp)
+    #expect(await store.importCustomStampNames == ["スター"])
 
     _ = try await store.loadCustomStamps()
 
