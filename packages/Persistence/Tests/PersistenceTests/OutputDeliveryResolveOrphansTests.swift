@@ -60,7 +60,7 @@ private func seedOrphanedAttempts(_ database: AppDatabase, projectID: UUID) asyn
 }
 
 @Suite("OutputDeliveryStoreLive.resolveOrphanedAttempts")
-struct OutputDeliveryStoreResolveOrphanedAttemptsTests {
+struct OutputDeliveryResolveOrphansTests {
     @Test("previousState=generatedのattemptをdeliveryUnknownへ解決すること")
     func resolvesGeneratedPreviousStateToDeliveryUnknown() async throws {
         let (database, url) = try makeTestAppDatabase()
