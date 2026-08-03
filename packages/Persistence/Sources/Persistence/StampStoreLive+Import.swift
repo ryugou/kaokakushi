@@ -29,15 +29,15 @@ extension StampStoreLive {
         }
 
         let customStampID = CustomStampID(rawValue: UUID())
+        let newRows = NewStampRows(
+            assetHash: assetHash,
+            assetFileID: assetRef.fileID,
+            customStampID: customStampID,
+            name: name,
+            thumbnailFileID: thumbnailRef.fileID
+        )
         let (didReuseExistingAsset, sortOrder) = try await database.dbQueue.write { connection in
-            try Self.insertStampRows(
-                connection,
-                assetHash: assetHash,
-                assetFileID: assetRef.fileID,
-                customStampID: customStampID,
-                name: name,
-                thumbnailFileID: thumbnailRef.fileID
-            )
+            try Self.insertStampRows(connection, rows: newRows)
         }
 
         // 既存StampAssetが再利用された場合、新規に書いたファイルはどこにも参照されて
@@ -57,28 +57,33 @@ extension StampStoreLive {
         return (stamp: stamp, assetHash: assetHash)
     }
 
+    /// insertStampRows へ渡す新規行の値ひとそろい（lint の引数上限対応で束ねた入力）。
+    private struct NewStampRows {
+        let assetHash: StampAssetHash
+        let assetFileID: ManagedFileID
+        let customStampID: CustomStampID
+        let name: String
+        let thumbnailFileID: ManagedFileID
+    }
+
     /// 単一トランザクションで: (1) 既存StampAssetの有無を判定 (2) 無ければ新規作成
     /// (3) 既存最大sortOrder + 1を採番 (4) CustomStamp行を作成する。
     /// 戻り値は「既存StampAssetを再利用したか」と、採番したsortOrder。
     private static func insertStampRows(
         _ connection: Database,
-        assetHash: StampAssetHash,
-        assetFileID: ManagedFileID,
-        customStampID: CustomStampID,
-        name: String,
-        thumbnailFileID: ManagedFileID
+        rows: NewStampRows
     ) throws -> (didReuseExistingAsset: Bool, sortOrder: Int32) {
         let existingCount = try Int.fetchOne(
             connection,
             sql: "SELECT count(*) FROM StampAsset WHERE contentHash = ?",
-            arguments: [assetHash.bytes]
+            arguments: [rows.assetHash.bytes]
         ) ?? 0
         let didReuseExistingAsset = existingCount > 0
 
         if !didReuseExistingAsset {
             try connection.execute(
                 sql: "INSERT INTO StampAsset (contentHash, fileID) VALUES (?, ?)",
-                arguments: [assetHash.bytes, assetFileID.rawValue]
+                arguments: [rows.assetHash.bytes, rows.assetFileID.rawValue]
             )
         }
 
@@ -92,7 +97,10 @@ extension StampStoreLive {
             INSERT INTO CustomStamp (customStampID, assetHash, name, sortOrder, thumbnailFileID)
             VALUES (?, ?, ?, ?, ?)
             """,
-            arguments: [customStampID.rawValue, assetHash.bytes, name, sortOrder, thumbnailFileID.rawValue]
+            arguments: [
+                rows.customStampID.rawValue, rows.assetHash.bytes, rows.name,
+                sortOrder, rows.thumbnailFileID.rawValue
+            ]
         )
 
         return (didReuseExistingAsset, sortOrder)
