@@ -8,9 +8,10 @@ import Domain
 // 入力検証・DB破損検知のテストはExportSagaStoreStartValidationTests.swiftへ分離した
 // （400行制限のため）。
 //
-// 1.1（確認の一致）・1.2（能力）の検査と月間枠チェック（monthlyLimitReached）は
-// Persistenceのスコープ外（オーケストレーター確定判断。ExportSagaStoreLive+Start.swift /
-// +Accounting.swiftのコメント参照）のため、ここでは検証しない。
+// 1.1（確認の一致）・1.2（能力）の検査はPersistenceのスコープ外（オーケストレーター確定
+// 判断。ExportSagaStoreLive+Start.swiftのコメント参照）のため、ここでは検証しない。
+// 月間枠チェック（monthlyLimitReached）はTask 5後半で実装済み。専用テストは
+// ExportSagaStoreQuotaTests.swiftへ分離した（400行制限）。
 
 @Suite("ExportSagaStoreLive.startExport")
 struct ExportSagaStoreStartTests {

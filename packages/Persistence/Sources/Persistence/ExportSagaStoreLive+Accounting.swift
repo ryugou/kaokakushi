@@ -3,7 +3,8 @@ import Domain
 import GRDB
 
 // startExportが使う勘定（ExportAccountingMode）の解決ロジック（export-saga.md 1.3
-// 「権限とクォータ」・1.4「勘定の使い分け」が正本）。
+// 「権限とクォータ」・1.4「勘定の使い分け」・architecture.md 6.3「クォータとトライアル」
+// 「判定」節が正本）。
 //
 // 判定は entitlement.plan を直接見ない。SubscriptionState から導出した
 // ResolvedCapabilities（Domainの純粋関数resolveCapabilitiesの出力）だけを見る
@@ -11,11 +12,12 @@ import GRDB
 // ExportJob.authorization.entitlementSnapshotへ保存する認可時点の生スナップショット
 // としてのみ使う。
 //
-// 月間枠（freeMonthlyConsumeのmonthlyLimitReached判定）は後半セッションで実装する。
-// 注入経路はオーケストレーターが確定済み: ExportSagaStoreLive の生成時に
-// monthlyLimit（設定定数）と now / deviceTimeZone のプロバイダをコンストラクタ注入し、
-// Domain の evaluateMonthlyQuota を用いる（ポートのシグネチャは正本どおり変えない。
-// evaluateMonthlyQuota への monthlyLimit 注入と同型のパターン）。
+// 月間枠（freeMonthlyConsumeのmonthlyLimitReached判定）はDomainの純粋関数
+// evaluateMonthlyQuotaを用いる。ExportSagaStoreLiveの生成時にmonthlyLimit（設定定数）と
+// now / deviceTimeZoneのプロバイダをコンストラクタ注入し（ポートのシグネチャは正本どおり
+// 変えない）、UsageLedger行はここでconnection経由で読む（無ければ消費0件・
+// period=呼び出し時点の年月として扱う。台帳自体の更新はしない。evaluateMonthlyQuotaの
+// 契約どおり、実際の消費計上はsettle側の担当）。
 
 extension ExportSagaStoreLive {
     enum AccountingModeDecision {
@@ -23,23 +25,25 @@ extension ExportSagaStoreLive {
         case resolved(ExportAccountingMode)
     }
 
-    /// capabilitiesはstartExportがSubscriptionState由来のResolvedCapabilitiesを
-    /// 解決した結果（entitlement.plan/.statusを直接は見ない。1番の修正）。
-    /// hardMaxTrialCreditsはBatch.trialCreditCount（DB由来）をクランプする上限
-    /// （コンストラクタ注入。3番の修正）。
+    /// resolveAccountingModeへの入力ひとそろい（lintの引数上限対応で束ねた入力。
+    /// StampStoreLive.insertStampRowsと同じパターン）。
+    struct AccountingModeContext {
+        let input: StartExportInput
+        let capabilities: ResolvedCapabilities
+        /// Batch.trialCreditCount（DB由来）をクランプする上限（コンストラクタ注入。3番の修正）。
+        let hardMaxTrialCredits: Int
+        /// 月間上限（既定5。architecture.md 6.3。コンストラクタ注入）。
+        let monthlyLimit: Int
+        /// startExportのauthorizedAtをそのまま使う（evaluateMonthlyQuotaのusageNow）。
+        let usageNow: Date
+        let deviceTimeZone: TimeZone
+    }
+
     static func resolveAccountingMode(
-        _ connection: Database, input: StartExportInput, capabilities: ResolvedCapabilities, hardMaxTrialCredits: Int
+        _ connection: Database, context: AccountingModeContext
     ) throws -> AccountingModeDecision {
-        guard let batchID = input.batchID else {
-            // 単体書き出し。
-            // 未実装（後半セッション担当）: コンストラクタ注入の monthlyLimit / now / deviceTimeZone で
-            // Domain の evaluateMonthlyQuota による月間枠チェックを実装する（ファイル冒頭コメント参照）。
-            switch capabilities.singleExportAccess {
-            case .unlimited:
-                return .resolved(.paidUnlimited)
-            case .metered:
-                return .resolved(.freeMonthlyConsume)
-            }
+        guard let batchID = context.input.batchID else {
+            return try Self.resolveSingleExportAccountingMode(connection, context: context)
         }
 
         guard let batch = try Self.loadBatch(connection, batchID: batchID) else {
@@ -51,14 +55,40 @@ extension ExportSagaStoreLive {
             // 2番の修正: 開始時点でcanUseProBatchを失っていればブロックする
             // （proBatch自体はentitlementの能力に依存するため。1.5「開始後の権限変化」の
             // 対象はあくまで「開始済みの書き出し」であり、開始前のこの検査を免除しない）。
-            guard capabilities.canUseProBatch else {
+            guard context.capabilities.canUseProBatch else {
                 return .blocked(ExportStartBlock(reason: .capabilityVerificationRequired, limit: nil))
             }
             return .resolved(.paidUnlimited)
         case .trial:
             return try Self.resolveTrialAccountingMode(
-                connection, trialCreditCount: batch.trialCreditCount, hardMaxTrialCredits: hardMaxTrialCredits
+                connection, trialCreditCount: batch.trialCreditCount,
+                hardMaxTrialCredits: context.hardMaxTrialCredits
             )
+        }
+    }
+
+    /// 単体書き出しの勘定判定（1.3「権限とクォータ」）。unlimitedは即resolved、meteredは
+    /// UsageLedgerを読みevaluateMonthlyQuota（Domain純粋関数）で月間枠を判定する。
+    private static func resolveSingleExportAccountingMode(
+        _ connection: Database, context: AccountingModeContext
+    ) throws -> AccountingModeDecision {
+        switch context.capabilities.singleExportAccess {
+        case .unlimited:
+            return .resolved(.paidUnlimited)
+        case .metered:
+            let ledger = try Self.loadUsageLedger(connection) ?? UsageLedger(
+                period: YearMonth(from: context.usageNow, in: context.deviceTimeZone),
+                consumedExportIDs: [], trialConsumedExportIDs: []
+            )
+            switch evaluateMonthlyQuota(
+                ledger: ledger, access: .metered, monthlyLimit: context.monthlyLimit,
+                usageNow: context.usageNow, deviceTimeZone: context.deviceTimeZone
+            ) {
+            case .blocked(let limit):
+                return .blocked(ExportStartBlock(reason: .monthlyLimitReached, limit: limit))
+            case .unlimited, .consumable:
+                return .resolved(.freeMonthlyConsume)
+            }
         }
     }
 
@@ -97,15 +127,16 @@ extension ExportSagaStoreLive {
         return BatchSnapshot(kind: kind, trialCreditCount: row["trialCreditCount"])
     }
 
-    /// UsageLedger.trialConsumedExportIDsのBLOB形式（このタスクで確定。次セッションの
-    /// settleBatchが書き込む際も同じ形式を使うこと）: Set<ExportID>の各要素をUUIDの
-    /// 16バイト表現のまま連結する（順序はSetのため意味を持たない）。**このBLOBはユニーク
-    /// なExportIDの集合であり、重複を許さない契約**（同一ExportIDが2回記録される状態は
-    /// 「同じ出力を2回消費した」という不正な状態を意味するため）。後半セッションの
-    /// settleBatchがこのBLOBへ追記する際も、この一意性契約を維持すること（追記前に
-    /// 重複チェックを行う、またはSetに格納してから連結する等）。UsageLedger行が無ければ
-    /// トライアル消費0件とみなす（オーケストレーター確定判断）。
-    private static let exportIDByteLength = 16
+    /// UsageLedger.consumedExportIDs / trialConsumedExportIDsのBLOB形式（このタスクで確定。
+    /// ExportSagaStoreLive+Ledger.swiftのencodeExportIDSet/decodeExportIDSetが読み書き両方で
+    /// この形式を使う）: Set<ExportID>の各要素をUUIDの16バイト表現のまま連結する（順序は
+    /// Setのため意味を持たない）。**このBLOBはユニークなExportIDの集合であり、重複を許さない
+    /// 契約**（同一ExportIDが2回記録される状態は「同じ出力を2回消費した」という不正な状態を
+    /// 意味するため）。settleExport/settleBatchがこのBLOBへ書き込む際もこの一意性契約を
+    /// 維持する（+Ledger.swift参照）。UsageLedger行が無ければトライアル消費0件とみなす
+    /// （オーケストレーター確定判断）。プライベートにしていない理由: +Ledger.swiftの
+    /// decodeExportIDSetが同一モジュール内から参照するため（他のstatic funcと同じ流儀）。
+    static let exportIDByteLength = 16
 
     /// UsageLedger行はApplication層が単一行であることを保証する契約
     /// （Schema+Accounting.swiftのコメント参照）。行が2件以上あれば契約違反として
@@ -126,7 +157,8 @@ extension ExportSagaStoreLive {
 
     /// blobを16バイトずつに分割し、重複が無いことを検査しながらSetへ集める。重複する
     /// チャンクが1つでもあればfail-closedでthrowする（黙って丸めない。5番の修正）。
-    private static func splitIntoUniqueChunks(_ blob: Data) throws -> Set<Data> {
+    /// +Ledger.swiftのdecodeExportIDSetが再利用するためprivateにしていない。
+    static func splitIntoUniqueChunks(_ blob: Data) throws -> Set<Data> {
         var uniqueChunks = Set<Data>()
         var chunkStart = blob.startIndex
         while chunkStart < blob.endIndex {

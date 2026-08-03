@@ -112,19 +112,30 @@ func insertExportRecord(_ database: Database, exportID: UUID, projectID: UUID, b
     )
 }
 
-func insertExportJob(_ database: Database, exportID: UUID, projectID: UUID, batchID: UUID?) throws {
+/// settingsHashは既定値付き（Task 5後半でExportJobへ追加した内部専用列。
+/// オーケストレーター確定判断。ExportSagaStoreLive+Start.swiftのコメント参照）。
+/// 既存呼び出し元（SchemaConstraintTests.swift）は列の存在を知る必要が無いよう
+/// デフォルト値のまま呼べる。accountingMode/deliveryFormatは1（ExportAccountingModeColumn.
+/// paidUnlimited / ImageFormatColumn.jpeg。ExportSagaStoreLive.swift）固定にする
+/// （Task 5後半でsettleExport/settleBatchがこの行をSelf.loadExportJob経由でDomainの
+/// enumへデコードするようになったため、0のような無効なraw valueのままだと
+/// invalidColumnValueが先に発生し、settle側のテストが検証したい事前条件に到達できない）。
+func insertExportJob(
+    _ database: Database, exportID: UUID, projectID: UUID, batchID: UUID?,
+    settingsHash: Data = schemaTestHash(seed: 0xEE)
+) throws {
     try database.execute(
         sql: """
         INSERT INTO ExportJob (
             exportID, projectID, batchID, queueItemID, authorizedAt, accountingMode,
             entitlementPlan, entitlementStatus, entitlementExpiresAt,
             entitlementLastVerifiedAt, entitlementIsSandbox, deliveryFormat,
-            deliverySuggestedCreationDate
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            deliverySuggestedCreationDate, settingsHash
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         arguments: [
-            exportID, projectID, batchID, nil, schemaTestReferenceDate, 0,
-            1, 1, nil, schemaTestReferenceDate, false, 0, nil
+            exportID, projectID, batchID, nil, schemaTestReferenceDate, 1,
+            1, 1, nil, schemaTestReferenceDate, false, 1, nil, settingsHash
         ]
     )
 }

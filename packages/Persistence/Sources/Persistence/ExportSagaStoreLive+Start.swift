@@ -5,13 +5,15 @@ import GRDB
 // startExport（export-saga.md 1章「認可」・1.6「開始の順序」手順4〜5、0章
 // StartExportInputが正本）。
 //
-// このセッションでの評価スコープはオーケストレーター確定判断のとおり「時刻に依存しない
-// 部分だけをDBの実状態から評価する」に限定する。1.1（確認の一致）・1.2（能力）の検査は
-// Application層の担当（RenderSpec/PreviewConfirmationの純粋関数評価はPersistenceの
-// 対象外）。ただしpreviewConfirmation.projectIDとinput.projectIDの整合だけはstore側の
-// ゲートとして検査する（7番の修正。異なるプロジェクトのプレビュー確認情報を誤って渡す
-// バグをここで止める）。1.3（権限とクォータ）のうち月間枠チェックはusageNow/monthlyLimit
-// の注入経路が無いため実装しない（+Accounting.swiftのコメント参照）。
+// 評価スコープはオーケストレーター確定判断のとおり「時刻に依存しない部分だけをDBの実状態
+// から評価する」に限定する。1.1（確認の一致）・1.2（能力）の検査はApplication層の担当
+// （RenderSpec/PreviewConfirmationの純粋関数評価はPersistenceの対象外）。ただし
+// previewConfirmation.projectIDとinput.projectIDの整合だけはstore側のゲートとして検査する
+// （7番の修正。異なるプロジェクトのプレビュー確認情報を誤って渡すバグをここで止める）。
+// 1.3（権限とクォータ）のうち月間枠チェックはコンストラクタ注入のmonthlyLimit /
+// deviceTimeZoneとauthorizedAt（usageNow）をAccountingModeContext経由で+Accounting.swiftへ
+// 渡し、Domainのevaluate関数（evaluateMonthlyQuota）で評価する（+Accounting.swiftの
+// コメント参照）。
 
 extension ExportSagaStoreLive {
     public func startExport(
@@ -19,6 +21,7 @@ extension ExportSagaStoreLive {
         expectedProjectRevision: Int64
     ) async throws -> ExportStartDecision {
         try Self.validatePreviewConfirmationProjectID(input)
+        try Self.validateQueueItemRequiresBatchID(input)
         let authorizedAt = now()
         return try await database.dbQueue.write { connection in
             try Self.validateProjectRevision(
@@ -31,9 +34,11 @@ extension ExportSagaStoreLive {
                 return .blocked(ExportStartBlock(reason: .capabilityVerificationRequired, limit: nil))
             }
 
-            switch try Self.resolveAccountingMode(
-                connection, input: input, capabilities: capabilities, hardMaxTrialCredits: hardMaxTrialCredits
-            ) {
+            let accountingContext = AccountingModeContext(
+                input: input, capabilities: capabilities, hardMaxTrialCredits: hardMaxTrialCredits,
+                monthlyLimit: monthlyLimit, usageNow: authorizedAt, deviceTimeZone: deviceTimeZone()
+            )
+            switch try Self.resolveAccountingMode(connection, context: accountingContext) {
             case .blocked(let block):
                 return .blocked(block)
             case .resolved(let accountingMode):
@@ -55,6 +60,13 @@ extension ExportSagaStoreLive {
                 projectID: input.projectID, previewConfirmationProjectID: input.previewConfirmation.projectID
             )
         }
+    }
+
+    /// queueItemIDが指定される場合はbatchIDも必須であることを検査する。DBアクセスを
+    /// 伴わない純粋な入力検査のため、書き込みトランザクションを開く前に行う。
+    private static func validateQueueItemRequiresBatchID(_ input: StartExportInput) throws {
+        guard let queueItemID = input.queueItemID, input.batchID == nil else { return }
+        throw ExportSagaStoreError.queueItemIDRequiresBatchID(queueItemID: queueItemID)
     }
 
     /// Project行のprojectRevisionを読み、expectedProjectRevisionと比較する（1.6 手順5）。
@@ -145,6 +157,12 @@ extension ExportSagaStoreLive {
     /// suggestedCreationDate`はExportSettingに相当する値が無いためnil固定
     /// （同確定判断）。entitlementはSubscriptionState行から読んだ生の値（resolveCapabilities
     /// を通す前の値）をそのまま保存する（認可時点のスナップショット契約。1番の修正）。
+    ///
+    /// settingsHash列（Schema+Accounting.swift）はここで計算する。settle
+    /// （export-saga.md 3章 手順5「confirmed設定エントリの更新」）はRenderSpec/
+    /// ExportSettingを再構築する手段を持たないため、平文値が手元にあるstartExport時点で
+    /// projectSettingsHash（Domain純粋関数）を計算し内部列として保持する
+    /// （オーケストレーター確定判断。Domainの`ExportJob`構造体には出現しない）。
     private static func insertExportJob(
         _ connection: Database,
         input: StartExportInput,
@@ -157,6 +175,9 @@ extension ExportSagaStoreLive {
         let authorization = ExportAuthorization(
             entitlementSnapshot: entitlement, accountingMode: accountingMode, authorizedAt: authorizedAt
         )
+        let settingsHash = try projectSettingsHash(
+            renderSpec: input.renderSpec, exportSetting: input.exportSetting, digest: CryptoKitSha256Digest()
+        )
 
         try connection.execute(
             sql: """
@@ -164,15 +185,15 @@ extension ExportSagaStoreLive {
                 exportID, projectID, batchID, queueItemID, authorizedAt, accountingMode,
                 entitlementPlan, entitlementStatus, entitlementExpiresAt,
                 entitlementLastVerifiedAt, entitlementIsSandbox, deliveryFormat,
-                deliverySuggestedCreationDate
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                deliverySuggestedCreationDate, settingsHash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             arguments: [
                 exportID.rawValue, input.projectID.rawValue, input.batchID?.rawValue, input.queueItemID?.rawValue,
                 authorizedAt, ExportAccountingModeColumn(accountingMode).rawValue,
                 entitlement.plan.rawValue, entitlement.status.rawValue, entitlement.expiresAt,
                 entitlement.lastVerifiedAt, entitlement.isSandbox,
-                ImageFormatColumn(delivery.format).rawValue, delivery.suggestedCreationDate
+                ImageFormatColumn(delivery.format).rawValue, delivery.suggestedCreationDate, settingsHash.bytes
             ]
         )
 

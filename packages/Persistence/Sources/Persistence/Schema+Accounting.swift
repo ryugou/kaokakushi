@@ -33,6 +33,12 @@ private func createExportProgressTables(_ database: Database) throws {
         // ImageFormatの判別子。raw valueの割当はStore実装タスクの担当。
         tableDef.column("deliveryFormat", .integer).notNull()
         tableDef.column("deliverySuggestedCreationDate", .datetime)
+        // startExport時点で計算したProjectSettingsHash（canonical-schema.md 5.2）。
+        // settle（export-saga.md 3章 手順5）はRenderSpec/ExportSettingを再構築する手段を
+        // 持たないため、平文値が手元にあるstartExport時点で計算しここへ保存し、settle時に
+        // ExportedSettingsEntryへそのままコピーする（オーケストレーター確定判断。Issue #6
+        // Task 5後半）。Domainの`ExportJob`構造体には出現しないPersistence内部専用の列。
+        tableDef.column("settingsHash", .blob).notNull()
     }
 
     try database.create(table: "OutputRecord") { tableDef in

@@ -4,27 +4,36 @@ import GRDB
 
 // ExportSagaStoreの実装（export-saga.md 0章「Application が使う永続化ポート」・
 // 2章「ExportJobとOutputRecord」・3章「手順」・4章「中断・やり直し・破棄」・
-// 5章「起動時復旧」が正本。Issue #6 Task 5前半）。
+// 5章「起動時復旧」が正本。Issue #6 Task 5）。
 //
-// このセッションで本実装するのは startExport / recordGeneratedOutput / discardExport /
-// loadRunningJobs / deleteRunningJobs の5メソッドのみ。settleExport / settleBatch は
-// 次セッションの担当のため、下記のとおり未実装エラーをthrowする仮実装に留める
-// （オーケストレーター確定判断）。
+// 全7メソッド（startExport / recordGeneratedOutput / discardExport / settleExport /
+// settleBatch / loadRunningJobs / deleteRunningJobs）を実装する。
 //
 // `ExportSagaStore` のポートシグネチャには時刻引数が無いが、ExportJob.authorization.
-// authorizedAt / OutputRecord.generatedAt には実行時点の時刻が必要なため、実装側だけの
-// 依存注入として `now: @escaping @Sendable () -> Date` をinitへ追加する（Domainの
-// プロトコル自体は変更しない。オーケストレーター確定判断）。
+// authorizedAt / OutputRecord.generatedAt / settledAt には実行時点の時刻が必要なため、
+// 実装側だけの依存注入として `now: @escaping @Sendable () -> Date` をinitへ追加する
+// （Domainのプロトコル自体は変更しない。オーケストレーター確定判断）。同様に月間枠判定
+// （evaluateMonthlyQuota）が要求する端末タイムゾーンも `deviceTimeZone: @escaping
+// @Sendable () -> TimeZone` として注入する（裸のTimeZone.currentを直接使わない。
+// オーケストレーター確定判断）。
+//
+// export-saga.md 3章の手順表にある「Projectの最終更新時刻の更新」は実装対象に含めない。
+// architecture.md 7.1のProjectテーブル定義（Schema+Project.swift）にこれに対応する列が
+// 存在せず、`ExportSagaStore`プロトコルのdocコメント（Domain側、確定済みで変更不可）にも
+// この文言が登場しないため（オーケストレーター確定判断。列が存在せず実装不能）。
 //
 // 400行制限のため、メソッド群を以下へ分割する（StampStoreLiveの分割パターンを踏襲）:
 //   - ExportSagaStoreLive.swift（このファイル）: 型定義・エラー型・raw value割当・
-//     struct定義・init・settleExport/settleBatchの仮実装
+//     struct定義・init
 //   - ExportSagaStoreLive+Mapping.swift: ExportJob行の共通デコード（loadExportJob /
 //     makeExportJob）とraw value変換の共通ヘルパー
 //   - ExportSagaStoreLive+Start.swift: startExport
 //   - ExportSagaStoreLive+Accounting.swift: startExportが使う勘定（accountingMode）の
-//     解決ロジック
+//     解決ロジック（月間枠判定を含む）
 //   - ExportSagaStoreLive+Output.swift: recordGeneratedOutput / discardExport
+//   - ExportSagaStoreLive+Settle.swift: settleExport / settleBatch
+//   - ExportSagaStoreLive+Ledger.swift: UsageLedgerの読み書き・BLOBエンコード/デコード
+//   - ExportSagaStoreLive+SettingsHash.swift: ProjectSettingsHash計算用CryptoKitアダプタ
 //   - ExportSagaStoreLive+Recovery.swift: loadRunningJobs / deleteRunningJobs
 
 /// ExportSagaStoreLiveが送出する専用エラー。運用者が次のアクションを判断できるよう、
@@ -71,8 +80,43 @@ public enum ExportSagaStoreError: Error, Sendable, Equatable {
     /// startExport: input.previewConfirmation.projectIDがinput.projectIDと一致しない
     /// （1.1 確認の一致。異なるプロジェクトのプレビュー確認情報が渡された可能性がある）。
     case previewConfirmationProjectMismatch(projectID: ProjectID, previewConfirmationProjectID: ProjectID)
-    /// settleExport / settleBatch: 今回のセッションでは未実装（次セッションの担当）。
-    case unimplemented(String)
+    /// startExport: input.queueItemIDが指定されているのにinput.batchIDがnil。
+    /// ExportQueueItem.batchIDはNOT NULL制約（Schema+Queue.swift）のため、queueItemIDを
+    /// 伴うジョブは必ずbatchIDも持つ必要がある。ここで防がないと、settle時に
+    /// validateQueueItemForSettleが必ず事前条件不一致でthrowするだけの、確定不能な
+    /// ExportJobが残ってしまう。
+    case queueItemIDRequiresBatchID(queueItemID: ExportQueueItemID)
+    /// settleExport / settleBatch: 対象exportIDのExportJob行が存在しない（settleExportが
+    /// 未認可のexportIDに呼ばれた、または既にsettle済み・discardExport/起動時復旧で
+    /// 削除済みのexportIDへ再度settleが呼ばれた）。exportJobNotFound（recordGeneratedOutput
+    /// 用）とはメッセージの文脈が異なるため専用caseにする。
+    case settleExportJobNotFound(exportID: ExportID)
+    /// settleExport: 渡されたexportIDのExportJob.batchIDがnilでない（settleExportは単体
+    /// 書き出し専用。バッチの成果物はsettleBatchでのみ確定する。export-saga.md 3章）。
+    case settleExportBatchIDNotNil(exportID: ExportID, batchID: BatchID)
+    /// settleBatch: OutputRecord.batchIDが対象batchIDと一致するexportIDなのに、対応する
+    /// ExportJob.batchIDが対象batchIDと一致しない（データ不整合。通常のAPI経路では
+    /// OutputRecord.batchIDはrecordGeneratedOutputがExportJob.batchIDからコピーするため
+    /// 一致するはずだが、その前提が崩れていないかをここで確定的に検査する）。
+    case settleBatchJobBatchIDMismatch(exportID: ExportID, expectedBatchID: BatchID, actualBatchID: BatchID?)
+    /// settleExport / settleBatch: 対象exportIDに対応するOutputRecordが存在しない、または
+    /// 存在してもsettledAtが既に非NULL（確定対象は`settledAt IS NULL`の行のみ。3章）。
+    case settlePendingOutputRecordNotFound(exportID: ExportID)
+    /// settleExport / settleBatch: ExportJob.queueItemIDが指定されているのに、対応する
+    /// ExportQueueItem行が存在しない、projectID/batchIDが一致しない、またはstateが
+    /// `.exporting`でない（無関係なキュー項目をcompletedにしないための事前条件。3章）。
+    case settleQueueItemPreconditionFailed(exportID: ExportID, queueItemID: ExportQueueItemID, detail: String)
+    /// settleExport / settleBatch: accountingModeから期待される消費件数
+    /// （paidUnlimited=0、freeMonthlyConsume/batchTrialは1件）の合計と、実際にUsageLedgerへ
+    /// 新規追加できた件数が一致しない（数え間違いによる過不足消費を防ぐ検査。exportIDの
+    /// 重複追加や想定外の状態を疑う。3章「ただし消費するクレジット・枠の枚数は…件数と
+    /// 必ず一致することを検査する」）。
+    case settleConsumptionMismatch(exportIDs: [ExportID], expectedConsumed: Int, actualConsumed: Int)
+    /// settleBatch: 対象batchIDに一致しsettledAt IS NULLであるOutputRecordが0件（不明な
+    /// batchID、または確定済みバッチを含む）。settleExportの二重確定防止
+    /// （settleExportBatchIDNotNil等）と対称の安全弁。静かな成功は誤batchIDや二重呼び出しを
+    /// 隠すため、明示的にthrowする（export-saga.md 3章）。
+    case settleBatchNothingToSettle(batchID: BatchID)
 }
 
 extension ExportSagaStoreError: LocalizedError {
@@ -144,10 +188,68 @@ extension ExportSagaStoreError: LocalizedError {
             一致しません。呼び出し元が別プロジェクトのプレビュー確認情報を渡していないか \
             確認してください（export-saga.md 1.1）。
             """
-        case .unimplemented(let methodName):
+        case .queueItemIDRequiresBatchID(let queueItemID):
             return """
-            ExportSagaStore: \(methodName) はこのセッションでは未実装です \
-            （export-saga.md 3章「手順5」の単一トランザクション実装は次セッションの担当）。
+            ExportSagaStore: startExportに渡されたqueueItemID=\
+            \(queueItemID.rawValue.uuidString) がありますが、batchIDがnilです。 \
+            ExportQueueItem.batchIDはNOT NULL制約のため、queueItemIDを伴う書き出しには \
+            batchIDも必須です。呼び出し元がキュー経路の書き出しでbatchIDを渡し忘れていないか \
+            確認してください。
+            """
+        case .settleExportJobNotFound(let exportID):
+            return """
+            ExportSagaStore: settleExport/settleBatchに渡されたexportID=\
+            \(exportID.rawValue.uuidString) のExportJob行が見つかりません。既にsettle済み・ \
+            discardExportで破棄済み・起動時復旧で削除済みのexportIDを再度渡していないか、 \
+            またはstartExportが成功していないexportIDを渡していないか確認してください。
+            """
+        case .settleExportBatchIDNotNil(let exportID, let batchID):
+            return """
+            ExportSagaStore: settleExportにexportID=\(exportID.rawValue.uuidString) が \
+            渡されましたが、対応するExportJob.batchID=\(batchID.rawValue.uuidString) が \
+            nilではありません。settleExportは単体書き出し専用です。バッチの成果物は \
+            settleBatch(_:settledAt:)で確定してください（export-saga.md 3章）。
+            """
+        case .settleBatchJobBatchIDMismatch(let exportID, let expectedBatchID, let actualBatchID):
+            return """
+            ExportSagaStore: settleBatch(batchID=\(expectedBatchID.rawValue.uuidString))の \
+            確定対象exportID=\(exportID.rawValue.uuidString) に対応するExportJob.batchIDが \
+            期待値と一致しません（実際の値: \
+            \(actualBatchID?.rawValue.uuidString ?? "nil")）。OutputRecord.batchIDと \
+            ExportJob.batchIDの不整合が疑われます。データ破損、または手動でのDB改変を \
+            確認してください。
+            """
+        case .settlePendingOutputRecordNotFound(let exportID):
+            return """
+            ExportSagaStore: settleExport/settleBatchに渡されたexportID=\
+            \(exportID.rawValue.uuidString) に対応する未確定（settledAt IS NULL）の \
+            OutputRecordが見つかりません。recordGeneratedOutputがまだ呼ばれていない、 \
+            または既にこのexportIDが確定済みである可能性があります。呼び出し元の書き出し \
+            パイプラインの進行順序を確認してください。
+            """
+        case .settleQueueItemPreconditionFailed(let exportID, let queueItemID, let detail):
+            return """
+            ExportSagaStore: settleExport/settleBatch（exportID=\
+            \(exportID.rawValue.uuidString), queueItemID=\(queueItemID.rawValue.uuidString)）の \
+            キュー項目の事前条件チェックに失敗しました: \(detail)。無関係なキュー項目を \
+            completedへ更新しないための防御です。ExportQueueItemの状態遷移を管理する \
+            呼び出し元の実装を確認してください。
+            """
+        case .settleConsumptionMismatch(let exportIDs, let expectedConsumed, let actualConsumed):
+            return """
+            ExportSagaStore: settle対象exportID群（\(exportIDs.count)件）の期待消費件数 \
+            （\(expectedConsumed)）と、実際にUsageLedgerへ新規追加できた件数 \
+            （\(actualConsumed)）が一致しません。exportIDの重複追加や、想定外の \
+            accountingModeの混在が疑われます。UsageLedger行の内容を確認してください。 \
+            このトランザクションはロールバックされ、台帳・OutputRecord・ExportJobは \
+            いずれも変更されていません。
+            """
+        case .settleBatchNothingToSettle(let batchID):
+            return """
+            ExportSagaStore: settleBatch(batchID=\(batchID.rawValue.uuidString)) の確定対象 \
+            （settledAt IS NULLのOutputRecord）が0件です。batchIDの指定間違い、または \
+            既に確定済みのバッチへの二重呼び出しの可能性があります。呼び出し元のバッチID \
+            管理・完了操作の呼び出し回数を確認してください。
             """
         }
     }
@@ -203,52 +305,60 @@ enum ExportAccountingModeColumn: Int, Sendable {
     }
 }
 
+/// 設定可能な閾値・機能フラグ束（引数を構造体へ束ねるlint対応パターン。
+/// StampStoreLive.insertStampRowsのNewStampRowsと同じ理由。ExportSagaStoreLive.initが
+/// database/fileStore/now/deviceTimeZoneに加えてこれら3つも受け取ると引数が5個を超える
+/// ため、既定値を持つ設定値だけをここへ束ねる）。
+public struct ExportSagaStoreLimits: Sendable {
+    /// resolveCapabilities(_:usageNow:enabledStampPacks:)（Domain）のシグネチャ上必須
+    /// （startExportの勘定判定自体には影響しない。ResolvedCapabilities.enabledStampPacksに
+    /// 格納されるだけ）。
+    public let enabledStampPacks: Set<String>
+    /// Batch.trialCreditCount（DB由来の値）を無条件に信頼しないためのクランプ上限
+    /// （オーケストレーター確定判断）。
+    public let hardMaxTrialCredits: Int
+    /// 月間上限（既定5。architecture.md 6.3「月間上限（既定 5）」）。
+    public let monthlyLimit: Int
+
+    public init(enabledStampPacks: Set<String> = [], hardMaxTrialCredits: Int = 5, monthlyLimit: Int = 5) {
+        self.enabledStampPacks = enabledStampPacks
+        self.hardMaxTrialCredits = hardMaxTrialCredits
+        self.monthlyLimit = monthlyLimit
+    }
+}
+
 /// ExportSagaStoreの実装。GRDBのAppDatabaseとManagedFileStoreを1つずつ受け取り、全
 /// メソッドをdbQueue.write / dbQueue.readとfileStoreの呼び出しだけで完結させる。
 ///
-/// `database` / `fileStore` / `now` / `enabledStampPacks` / `hardMaxTrialCredits` は
-/// publicではないが、複数ファイルへ分割したextensionから参照する必要があるため
-/// （StampStoreLiveと同じ理由）モジュール内既定アクセス（internal）のままにする。
-/// 外部パッケージからは見えない。
+/// `database` / `fileStore` / `now` / `deviceTimeZone` / `enabledStampPacks` /
+/// `hardMaxTrialCredits` / `monthlyLimit` はpublicではないが、複数ファイルへ分割した
+/// extensionから参照する必要があるため（StampStoreLiveと同じ理由）モジュール内既定
+/// アクセス（internal）のままにする。外部パッケージからは見えない。
 ///
-/// `enabledStampPacks`はresolveCapabilities(_:usageNow:enabledStampPacks:)（Domain）の
-/// シグネチャ上必須のため注入する（startExportの勘定判定自体には影響しない。
-/// ResolvedCapabilities.enabledStampPacksに格納されるだけ）。`hardMaxTrialCredits`は
-/// Batch.trialCreditCount（DB由来の値）を無条件に信頼しないためのクランプ上限
-/// （オーケストレーター確定判断）。
+/// `deviceTimeZone`は`now`と同じ設計判断（デフォルト値なし、呼び出し側が必ず注入する。
+/// 裸のTimeZone.currentをコード内で直接使わない。オーケストレーター確定判断）。
 public struct ExportSagaStoreLive: ExportSagaStore {
     let database: AppDatabase
     let fileStore: ManagedFileStore
     let now: @Sendable () -> Date
+    let deviceTimeZone: @Sendable () -> TimeZone
     let enabledStampPacks: Set<String>
     let hardMaxTrialCredits: Int
+    let monthlyLimit: Int
 
     public init(
         database: AppDatabase,
         fileStore: ManagedFileStore,
         now: @escaping @Sendable () -> Date,
-        enabledStampPacks: Set<String> = [],
-        hardMaxTrialCredits: Int = 5
+        deviceTimeZone: @escaping @Sendable () -> TimeZone,
+        limits: ExportSagaStoreLimits = ExportSagaStoreLimits()
     ) {
         self.database = database
         self.fileStore = fileStore
         self.now = now
-        self.enabledStampPacks = enabledStampPacks
-        self.hardMaxTrialCredits = hardMaxTrialCredits
-    }
-}
-
-extension ExportSagaStoreLive {
-    // 未実装（後半セッション担当）: export-saga.md 3章「手順5」の単一トランザクション実装。
-    // 台帳加算/クレジット消費・settledAt確定・ExportRecord作成・confirmed設定エントリ更新・
-    // キュー項目completed更新・WorkingSourceRecord削除+PendingFileDeletion登録・
-    // ExportJob削除を単一トランザクションで行う実装に置き換えること。
-    public func settleExport(_ exportID: ExportID) async throws {
-        throw ExportSagaStoreError.unimplemented("settleExport")
-    }
-
-    // 未実装（後半セッション担当）: settleExportと同内容をbatchID単位で一括確定。
-    public func settleBatch(_ batchID: BatchID, settledAt: Date) async throws {
-        throw ExportSagaStoreError.unimplemented("settleBatch")
+        self.deviceTimeZone = deviceTimeZone
+        self.enabledStampPacks = limits.enabledStampPacks
+        self.hardMaxTrialCredits = limits.hardMaxTrialCredits
+        self.monthlyLimit = limits.monthlyLimit
     }
 }
