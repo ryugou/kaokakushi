@@ -5,9 +5,10 @@ import GRDB
 // beginDeliveryAttempt / completeLibrarySave / completeShare / abandonDeliveryAttempt
 // （export-saga.md 7章「利用者への受け渡し」・7.0「写真ライブラリ保存の結果不明」が正本）。
 //
-// decodeOutputState / updateOutputRecordState / deleteDeliveryAttemptはinternal
-// （モジュール内既定アクセス）で公開する。resolveOrphanedAttempts
-// （OutputDeliveryStoreLive+Recovery.swift）も同じロジックを使うため
+// decodeOutputState / updateOutputRecordState / deleteDeliveryAttempt / deliveryAttemptCountは
+// internal（モジュール内既定アクセス）で公開する。resolveOrphanedAttempts
+// （OutputDeliveryStoreLive+Recovery.swift）・deleteOutput
+// （OutputDeliveryStoreLive+LibrarySaveAndDelete.swift）も同じロジックを使うため
 // （ExportSagaStoreLive+Mapping.swiftのloadExportJobと同じ分割方針）。
 
 extension OutputDeliveryStoreLive {
@@ -106,8 +107,9 @@ extension OutputDeliveryStoreLive {
         }
     }
 
-    /// 対象exportIDに対応するDeliveryAttempt行数を数える。
-    private static func deliveryAttemptCount(_ connection: Database, exportID: ExportID) throws -> Int {
+    /// 対象exportIDに対応するDeliveryAttempt行数を数える。deleteOutput
+    /// （+LibrarySaveAndDelete.swift）も同じ「試行中は拒否する」検査に使うためinternalにする。
+    static func deliveryAttemptCount(_ connection: Database, exportID: ExportID) throws -> Int {
         try Int.fetchOne(
             connection, sql: "SELECT count(*) FROM DeliveryAttempt WHERE exportID = ?",
             arguments: [exportID.rawValue]
@@ -116,10 +118,20 @@ extension OutputDeliveryStoreLive {
 
     /// OutputRecord.stateを更新する共通ヘルパー。resolveOrphanedAttempts
     /// （+Recovery.swift）とも共有するためinternalにする。
+    ///
+    /// WHERE句に`state != delivered`を加え、`delivered`を後退させない（export-saga.md 7.0の
+    /// 中核不変条件）をSQLレベルでも独立に守る（引き継ぎ1。防御的多重化）。呼び出し元は
+    /// アプリ層の呼び出し規律により通常この分岐に触れないが、矛盾したデータ
+    /// （DeliveryAttempt.previousStateとOutputRecord.stateの不整合）が万一存在しても後退させない。
+    /// 既存の呼び出し箇所への影響: completeLibrarySave/completeShareは`state: .delivered`を渡す
+    /// ため、現在既にdeliveredであれば「delivered→delivered」のUPDATEがWHERE句でスキップ
+    /// されるだけで最終状態は変わらず実害が無い。abandonDeliveryAttemptは呼び出し側で既に
+    /// `currentState != delivered`を確認してから呼ぶため影響しない。resolveOrphanedAttemptsの
+    /// `.generated`ケースだけが実際にこの防御の恩恵を受ける。
     static func updateOutputRecordState(_ connection: Database, exportID: ExportID, state: OutputState) throws {
         try connection.execute(
-            sql: "UPDATE OutputRecord SET state = ? WHERE exportID = ?",
-            arguments: [state.rawValue, exportID.rawValue]
+            sql: "UPDATE OutputRecord SET state = ? WHERE exportID = ? AND state != ?",
+            arguments: [state.rawValue, exportID.rawValue, OutputState.delivered.rawValue]
         )
     }
 
@@ -139,5 +151,19 @@ extension OutputDeliveryStoreLive {
             throw OutputDeliveryStoreError.invalidColumnValue(table: table, column: column, rawValue: rawValue)
         }
         return state
+    }
+
+    /// 現在のOutputRecord.stateを読みデコードする共通ヘルパー。resolveOrphanedAttempts
+    /// （+Recovery.swift）がDeliveryAttempt.previousStateだけでなく現在のOutputRecord.state
+    /// も見て分岐するために使う。DeliveryAttemptはFK CASCADEでOutputRecordを参照するため
+    /// 理論上行が存在しないことは無いが、他のヘルパー同様フェイルクローズで例外にする。
+    static func currentOutputState(_ connection: Database, exportID: ExportID) throws -> OutputState {
+        guard let stateRaw = try Int.fetchOne(
+            connection, sql: "SELECT state FROM OutputRecord WHERE exportID = ?",
+            arguments: [exportID.rawValue]
+        ) else {
+            throw OutputDeliveryStoreError.outputRecordNotFound(exportID: exportID)
+        }
+        return try Self.decodeOutputState(stateRaw, table: "OutputRecord", column: "state")
     }
 }

@@ -21,10 +21,21 @@ extension OutputDeliveryStoreLive {
         }
     }
 
-    /// 1件のDeliveryAttemptをpreviousStateに応じて解決する（7.0表）:
-    /// generated→deliveryUnknownへ更新、deliveryUnknownはそのまま、
+    /// 1件のDeliveryAttemptをpreviousStateおよび現在のOutputRecord.stateに応じて解決する
+    /// （7.0表）: generated→deliveryUnknownへ更新、deliveryUnknownはそのまま、
     /// delivered→OutputRecord.stateは維持しUnknownLibrarySaveへupsertする。
     /// いずれの場合もDeliveryAttempt行は削除する（3ケース共通）。
+    ///
+    /// currentState == .delivered || previousState == .delivered のOR条件で判定する（AND
+    /// 条件や previousState 側だけの判定にしない）。「delivered不可逆」の不変条件が守られて
+    /// いる限りこの2つは本来常に一致するはずだが、updateOutputRecordState側のWHERE句防御
+    /// （+Attempt.swift、引き継ぎ1）により previousState == .generated かつ実際の
+    /// OutputRecord.state が既に .delivered という不整合データでもUPDATEはスキップされ
+    /// deliveredは後退しない。しかしその場合もUnknownLibrarySaveのupsertを欠かすと
+    /// 「deliveredだが写真ライブラリ保存結果は不明」という注記が付かず、次回以降のGC/保持
+    /// 期限処理で通常deliveredとして扱われ再試行用ファイルが失われる
+    /// （architecture.md:1616, 1618）。フェイルクローズで両方を見て、万一の不整合時も
+    /// 注記の付け忘れ（＝ファイル誤削除という重大事故）を起こさない側に倒す。
     private static func resolveOrphanedAttempt(_ connection: Database, row: Row, resolvedAt: Date) throws {
         let exportIDRaw: UUID = row["exportID"]
         let exportID = ExportID(rawValue: exportIDRaw)
@@ -32,14 +43,13 @@ extension OutputDeliveryStoreLive {
         let previousState = try Self.decodeOutputState(
             previousStateRaw, table: "DeliveryAttempt", column: "previousState"
         )
-        switch previousState {
-        case .generated:
-            try Self.updateOutputRecordState(connection, exportID: exportID, state: .deliveryUnknown)
-        case .deliveryUnknown:
-            break
-        case .delivered:
+        let currentState = try Self.currentOutputState(connection, exportID: exportID)
+        if currentState == .delivered || previousState == .delivered {
             try Self.upsertUnknownLibrarySave(connection, exportID: exportID, occurredAt: resolvedAt)
+        } else if previousState == .generated {
+            try Self.updateOutputRecordState(connection, exportID: exportID, state: .deliveryUnknown)
         }
+        // previousState == .deliveryUnknown かつ currentState != .delivered: 現状維持（何もしない）
         try Self.deleteDeliveryAttempt(connection, exportID: exportID)
     }
 

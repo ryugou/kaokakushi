@@ -102,6 +102,27 @@ struct OutputDeliveryStoreAttemptTests {
         }
     }
 
+    @Test("beginDeliveryAttemptはOutputRecord.stateをそのままDeliveryAttempt.previousStateへ書き込むこと")
+    func writesCurrentStateAsPreviousState() async throws {
+        let (database, url) = try makeTestAppDatabase()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let projectID = UUID()
+        let exportID = UUID()
+        try await database.dbQueue.write { connection in
+            try insertProject(connection, projectID: projectID)
+            try insertDeliveryOutputRecord(
+                connection, exportID: exportID, projectID: projectID,
+                state: Int(OutputState.deliveryUnknown.rawValue), settledAt: schemaTestReferenceDate
+            )
+        }
+        let store = makeOutputDeliveryStore(database: database)
+
+        try await store.beginDeliveryAttempt(ExportID(rawValue: exportID))
+
+        let previousState = try deliveryAttemptPreviousState(database, exportID: exportID)
+        #expect(previousState == Int(OutputState.deliveryUnknown.rawValue))
+    }
+
     @Test("completeLibrarySaveは対応するattemptが無ければdeliveryAttemptNotFoundをthrowすること")
     func completeLibrarySaveThrowsNotFoundWhenAttemptMissing() async throws {
         let (database, url) = try makeTestAppDatabase()

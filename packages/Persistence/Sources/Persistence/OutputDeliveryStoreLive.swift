@@ -3,12 +3,11 @@ import Domain
 import GRDB
 
 // OutputDeliveryStoreの実装（export-saga.md 7章「利用者への受け渡し」・7.0「写真ライブラリ
-// 保存の結果不明」が正本。Issue #6 Task 6 マイクロセッションA）。
+// 保存の結果不明」が正本。Issue #6 Task 6）。
 //
-// 今回のセッションで実装する5メソッド: beginDeliveryAttempt / completeLibrarySave /
-// completeShare / abandonDeliveryAttempt / resolveOrphanedAttempts。
-// loadUnknownLibrarySaves / clearUnknownLibrarySave / deleteOutputは次セッション担当のため
-// スタブ（+Unimplemented.swift）にする。
+// 実装する8メソッド: beginDeliveryAttempt / completeLibrarySave / completeShare /
+// abandonDeliveryAttempt / resolveOrphanedAttempts / loadUnknownLibrarySaves /
+// clearUnknownLibrarySave / deleteOutput。
 //
 // `OutputDeliveryStore`のポートシグネチャには時刻引数が無いが、DeliveryAttempt.startedAt /
 // UnknownLibrarySave.occurredAtには実行時点の時刻が必要なため、ExportSagaStoreLiveと同じ
@@ -21,8 +20,8 @@ import GRDB
 //     completeShare / abandonDeliveryAttempt
 //   - OutputDeliveryStoreLive+Recovery.swift: resolveOrphanedAttemptsとRow→
 //     OutputDeliverySnapshotデコードヘルパー
-//   - OutputDeliveryStoreLive+Unimplemented.swift: loadUnknownLibrarySaves /
-//     clearUnknownLibrarySave / deleteOutputのスタブ
+//   - OutputDeliveryStoreLive+LibrarySaveAndDelete.swift: loadUnknownLibrarySaves /
+//     clearUnknownLibrarySave / deleteOutput（architecture.md 7.5「出力の削除経路」）
 
 /// OutputDeliveryStoreLiveが送出する専用エラー。運用者が次のアクションを判断できるよう、
 /// 契約違反の詳細を持つ（ExportSagaStoreErrorと同じ方針: Sendable, Equatable, LocalizedError）。
@@ -30,12 +29,14 @@ public enum OutputDeliveryStoreError: Error, Sendable, Equatable {
     /// beginDeliveryAttempt / completeLibrarySave / completeShare: 対象exportIDの
     /// OutputRecord行が存在しない。
     case outputRecordNotFound(exportID: ExportID)
-    /// beginDeliveryAttempt / completeLibrarySave / completeShare: 対象OutputRecordの
-    /// settledAtがnil（未確定）。受け渡し系メソッドの共通事前条件（export-saga.md 7章
-    /// 不変条件）。
+    /// beginDeliveryAttempt / completeLibrarySave / completeShare / deleteOutput: 対象
+    /// OutputRecordのsettledAtがnil（未確定）。受け渡し系メソッドおよびdeleteOutputの
+    /// 共通事前条件（export-saga.md 7章不変条件）。
     case notSettled(exportID: ExportID)
     /// beginDeliveryAttempt: 同一exportIDに対応するDeliveryAttempt行が既に存在する。
     /// グローバル直列キューの前提（export-saga.md 4.2/7.0）が崩れた場合の防御。
+    /// deleteOutput: 同じ検査条件を「試行中の出力の破棄を拒否する」（7.0表）ために再利用する
+    /// （意味は異なるが検査条件は同一のため）。
     case deliveryAttemptAlreadyInProgress(exportID: ExportID)
     /// completeLibrarySave / abandonDeliveryAttempt: 対象exportIDに対応するDeliveryAttempt
     /// 行が存在しない。
@@ -44,9 +45,6 @@ public enum OutputDeliveryStoreError: Error, Sendable, Equatable {
     /// raw valueがDomainのenumのどのcaseにも対応しない（スキーマ移行漏れ、または手動でのDB
     /// 改変が疑われる）。
     case invalidColumnValue(table: String, column: String, rawValue: Int)
-    /// loadUnknownLibrarySaves / clearUnknownLibrarySave / deleteOutput: 次セッション担当の
-    /// ため未実装（本セッションのスコープ外。呼び出し元は次セッションの実装完了を待つこと）。
-    case notImplemented(method: String)
 }
 
 extension OutputDeliveryStoreError: LocalizedError {
@@ -61,16 +59,18 @@ extension OutputDeliveryStoreError: LocalizedError {
         case .notSettled(let exportID):
             return """
             OutputDeliveryStore: exportID=\(exportID.rawValue.uuidString) のOutputRecordは \
-            settledAtがnil（未確定）です。受け渡し（保存・共有）は完了操作（settleExport/ \
-            settleBatch）の後にのみ行えます（export-saga.md 7章不変条件）。呼び出し元のUIが \
-            完了前の出力に対して受け渡し操作へ到達させていないか確認してください。
+            settledAtがnil（未確定）です。受け渡し（保存・共有）およびdeleteOutputによる破棄は \
+            完了操作（settleExport/settleBatch）の後にのみ行えます（export-saga.md 7章不変 \
+            条件）。呼び出し元のUIが完了前の出力に対してこれらの操作へ到達させていないか確認 \
+            してください。
             """
         case .deliveryAttemptAlreadyInProgress(let exportID):
             return """
             OutputDeliveryStore: exportID=\(exportID.rawValue.uuidString) には既に \
             DeliveryAttempt行が存在します。グローバル直列キューにより本来同時に複数の保存 \
-            試行は起き得ません（export-saga.md 4.2/7.0）。前回の試行がabandonDeliveryAttempt/ \
-            completeLibrarySaveで解消されずに残っている可能性があります。起動時復旧 \
+            試行は起き得ません（export-saga.md 4.2/7.0）。beginDeliveryAttemptであれば前回の \
+            試行がabandonDeliveryAttempt/completeLibrarySaveで解消されずに残っている可能性が、 \
+            deleteOutputであれば試行中の出力を破棄しようとした可能性があります。起動時復旧 \
             （resolveOrphanedAttempts）が実行されているか確認してください。
             """
         case .deliveryAttemptNotFound(let exportID):
@@ -85,11 +85,6 @@ extension OutputDeliveryStoreError: LocalizedError {
             OutputDeliveryStore: \(table).\(column) の値 \(rawValue) はDomainのenumのどの \
             caseにも対応しません。スキーマとDomainのenum定義が不整合になっている可能性が \
             あります（マイグレーション漏れ、または手動でのDB改変を疑ってください）。
-            """
-        case .notImplemented(let method):
-            return """
-            OutputDeliveryStore: \(method) は本セッションのスコープ外のため未実装です。 \
-            次セッションでの実装完了を待ってください。
             """
         }
     }

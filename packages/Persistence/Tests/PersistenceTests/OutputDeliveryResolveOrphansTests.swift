@@ -115,6 +115,40 @@ struct OutputDeliveryResolveOrphansTests {
         #expect(try !deliveryAttemptExists(database, exportID: fixture.deliveredExportID))
     }
 
+    @Test("previousState=generatedでもOutputRecord.stateが既にdeliveredなら後退させずupsertすること")
+    func doesNotRegressDeliveredAndUpsertsUnknownLibrarySave() async throws {
+        let (database, url) = try makeTestAppDatabase()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let projectID = UUID()
+        let exportID = UUID()
+        // previousState=generatedかつOutputRecord.state=deliveredは、本来
+        // beginDeliveryAttemptの呼び出し規律のもとでは起こらない矛盾データ（previousStateは
+        // attempt開始時点のstateのコピーのはず）。それでもPersistence層は自身のSQLで
+        // 「deliveredを後退させない」（export-saga.md 7.0）を独立して守る（引き継ぎ1）。
+        // かつ、この場合もUnknownLibrarySaveをupsertし「写真ライブラリ保存結果は不明」の
+        // 注記を欠かさない（currentState/previousStateいずれかがdeliveredならupsertする。
+        // architecture.md:1616, 1618）。
+        try await database.dbQueue.write { connection in
+            try insertProject(connection, projectID: projectID)
+            try insertDeliveryOutputRecord(
+                connection, exportID: exportID, projectID: projectID,
+                state: Int(OutputState.delivered.rawValue), settledAt: schemaTestReferenceDate
+            )
+            try insertDeliveryAttemptRow(
+                connection, exportID: exportID, startedAt: schemaTestReferenceDate,
+                previousState: Int(OutputState.generated.rawValue)
+            )
+        }
+        let store = makeOutputDeliveryStore(database: database)
+
+        _ = try await store.resolveOrphanedAttempts()
+
+        let fields = try outputRecordFields(database, exportID: exportID)
+        #expect(fields?.state == Int(OutputState.delivered.rawValue))
+        #expect(try !deliveryAttemptExists(database, exportID: exportID))
+        #expect(try unknownLibrarySaveExists(database, exportID: exportID))
+    }
+
     @Test("戻り値のOutputDeliverySnapshotに全OutputRecordが含まれhasUnknownLibrarySaveが正しいこと")
     func returnsSnapshotsWithCorrectHasUnknownLibrarySave() async throws {
         let (database, url) = try makeTestAppDatabase()

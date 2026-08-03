@@ -76,3 +76,20 @@ func unknownLibrarySaveExists(_ database: AppDatabase, exportID: UUID) throws ->
         return count > 0
     }
 }
+
+/// UnknownLibrarySave行を直接挿入する。対応するOutputRecordを先に挿入しておくこと（FK制約）。
+func insertUnknownLibrarySaveRow(_ connection: Database, exportID: UUID, occurredAt: Date) throws {
+    try connection.execute(
+        sql: "INSERT INTO UnknownLibrarySave (exportID, occurredAt) VALUES (?, ?)",
+        arguments: [exportID, occurredAt]
+    )
+}
+
+/// 対象exportIDに対応するDeliveryAttempt.previousState列の値（行が無ければnil）。
+func deliveryAttemptPreviousState(_ database: AppDatabase, exportID: UUID) throws -> Int? {
+    try database.dbQueue.read { connection in
+        try Int.fetchOne(
+            connection, sql: "SELECT previousState FROM DeliveryAttempt WHERE exportID = ?", arguments: [exportID]
+        )
+    }
+}
