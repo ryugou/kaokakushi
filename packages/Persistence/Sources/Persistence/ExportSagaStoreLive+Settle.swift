@@ -52,7 +52,7 @@ extension ExportSagaStoreLive {
 /// 参照しないためfile-scope privateで足りるが、settleSingleExportRecord自体が
 /// このファイルとSettleSteps.swiftの両方から見える必要は無い（呼び出し元はこのファイル
 /// 内のsettleExport/settleBatchのみ）ため、型はこのファイルに閉じる。
-fileprivate enum SettleScope {
+private enum SettleScope {
     case single
     case batch(BatchID)
 }
