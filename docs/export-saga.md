@@ -40,7 +40,8 @@ protocol ExportSagaStore: Sendable {
     /// 同一トランザクションで削除し、その出力ファイル（存在すれば）と temporaryFiles（手順 1〜3 で
     /// 生成した一時ファイル。呼び出し元の生成パイプラインが保持する参照を渡す）を
     /// PendingFileDeletion へ登録する（実削除はコミット後。削除経路の正本はアーキテクチャ設計 7.5）。
-    /// WorkingSourceRecord は削除しない（4 章）。台帳は未確定のため触れない
+    /// WorkingSourceRecord は削除しない（4 章）。台帳は未確定のため触れない。
+    /// ExportJob 行が無ければ何もしない（temporaryFiles の登録も行わない。冪等）
     func discardExport(_ exportID: ExportID, temporaryFiles: [ManagedFileRef]) async throws
     /// 起動時復旧の入力（5 章）
     func loadRunningJobs() async throws -> [ExportJob]
@@ -212,7 +213,10 @@ enum ExportStartBlockReason: Sendable, Equatable {
     case monthlyLimitReached, trialCreditsUnavailable
     case capabilityVerificationRequired   // entitlementSnapshot.verificationRequired、
                                           // または開始時点の能力が勘定の前提（proBatch の
-                                          // canUseProBatch 等）を満たさない（1.5 の store 側ゲート）
+                                          // canUseProBatch）を満たさない（1.5 の store 側ゲート）。
+                                          // batchTrial は能力ゲート対象外（作成時の可否は
+                                          // canEnterBatch が担い、開始後はクレジット残量のみで
+                                          // 判定する。アップグレード後にバッチを中断させないため）
 }
 struct ExportStartBlock: Sendable, Equatable {
     let reason: ExportStartBlockReason
