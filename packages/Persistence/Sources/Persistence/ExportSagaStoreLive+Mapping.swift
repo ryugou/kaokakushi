@@ -8,8 +8,8 @@ import GRDB
 // 同じExportJob行の形状を読むため、SELECT列リストとデコードをここに集約する。
 // `decodePlanAndStatus`はExportJob行（entitlementPlan/entitlementStatus）と
 // SubscriptionState行（plan/status）の両方（+Start.swift）から列名だけ変えて共有する。
-// `fetchSingletonRow`は単一行契約のテーブル（SubscriptionState / UsageLedger）の読み取りを
-// +Start.swift / +Ledger.swift / +Accounting.swiftから共有する。
+// `fetchSingletonRow`はDBの単一行キーで強制されるテーブル（SubscriptionState /
+// UsageLedger）の読み取りを+Start.swift / +Ledger.swift / +Accounting.swiftから共有する。
 
 extension ExportSagaStoreLive {
     /// ExportJob行のSELECT列リスト。loadExportJob（このファイル）とloadRunningJobs
@@ -49,11 +49,11 @@ extension ExportSagaStoreLive {
         return LoadedExportJob(job: try Self.makeExportJob(row), settingsHash: row["settingsHash"])
     }
 
-    /// 単一行であることをApplication層が保証する契約のテーブル（SubscriptionState /
-    /// UsageLedger。Schema+Delivery.swift / Schema+Accounting.swiftのコメント参照）から
-    /// 唯一行を読む。行が2件以上あれば契約違反としてfail-closedでthrowし、先頭行だけを
-    /// 暗黙に使わない。行が無ければnilを返し、「行が無い場合」の意味づけ（新規作成と
-    /// みなす／0件とみなす）は呼び出し元が決める。
+    /// 単一行がDBの単一行キー（SubscriptionState / UsageLedger。Schema+Delivery.swift /
+    /// Schema+Accounting.swiftのコメント参照）で強制されているテーブルから唯一行を読む。
+    /// 行が2件以上あれば契約違反としてfail-closedでthrowし、先頭行だけを暗黙に使わない
+    /// （DB制約に対する二重担保）。行が無ければnilを返し、「行が無い場合」の意味づけ
+    /// （新規作成とみなす／0件とみなす）は呼び出し元が決める。
     ///
     /// `table`はエラーメッセージ専用（運用者がどのテーブルを見ればよいか分かるようにする）。
     /// `sql`はコード内のリテラルのみを渡す前提で、呼び出し元の入力値をSQLへ組み立てる経路は

@@ -145,9 +145,9 @@ extension ExportSagaStoreLive {
     /// decodeExportIDSetが同一モジュール内から参照するため（他のstatic funcと同じ流儀）。
     static let exportIDByteLength = 16
 
-    /// UsageLedger行はApplication層が単一行であることを保証する契約
-    /// （Schema+Accounting.swiftのコメント参照）。行が2件以上あれば契約違反として
-    /// fail-closedでthrowする（5番・7番の修正。先頭行だけを暗黙に使わない）。この検査は
+    /// UsageLedger行の単一行はDBの単一行キー（Schema+Accounting.swiftのコメント参照）で
+    /// 強制される。行が2件以上あれば契約違反としてfail-closedでthrowする（5番・7番の修正。
+    /// 先頭行だけを暗黙に使わない）。この検査はDB制約に対する二重担保として
     /// fetchSingletonRow（+Mapping.swift）に集約している。
     private static func loadTrialConsumedCount(_ connection: Database) throws -> Int {
         guard let row = try Self.fetchSingletonRow(

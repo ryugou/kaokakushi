@@ -51,12 +51,12 @@ struct ExportSagaStoreStartValidationTests {
     // HasMultipleRows / throwsWhenUsageLedgerHasMultipleRows）。id INTEGER PRIMARY KEY
     // CHECK(id = 1)（Schema+Delivery.swift / Schema+Accounting.swift）の導入により、
     // 通常のINSERT経路では2件目の行そのものが物理的に作れなくなった（id省略でも
-    // 自動採番id=2でCHECK違反、id=1明示でもPRIMARY KEY重複で失敗する）ため、この
-    // 異常系はDB制約そのものを検証するSchemaConstraintTests.swiftの
+    // 自動採番id=2でCHECK違反、id=1明示でもPRIMARY KEY重複で失敗する）ため、ここでは
+    // 削除した。単一行キーのCHECK制約そのものの拒否はSchemaSingletonKeyTests.swiftの
     // usageLedgerSingleRowKeyRejectsSecondInsert /
-    // subscriptionStateSingleRowKeyRejectsSecondInsertへ統合し、ここでは削除した
-    // （fetchSingletonRowのmultipleSingletonRows検知自体は二重担保としてコード上
-    // 維持されている。テストのみの整理）。
+    // subscriptionStateSingleRowKeyRejectsSecondInsertが検証する。fetchSingletonRowの
+    // multipleSingletonRows検知（CHECK制約を意図的に無効化してでも通す二重担保）は
+    // ExportSagaStoreSingletonContractTests.swiftへ移設した。
 
     @Test("UsageLedgerのBLOB長が16の倍数でない場合corruptUsageLedgerBlobでthrowすること")
     func throwsWhenUsageLedgerBlobLengthIsNotAMultipleOf16() async throws {

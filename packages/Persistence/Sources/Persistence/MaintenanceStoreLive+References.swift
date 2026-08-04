@@ -21,13 +21,11 @@ extension MaintenanceStoreLive {
         case .processingTemporary:
             return try await fetchReferencedIDs(sql: "SELECT sourceFileID FROM WorkingSourceRecord")
         case .historyThumbnail:
-            // architecture.md 7.5の対応表（正本）では`.historyThumbnail`の参照元は
-            // `Project`が保持する`ManagedFileRef`とすべきだが、Task 2で確定済みの
-            // Schema+Project.swiftにはその列が存在しない。列が追加されるまでの暫定として
-            // 常に空集合を返す。これによりhistoryThumbnail種別の孤児GCは今のところ機能
-            // しない（起動時GCが誤って現用中のhistory thumbnailを削除することはない一方、
-            // 本来削除すべき孤児も検出できない）。この既知ギャップはオーケストレーターから
-            // 最終報告でユーザーへエスカレーションする。
+            // v1では`.historyThumbnail`の参照列を持たず常に空集合を返す（正本
+            // architecture.md 7.5の対応表）。これによりhistoryThumbnail種別の孤児GCは
+            // 今のところ機能しない（起動時GCが誤って現用中のhistory thumbnailを削除する
+            // ことはない一方、本来削除すべき孤児も検出できない）。参照列の追加とGC有効化は
+            // Issue #26。
             return []
         case .rasterTemporary:
             // image-pipeline.md「検出用の縮小画像の寿命」と同じ理由で、ラスタ一時ファイルは

@@ -306,5 +306,4 @@ struct SchemaConstraintTests {
         }
         #expect(effectSettingCount == 0)
     }
-
 }

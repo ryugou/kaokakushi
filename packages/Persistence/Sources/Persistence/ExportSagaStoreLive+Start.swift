@@ -93,7 +93,8 @@ extension ExportSagaStoreLive {
     /// resolveCapabilitiesへ渡す。store側で「行が無い＝blocked」を決め打ちしない。
     /// `status == .pending`による特別扱いは廃止した。pendingかどうかの判定は
     /// resolveCapabilitiesが行う）。行が2件以上あれば契約違反としてthrowする（7番の修正。
-    /// SubscriptionStateは単一行であることをApplication層が保証する契約）。
+    /// SubscriptionStateの単一行はDBの単一行キーで強制される契約であり、この検査は
+    /// その二重担保）。
     private static func loadSubscriptionState(_ connection: Database) throws -> SubscriptionState? {
         guard let row = try Self.fetchSingletonRow(
             connection,

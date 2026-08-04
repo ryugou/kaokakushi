@@ -28,9 +28,10 @@ import GRDB
 //     列が存在しないため常にfalse固定。MaintenanceStoreLive+References.swiftの
 //     `.historyThumbnail`ケースと同水準の扱い。列が追加されるまでの暫定であり、
 //     オーケストレーターが最終報告でエスカレーションする。
-//   - 履歴サムネイル（ManagedFileRef(.historyThumbnail, ...)）の実体解放は行わない
-//     （Projectがその参照を保持する列が存在しないため。同じ理由でMaintenanceStoreLive+
-//     References.swiftの`.historyThumbnail`ケースも常に空集合を返している）。
+//   - 履歴サムネイル（ManagedFileRef(.historyThumbnail, ...)）はv1では実体解放を行わない
+//     （Projectがその参照を保持する列が存在しないため。MaintenanceStoreLive+
+//     References.swiftの`.historyThumbnail`ケースも同じ理由で常に空集合を返している）。
+//     Issue #26で有効化する。
 
 /// HistoryDeletionStoreLiveが送出する専用エラー。運用者が次のアクションを判断できるよう、
 /// どの保護が原因で削除を拒否したかを持つ（OutputDeliveryStoreError/WorkingSourceStoreError

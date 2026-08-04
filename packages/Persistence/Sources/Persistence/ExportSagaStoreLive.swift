@@ -73,9 +73,10 @@ public enum ExportSagaStoreError: Error, Sendable, Equatable {
     /// なExportIDの集合であり重複を許さない契約。後半セッションのsettleBatchがこのBLOBへ
     /// 書き込む際もこの一意性契約を維持すること。
     case corruptUsageLedgerBlob(byteCount: Int)
-    /// SubscriptionState / UsageLedgerは単一行であることをApplication層が保証する契約
-    /// （Schema+Delivery.swift / Schema+Accounting.swiftのコメント参照）。行が2件以上
-    /// あれば契約違反としてfail-closedでthrowする（先頭行だけを暗黙に使わない）。
+    /// SubscriptionState / UsageLedgerの単一行はDBの単一行キー（id INTEGER PRIMARY KEY
+    /// CHECK(id = 1)。Schema+Delivery.swift / Schema+Accounting.swift）で強制される。
+    /// fetchSingletonRowの複数行検査はこれに対する二重担保であり、行が2件以上あれば
+    /// 契約違反としてfail-closedでthrowする（先頭行だけを暗黙に使わない）。
     case multipleSingletonRows(table: String, count: Int)
     /// startExport: input.previewConfirmation.projectIDがinput.projectIDと一致しない
     /// （1.1 確認の一致。異なるプロジェクトのプレビュー確認情報が渡された可能性がある）。
