@@ -173,7 +173,7 @@
 - ストレージ必要量計算、`ExportQueueState` 状態機械
 - **履歴の保存期間と容量判定。容量超過時にも、完了前のやり直しは無制限のまま保たれ、完了済み未受け渡し出力（`isUndelivered`）の 24 時間保護は絶対保護として維持されること**
 - `canDeleteHistoryUnit` が列挙された全参照元を見ること（[アーキテクチャ設計](architecture.md) の 7.5。Saga 経由でも同一判定になることは 3.6 参照）
-- **絶対保護（非終端キュー項目 / 処理中の `ExportJob` / `isUndelivered` の `OutputRecord`）が、手動削除でも拒否されること**
+- **絶対保護（非終端キュー項目 / 処理中の `ExportJob` / `isUndelivered` の `OutputRecord` / 試行中の `DeliveryAttempt`）が、手動削除でも拒否されること**
 - **お気に入り・編集中・`WorkingSourceRecord`（`OverridableProtection` の 3 値）が、自動削除では保護され、明示確認付きの手動削除では上書きできること**
 - **上書き対象ごとに、失われるものを示す確認文言が選ばれること**
 - 未保存バッチが 1 件までに制限されること

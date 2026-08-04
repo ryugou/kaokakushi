@@ -55,7 +55,8 @@ protocol OutputDeliveryStore: Sendable {
     func beginDeliveryAttempt(_ exportID: ExportID) async throws
     /// delivered への更新と attempt 削除を単一トランザクションで
     func completeLibrarySave(_ exportID: ExportID) async throws
-    /// 事前条件: settledAt != nil（nil なら throw）
+    /// 事前条件: settledAt != nil（nil なら throw）、かつ対象の DeliveryAttempt が
+    /// 存在しないこと（7.0。試行中の共有は拒否する）
     func completeShare(_ exportID: ExportID) async throws
     /// previousState へ戻す（現在が delivered なら維持）
     func abandonDeliveryAttempt(_ exportID: ExportID) async throws
@@ -114,7 +115,7 @@ enum ExportStartDecision: Sendable {
 // OutputDeliverySnapshot の定義はアーキテクチャ設計 7.5
 ```
 
-`recordGeneratedOutput` と `settleExport` / `settleBatch` は `ExportJob` に保存済みの `authorization` と `delivery` から必要な値を導出する。呼び出し側から渡すのは `ExportJob` から導出できない値（`exportID` と生成結果）だけ。
+`recordGeneratedOutput` と `settleExport` / `settleBatch` は `ExportJob` に保存済みの `authorization`・`delivery`・`settingsHash`（`startExport` 時点の値を `ExportJob` が保持する。[アーキテクチャ設計](architecture.md) の 7.1 が正本）から必要な値を導出する。呼び出し側から渡すのは `ExportJob` から導出できない値（`exportID` と生成結果）だけ。
 
 そのほかのポート（`ManagedFileStore` / `CrashReporter` / 履歴削除の原子的操作）は [アーキテクチャ設計](architecture.md) が正本。
 
@@ -194,7 +195,7 @@ enum StampRequirement: Sendable, Hashable {
 
 | 条件 | 内容 |
 | --- | --- |
-| 確定記録の存在 | `exportedSettingsEntries` に当該 `projectID` の項目がある |
+| 確定記録の存在 | `ExportedSettingsEntry` に当該 `projectID` の項目がある |
 | 設定の一致 | その項目の `settingsHash` が、いま組み立てた `RenderSpec` と `ExportSetting` から計算した値と一致する |
 | 対象 | 同一 `Project` であること（素材の同一性は照合しない） |
 | 適用範囲 | 有料スタンプの能力要件のみ。月間枠・トライアルクレジットの消費は通常どおり発生する |
@@ -242,6 +243,8 @@ enum ExportAccountingMode: Sendable, Equatable {
 | `paidUnlimited` | 使わない | 使わない |
 | `freeMonthlyConsume` | 1 消費 | 使わない |
 | `batchTrial` | 使わない | 1 消費 |
+
+**トライアルバッチ（`kind == .trial`）でも、開始時点で `canUseProBatch` を持つ場合は `batchTrial` ではなく `paidUnlimited` として認可する**（クレジットを消費しない。Pro へアップグレード後もバッチを中断させないため。1.3 の `ExportStartBlockReason` の注記が正本）。
 
 月間クォータを使うのは Free の単体処理だけ（Free 利用者が月 5 枚を使い切っていても、クレジットが残っていれば一括トライアルを実行できる）。`batchTrial` は選択した写真ごとに毎回 1 クレジットを消費する。素材が過去に処理済みかどうかによる例外は無い（[ADR 0006](adr/0006-accounting-per-delivered-output.md)。同じ写真を選び直しても新しい加工として扱う）。
 
@@ -422,7 +425,7 @@ struct ExportRecord: Sendable {
 
 バッチの完了操作は、結果一覧画面での操作 1 回で対象バッチ内の**未確定な全出力**の `settledAt` を同一トランザクションで設定し、確定した枚数分だけクレジットを消費する（`settleBatch`）。完了前は写真単位のやり直しができ、一括保存・共有は完了後にのみ行える。
 
-**不変条件**: `beginDeliveryAttempt` / `completeLibrarySave` / `completeShare` は `settledAt != nil` を事前条件とする（`nil` なら throw）。完了前の出力は UI 上も保存・共有へ到達できないが、防御として明記する。`deleteOutput`（完了後の明示的な破棄）にもこの事前条件を課すが、完了前のやり直しは `discardExport`（4 章）を使うため対象外。保存・共有の成否は問わない（失敗しても出力は保持され再試行できる）。
+**不変条件**: `beginDeliveryAttempt` / `completeLibrarySave` / `completeShare` は `settledAt != nil` を事前条件とする（`nil` なら throw）。完了前の出力は UI 上も保存・共有へ到達できないが、防御として明記する。`completeShare` はさらに、対象の `DeliveryAttempt` が存在しないことも事前条件とする（存在すれば `deliveryAttemptAlreadyInProgress` を throw し、試行中の共有を拒否する。7.0）。`deleteOutput`（完了後の明示的な破棄）にもこの事前条件を課すが、完了前のやり直しは `discardExport`（4 章）を使うため対象外。保存・共有の成否は問わない（失敗しても出力は保持され再試行できる）。
 
 ### 7.0 写真ライブラリ保存の結果不明
 
@@ -450,7 +453,7 @@ struct DeliveryAttempt: Sendable {
 
 受け渡しは複数回・任意の順序で行える（[アーキテクチャ設計](architecture.md) の 7.5）。OS 共有成功後に写真ライブラリ保存を試みて中断しても、`previousState` により直前の共有成功の事実を失わない。一度成立した `delivered` は取り消さない。
 
-`actor` であることは排他保証にならない（`await` のたびに再入可能なため）。個別の待ち行列は作らず、グローバル直列キュー1本（[アーキテクチャ設計](architecture.md) の 4.2。書き出しの手順 1〜3 と共通）で直列化する。`DeliveryAttempt` が存在する間、その出力への共有・破棄・別の保存はすべて拒否する。
+`actor` であることは排他保証にならない（`await` のたびに再入可能なため）。個別の待ち行列は作らず、グローバル直列キュー1本（[アーキテクチャ設計](architecture.md) の 4.2。書き出しの手順 1〜3 と共通）で直列化する。`DeliveryAttempt` が存在する間、その出力への共有・破棄・別の保存、および**その出力を含む履歴（`Project`）の削除**はすべて拒否する（削除側の絶対保護としての扱いは [アーキテクチャ設計](architecture.md) の「削除の可否判定」が正本）。
 
 ```swift
 /// 写真ライブラリ保存の結果が不明であることの記録。runtime 側のテーブル
