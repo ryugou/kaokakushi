@@ -27,8 +27,9 @@ extension WorkingSourceStoreLive {
     /// 単一トランザクションで: (1) 旧sourceFileIDを読む (2) WorkingSourceRecordをupsert
     /// (3) Projectの撮影メタデータを更新 (4) FaceTrackを全削除（EffectSettingはFK CASCADE
     /// で連動削除されるため追加のDELETE文は不要） (5) detectionRevision/projectRevisionを
-    /// +1 (6) 旧sourceFileIDがあればPendingFileDeletionへ登録する
-    /// （image-pipeline.md 5章「再選択後のSaga」）。
+    /// +1 (6) 旧sourceFileIDがあり新sourceFileIDと異なればPendingFileDeletionへ登録する
+    /// （新旧が同一なら現在参照中の実体なので登録しない。誤って登録するとGCで実ファイルが
+    /// 失われる）（image-pipeline.md 5章「再選択後のSaga」）。
     public func replaceWorkingSource(_ input: ReplaceWorkingSourceInput) async throws {
         try await database.dbQueue.write { connection in
             try Self.applyWorkingSourceReplacement(connection, replacement: WorkingSourceReplacement(
@@ -48,7 +49,9 @@ extension WorkingSourceStoreLive {
     /// upsert後にPendingFileDeletionへ登録することで旧ファイルが失われないようにする
     /// （replaceWorkingSourceと同じ防御。手順そのものを共有しているため、呼び出し位置・
     /// 呼び出し方の差異は生じない）。通常経路（契約どおりWorkingSourceRecordが存在しない
-    /// 場合）は旧ファイルが無いためPendingFileDeletion登録は行われない。
+    /// 場合）は旧ファイルが無いためPendingFileDeletion登録は行われない。旧sourceFileIDが
+    /// 新sourceFileIDと偶然一致した場合も、現在参照中の実体を誤ってGC対象にしないため
+    /// 登録しない（applyWorkingSourceReplacementのガード）。
     public func attachWorkingSourceToExistingProject(_ input: AttachWorkingSourceInput) async throws {
         try await database.dbQueue.write { connection in
             try Self.applyWorkingSourceReplacement(connection, replacement: WorkingSourceReplacement(
@@ -87,7 +90,13 @@ extension WorkingSourceStoreLive {
         )
         try Self.discardFaceTracksAndBumpRevisions(connection, projectID: replacement.projectID)
 
-        if let previousSourceFileID {
+        // 旧sourceFileIDが新sourceFileIDと同一の場合は登録しない（同一ファイルを起動時GCの
+        // 削除対象にしてしまうと、現在参照中の実体ファイルが失われるデータ損失事故になる。
+        // replaceWorkingSource自身が新旧同一のfileIDを渡すことは想定していないが、
+        // attachWorkingSourceToExistingProjectの契約違反ケースでは既存のsourceFileIDと
+        // 新しいsourceFileIDが偶然一致する可能性を排除できないため、両呼び出し元が共有する
+        // このガードで一律に防ぐ）。
+        if let previousSourceFileID, previousSourceFileID != replacement.sourceFileID {
             try registerPendingFileDeletion(
                 connection, kind: .processingTemporary, fileID: previousSourceFileID.rawValue
             )

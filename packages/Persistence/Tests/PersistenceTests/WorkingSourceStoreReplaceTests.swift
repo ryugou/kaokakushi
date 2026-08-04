@@ -98,6 +98,34 @@ struct WorkingSourceStoreReplaceTests {
         #expect(try pendingFileDeletionExists(database, kind: kind, fileID: oldFileID))
     }
 
+    @Test("replaceWorkingSourceで新旧sourceFileIDが同一の場合PendingFileDeletionへ登録されないこと")
+    func replaceWorkingSourceWithSameFileIDDoesNotRegisterPendingDeletion() async throws {
+        let (database, url) = try makeTestAppDatabase()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = WorkingSourceStoreLive(database: database)
+        let projectID = ProjectID(rawValue: UUID())
+        let sameFileID = UUID()
+        try await database.dbQueue.write { connection in
+            try insertProject(connection, projectID: projectID.rawValue)
+            try insertWorkingSourceRecord(connection, projectID: projectID.rawValue, sourceFileID: sameFileID)
+        }
+        let input = ReplaceWorkingSourceInput(
+            projectID: projectID,
+            newSourceFile: makeWorkingSourceFileRef(fileID: sameFileID),
+            replacedAt: laterReferenceDate,
+            capture: makeCaptureMetadata(),
+            libraryCreationDate: laterReferenceDate,
+            representation: .original
+        )
+
+        try await store.replaceWorkingSource(input)
+
+        let kind = ManagedFileKind.processingTemporary.rawValue
+        #expect(try pendingFileDeletionExists(database, kind: kind, fileID: sameFileID) == false)
+        let record = try workingSourceRecordFields(database, projectID: projectID.rawValue)
+        #expect(record?.sourceFileID == sameFileID)
+    }
+
     @Test("attachWorkingSourceToExistingProjectで新規WorkingSourceRecordが作成されrevisionが増加すること")
     func attachWorkingSourceToExistingProjectCreatesRecordAndBumpsRevisions() async throws {
         let (database, url) = try makeTestAppDatabase()
@@ -152,5 +180,33 @@ struct WorkingSourceStoreReplaceTests {
         #expect(try pendingFileDeletionExists(database, kind: kind, fileID: oldFileID))
         let record = try workingSourceRecordFields(database, projectID: projectID.rawValue)
         #expect(record?.sourceFileID == newFileID)
+    }
+
+    @Test("attachWorkingSourceToExistingProjectで新旧sourceFileIDが同一の場合PendingFileDeletionへ登録されないこと")
+    func attachWorkingSourceToExistingProjectWithSameFileIDSkipsPendingDeletion() async throws {
+        let (database, url) = try makeTestAppDatabase()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = WorkingSourceStoreLive(database: database)
+        let projectID = ProjectID(rawValue: UUID())
+        let sameFileID = UUID()
+        try await database.dbQueue.write { connection in
+            try insertProject(connection, projectID: projectID.rawValue)
+            try insertWorkingSourceRecord(connection, projectID: projectID.rawValue, sourceFileID: sameFileID)
+        }
+        let input = AttachWorkingSourceInput(
+            projectID: projectID,
+            sourceFile: makeWorkingSourceFileRef(fileID: sameFileID),
+            attachedAt: laterReferenceDate,
+            capture: makeCaptureMetadata(),
+            libraryCreationDate: laterReferenceDate,
+            representation: .original
+        )
+
+        try await store.attachWorkingSourceToExistingProject(input)
+
+        let kind = ManagedFileKind.processingTemporary.rawValue
+        #expect(try pendingFileDeletionExists(database, kind: kind, fileID: sameFileID) == false)
+        let record = try workingSourceRecordFields(database, projectID: projectID.rawValue)
+        #expect(record?.sourceFileID == sameFileID)
     }
 }

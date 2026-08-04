@@ -153,6 +153,19 @@ func pendingFileDeletionExists(_ database: AppDatabase, kind: UInt32, fileID: UU
     }
 }
 
+/// kind別のPendingFileDeletion行数。個々のfileIDまでは分からない重複import等の
+/// テストで、import前後の件数差分から「1件増えたこと」を確認するために使う
+/// （pendingFileDeletionExistsと同じSQLパターン。fileID条件が無い点だけが違う）。
+func pendingFileDeletionCount(_ database: AppDatabase, kind: UInt32) throws -> Int {
+    try database.dbQueue.read { connection in
+        try Int.fetchOne(
+            connection,
+            sql: "SELECT count(*) FROM PendingFileDeletion WHERE kind = ?",
+            arguments: [kind]
+        ) ?? 0
+    }
+}
+
 func faceTrackRowCount(_ database: AppDatabase, projectID: UUID) throws -> Int {
     try database.dbQueue.read { connection in try countFaceTrackRows(connection, projectID: projectID) }
 }

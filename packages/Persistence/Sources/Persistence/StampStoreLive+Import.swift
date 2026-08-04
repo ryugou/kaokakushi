@@ -8,6 +8,30 @@ import CryptoKit
 
 // importCustomStamp（architecture.md「StampStore」節・「内容ハッシュの対象」節が正本）。
 
+/// StampStoreLiveが送出する専用エラー。運用者が次のアクションを判断できるよう、
+/// 契約違反の詳細を持つ（WorkingSourceStoreError/HistoryDeletionStoreErrorと同じ方針:
+/// Sendable, Equatable, LocalizedError）。
+public enum StampStoreError: Error, Sendable, Equatable {
+    /// insertStampRows: 既存CustomStamp.sortOrderの最大値が既にInt32.maxだった。このまま
+    /// +1すると符号付き32bit整数のオーバーフローでtrapし、DB破損や復元時のクラッシュを
+    /// 招く。黙って折り返す・切り詰めるといった曖昧な挙動は選ばず、fail-closedとして
+    /// 明示的にthrowする（採番の空き確保は呼び出し元の運用判断に委ねる）。
+    case sortOrderOverflow
+}
+
+extension StampStoreError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .sortOrderOverflow:
+            return """
+            StampStore: CustomStamp.sortOrderの最大値が既にInt32.maxに達しているため、 \
+            新規スタンプの採番ができません。不要なCustomStampを削除してsortOrderの空きを \
+            作ってから再試行してください。
+            """
+        }
+    }
+}
+
 extension StampStoreLive {
     public func importCustomStamp(
         name: String,
@@ -36,15 +60,15 @@ extension StampStoreLive {
             name: name,
             thumbnailFileID: thumbnailRef.fileID
         )
-        let (didReuseExistingAsset, sortOrder) = try await database.dbQueue.write { connection in
+        // 既存StampAssetが再利用された場合、新規に書いたファイル（assetRef）はどこにも
+        // 参照されなくなる（正本「新規に書いたファイルは破棄する」）。ここで直接
+        // fileStore.deleteすると、DBコミット自体は成功しているのにこのクリーンアップの
+        // I/O失敗でimportCustomStamp API全体が失敗する経路になってしまうため、
+        // insertStampRows内（同一トランザクション）でPendingFileDeletionへ登録し、
+        // 実削除は他Storeと同じく起動時GCに委ねる（didReuseExistingAssetはこの分岐の
+        // ためだけにinsertStampRowsが返す値で、呼び出し元では使わない）。
+        let (_, sortOrder) = try await database.dbQueue.write { connection in
             try Self.insertStampRows(connection, rows: newRows)
-        }
-
-        // 既存StampAssetが再利用された場合、新規に書いたファイルはどこにも参照されて
-        // いないため直接削除する（正本「新規に書いたファイルは破棄する」。孤児GCの
-        // PendingFileDeletion経路を使う必要は無い）。
-        if didReuseExistingAsset {
-            try await fileStore.delete(assetRef)
         }
 
         let stamp = CustomStamp(
@@ -66,8 +90,11 @@ extension StampStoreLive {
         let thumbnailFileID: ManagedFileID
     }
 
-    /// 単一トランザクションで: (1) 既存StampAssetの有無を判定 (2) 無ければ新規作成
-    /// (3) 既存最大sortOrder + 1を採番 (4) CustomStamp行を作成する。
+    /// 単一トランザクションで: (1) 既存StampAssetの有無を判定 (2) 無ければ新規作成、
+    /// あれば新規に書いたファイルをPendingFileDeletionへ登録 (3) 既存最大sortOrder + 1を
+    /// 採番（Int32.max到達時はStampStoreError.sortOrderOverflowをthrowしfail-closed。
+    /// throwするとdbQueue.writeがロールバックするため、ここまでのStampAsset登録も
+    /// 取り消される） (4) CustomStamp行を作成する。
     /// 戻り値は「既存StampAssetを再利用したか」と、採番したsortOrder。
     private static func insertStampRows(
         _ connection: Database,
@@ -80,7 +107,12 @@ extension StampStoreLive {
         ) ?? 0
         let didReuseExistingAsset = existingCount > 0
 
-        if !didReuseExistingAsset {
+        if didReuseExistingAsset {
+            // 新規に書いたファイル（rows.assetFileID）は既存StampAssetの再利用により
+            // どこからも参照されなくなった。同一トランザクション内でPendingFileDeletionへ
+            // 登録し、実削除は起動時GCへ委ねる（importCustomStampのコメント参照）。
+            try registerPendingFileDeletion(connection, kind: .stampAsset, fileID: rows.assetFileID.rawValue)
+        } else {
             try connection.execute(
                 sql: "INSERT INTO StampAsset (contentHash, fileID) VALUES (?, ?)",
                 arguments: [rows.assetHash.bytes, rows.assetFileID.rawValue]
@@ -90,6 +122,9 @@ extension StampStoreLive {
         let maxSortOrder = try Int32.fetchOne(
             connection, sql: "SELECT COALESCE(MAX(sortOrder), 0) FROM CustomStamp"
         ) ?? 0
+        guard maxSortOrder != Int32.max else {
+            throw StampStoreError.sortOrderOverflow
+        }
         let sortOrder = maxSortOrder + 1
 
         try connection.execute(
