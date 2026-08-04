@@ -3,9 +3,9 @@ import Domain
 import GRDB
 
 // DeletionContext相当の値をDBから読み取るprivateヘルパー群と、削除可否判定ロジック
-// （architecture.md「削除の可否判定」1650〜1719行のcanDeleteHistoryUnitに相当。
-// HistoryStores.swift冒頭コメントの通りDomain公開の純粋関数としては実装せず、
-// このファイルへPersistence層のprivateロジックとして実装する）。
+// （architecture.md「削除の可否判定」節の判定に相当。HistoryStores.swift冒頭コメントの
+// 通りDomain公開の純粋関数としては実装せず、このファイルへPersistence層のprivateロジック
+// として実装する）。
 
 extension HistoryDeletionStoreLive {
     /// `HistoryUnit`は現状`.project`のみのため単純な取り出しだが、将来caseが増えた場合に
@@ -39,7 +39,8 @@ extension HistoryDeletionStoreLive {
         )
     }
 
-    /// architecture.md「削除の可否判定」1650〜1719行のcanDeleteHistoryUnit相当。
+    /// architecture.md「削除の可否判定」節の削除可否判定に相当する内部ロジック
+    /// （public な Domain 純粋関数は設けない設計。同節参照）。
     /// 拒否する場合は理由付きのエラーを返す（呼び出し元がthrowする）。許可する場合はnil。
     static func evaluateDeletion(_ context: DeletionContext, unit: HistoryUnit) -> HistoryDeletionStoreError? {
         let absoluteReasons = Self.absoluteProtections(in: context)
@@ -136,8 +137,9 @@ extension HistoryDeletionStoreLive {
     }
 
     /// 絶対保護4: 対象Projectに属するOutputRecordのいずれかに、試行中のDeliveryAttempt行が
-    /// あるか（export-saga.md 450行の不変条件。beginDeliveryAttempt/completeLibrarySave/
-    /// completeShareが課す排他ゲートと同じ理由で、履歴削除でも絶対保護対象にする）。
+    /// あるか（export-saga.md 7.0「delivered を後退させない・直列化・保存結果不明の永続化」の
+    /// 不変条件。beginDeliveryAttempt/completeLibrarySave/completeShareが課す排他ゲートと
+    /// 同じ理由で、履歴削除でも絶対保護対象にする）。
     private static func hasDeliveryAttemptInProgress(_ connection: Database, projectID: ProjectID) throws -> Bool {
         let count = try Int.fetchOne(
             connection,

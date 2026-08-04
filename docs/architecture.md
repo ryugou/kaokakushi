@@ -250,7 +250,7 @@ actor HistoryDeletionCoordinator { }   // Project / Batch 削除、編集中の�
 | `HistoryDeletionCoordinator` | `Project` / `Batch` 削除、編集中の破棄（7.5） |
 | `StartupRecoveryCoordinator` | 起動時に 1 回のみ実行し、**完了まで他のすべてを開始させない** |
 
-**整合は `canDeleteHistoryUnit` が非終端の `ExportJob` および未削除の `OutputRecord` を絶対保護として同一 DB トランザクション内で見ることで成立する**（7.5）。判定と削除を同一 DB トランザクションへ閉じることで整合する。`DatabaseQueue` がトランザクションを直列化するため判定と挿入は交差しない。
+**整合は、履歴削除の判定（7.5 の絶対保護）が同一 DB トランザクション内で成立することで実現する**（7.5）。判定と削除を同一 DB トランザクションへ閉じることで整合する。`DatabaseQueue` がトランザクションを直列化するため判定と挿入は交差しない。
 
 **`Application` が直接 `import` してはいけないもの**を明示する。
 
@@ -1552,6 +1552,8 @@ protocol ProtectedDataAvailability: Sendable {
 - `WorkingSourceRecord` と処理用ファイル
 - `ExportRecord`、完了済みの `ExportQueueItem`
 
+**v1 では履歴サムネイルの生成コード自体が無く、削除対象になる実体が存在しない**（7.5「履歴サムネイル」が正本。生成・削除経路・孤児 GC は Issue #26 で同時に導入する）。
+
 例外は 4 つです。
 
 - **未受け渡しの出力ファイル。** 利用者がまだ受け取っていない成果物であり、履歴とは性質が異なる。保存・共有・破棄のいずれかで解消する
@@ -1686,12 +1688,11 @@ struct DeletionContext: Sendable {
     let hasWorkingSourceRecord: Bool
     let hasDeliveryAttemptInProgress: Bool // 対象 Project の出力に試行中の DeliveryAttempt が1件でもあるか
 }
-
-func canDeleteHistoryUnit(
-    _ unit: HistoryUnit,          // Project
-    context: DeletionContext
-) -> Bool
 ```
+
+**削除可否判定は `HistoryDeletionStore` の実装（Persistence）が `inspectDeletion` / `deleteHistoryUnit`（下記「実装の所在」）で共有する単一の内部判定として持つ。public な `Domain` 純粋関数は設けない**（両操作が同一の内部判定を共有することで、判定を 1 か所へ集約する）。判定規則そのもの（`DeletionContext` の各フィールド、下記の参照元表、`AbsoluteProtection`）はこの節の記述が正本のまま。
+
+**v1 では `Project` に `isFavorite` / `isBeingEdited` の列が無く、お気に入り・編集中の上書き可能保護は機能しない（常に非保護扱い）。** 列の追加と判定の有効化は Issue #23 で行う（`WorkingSourceRecord` による保護は列を必要としないため v1 でも機能する）。
 
 **履歴は写真アプリ型のフラットな写真グリッドであり、閲覧・削除の単位は `Project` のみとする**（バッチのグルーピングは処理の単位としてのみ存在し、閲覧・削除の単位ではない。[商品面の決定](product-decisions.md)）。`Batch` 行自体は利用者が直接削除する対象ではなく、所属する `Project` がすべて削除されたときに自動的に消える（下記「`Project` 削除 Saga」）。
 
@@ -1703,8 +1704,8 @@ func canDeleteHistoryUnit(
 | 同上 | **`ExportJob` の行**（[書き出し Saga](export-saga.md) の 2 章） | 進行中の書き出しが宙に浮く |
 | 同上 | **`isUndelivered` の `OutputRecord`**（`hasUndeliveredOutputRecord`） | 利用者が受け取っていない成果物が消える |
 | 同上 | **試行中の `DeliveryAttempt`**（`hasDeliveryAttemptInProgress`。[書き出し Saga](export-saga.md) の 7.0） | 写真ライブラリ保存の試行中に出力記録が失われ、結果を追跡できなくなる |
-| **利用者が上書きできる** | お気に入り | 利用者が明示的に保護した履歴が消える |
-| 同上 | 編集中のプロジェクト | 編集画面が参照先を失う |
+| **利用者が上書きできる** | お気に入り（v1 では機能しない。上記） | 利用者が明示的に保護した履歴が消える |
+| 同上 | 編集中のプロジェクト（v1 では機能しない。上記） | 編集画面が参照先を失う |
 | 同上 | `WorkingSourceRecord`（[画像処理](image-pipeline.md)） | 処理用の元素材が消え、キューを復元できない |
 
 **絶対保護は 4 つ**（「消すと復旧できない」「利用者がまだ受け取っていない」「進行中の受け渡し試行と競合する」のいずれかに該当し、確認を出しても意味がない）。残りは利用者の明示操作で上書きできる。**契機ごとに扱いを変える**（「閲覧と削除は常に可能」という原則〈6.2〉と自動削除の安全性を両立させるため）。
@@ -1723,6 +1724,8 @@ func canDeleteHistoryUnit(
 | 編集中 | 編集内容が失われること |
 | `WorkingSourceRecord` | 処理用の素材も削除されること |
 
+**お気に入り・編集中の行は Issue #23 で判定が有効化されるまで到達しない**（v1 の決定は上記を参照）。
+
 **判定と削除は同一トランザクション内で行う**（別にすると判定と削除の間に新しい参照が生まれる。外部キーの `RESTRICT`〈7.1〉が二重防御として働く）。写真ライブラリへ保存済みの加工済み画像は削除されない（設定画面と削除確認の両方に明示する）。
 
 ##### `Project` 削除 Saga
@@ -1731,7 +1734,7 @@ func canDeleteHistoryUnit(
 
 | 順 | 操作 |
 | --- | --- |
-| 1 | `canDeleteHistoryUnit` が真であることを確認する |
+| 1 | 削除可否判定（7.5）を満たすことを確認する |
 | 2 | **同一 DB トランザクション**で `Project` と関連行（`ExportRecord` / `OutputRecord` / キュー項目 / `WorkingSourceRecord` / 検出・レビュー結果 / `ProjectStampAsset` / `ExportedSettingsEntry`）を削除し、実体を `PendingFileDeletion` へ積む |
 | 3 | 削除した `Project` が `Batch` に属しており、そのトランザクション内で数えた **残り所属 `Project` 数が 0** になった場合、**同じトランザクションで `Batch` 行も削除する** |
 | 4 | `PendingFileDeletion` に従って実体を削除する |
@@ -1740,7 +1743,7 @@ func canDeleteHistoryUnit(
 
 ##### 編集中 `Project` の破棄
 
-書き出し前の `Project` を破棄する場合も `Project` 削除 Saga と同じ手順を使う。`beingEdited` の上書き確認を伴う（削除の可否判定）。
+書き出し前の `Project` を破棄する場合も `Project` 削除 Saga と同じ手順を使う。`beingEdited` の上書き確認を伴う（削除の可否判定）。**v1 では `isBeingEdited` が常に `false` のためこの確認は発生しない**（Issue #23 で有効化）。
 
 ##### 実装の所在
 
@@ -1756,7 +1759,7 @@ protocol HistoryDeletionStore: Sendable {
     ) async throws -> DeletionInspection
 
     /// DB トランザクション内で DeletionContext を再取得し、
-    /// canDeleteHistoryUnit を再評価してから削除する（所属 Batch が空になった場合の自動削除を含む）
+    /// 削除可否判定を再評価してから削除する（所属 Batch が空になった場合の自動削除を含む）
     func deleteHistoryUnit(
         _ unit: HistoryUnit,
         trigger: DeletionTrigger
@@ -1958,7 +1961,7 @@ struct StampStorageBreakdown: Sendable {
 
 ##### 孤児ファイルの GC
 
-`PendingFileDeletion` だけでは作成手順 3 で失敗したファイルを回収できない（記録前に落ちるため）。起動時に専用ディレクトリの実体と DB 上の参照一覧を突き合わせ、どちらにも属さないファイルを削除する（対象: `StampAsset` の実体、ラスタスタンプ一時ファイル、書き出しの一時ファイル、処理用ファイル、履歴サムネイル）。**履歴削除・`CustomStamp` 削除・容量超過削除もすべてこの経路を通す**（入口ごとに別順序だと片方だけ孤児が残る）。
+`PendingFileDeletion` だけでは作成手順 3 で失敗したファイルを回収できない（記録前に落ちるため）。起動時に専用ディレクトリの実体と DB 上の参照一覧を突き合わせ、どちらにも属さないファイルを削除する（対象: `StampAsset` の実体、ラスタスタンプ一時ファイル、書き出しの一時ファイル、処理用ファイル）。**履歴サムネイルは v1 では対象外**（生成コード自体が無いため。参照列・生成の導入と同時に Issue #26 で対象へ加える）。**履歴削除・`CustomStamp` 削除・容量超過削除もすべてこの経路を通す**（入口ごとに別順序だと片方だけ孤児が残る）。
 
 ##### `MaintenanceStore`
 

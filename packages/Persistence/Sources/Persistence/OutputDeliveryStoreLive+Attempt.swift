@@ -58,7 +58,8 @@ extension OutputDeliveryStoreLive {
 
     /// generated/deliveryUnknown → delivered。共有自体は DeliveryAttempt を作らないが、
     /// 既存の DeliveryAttempt があれば拒否する（試行中の共有・破棄・別保存の排他は
-    /// export-saga.md 450行の不変条件）。事前条件: settledAt != nil。
+    /// export-saga.md 7.0「delivered を後退させない・直列化・保存結果不明の永続化」の
+    /// 不変条件）。事前条件: settledAt != nil。
     public func completeShare(_ exportID: ExportID) async throws {
         try await database.dbQueue.write { connection in
             try Self.requireSettled(connection, exportID: exportID)

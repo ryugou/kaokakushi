@@ -14,9 +14,9 @@ extension MaintenanceStoreLive {
         case .stampAsset:
             return try await fetchReferencedIDs(sql: "SELECT fileID FROM StampAsset")
         case .stampThumbnail:
-            // architecture.md 1987行（正本）により、`.stampThumbnail`の参照元は
-            // `CustomStamp.thumbnailFileID`（一覧サムネイルは行が参照を持つ。欠損時は
-            // 実体から再生成する）。
+            // architecture.md 7.5「MaintenanceStore」直後の対応表（正本）により、
+            // `.stampThumbnail`の参照元は`CustomStamp.thumbnail`（DB列`thumbnailFileID`。
+            // 一覧サムネイルは行が参照を持つ。欠損時は実体から再生成する）。
             return try await fetchReferencedIDs(sql: "SELECT thumbnailFileID FROM CustomStamp")
         case .processingTemporary:
             return try await fetchReferencedIDs(sql: "SELECT sourceFileID FROM WorkingSourceRecord")
