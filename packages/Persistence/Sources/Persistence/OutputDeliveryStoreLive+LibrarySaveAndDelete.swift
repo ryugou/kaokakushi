@@ -14,7 +14,7 @@ extension OutputDeliveryStoreLive {
     /// UnknownLibrarySaveの全件を返す。事前条件は無い（起動時案内・完了画面表示のどちらも
     /// 全件を必要とするため絞り込みをこの層へ持ち込まない）。
     public func loadUnknownLibrarySaves() async throws -> [UnknownLibrarySave] {
-        let rows = try await database.dbQueue.read { connection in
+        let rows: [Row] = try await database.dbQueue.read { connection in
             try Row.fetchAll(connection, sql: "SELECT exportID, occurredAt FROM UnknownLibrarySave")
         }
         return rows.map { row in

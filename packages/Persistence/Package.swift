@@ -12,7 +12,11 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../Domain"),
-        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0")
+        // exact ピン: XcodeGen 生成の xcodeproj は独自にパッケージ解決するため（その
+        // Package.resolved はコミットされない）、範囲指定だと CI だけが新しい GRDB を
+        // 解決してビルドが割れる（実際に 7.11.1 と最新版の型推論差で発生）。更新は
+        // このピンを上げる PR で明示的に行う。
+        .package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.11.1")
     ],
     targets: [
         .target(

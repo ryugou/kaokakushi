@@ -49,7 +49,7 @@ public struct MaintenanceStoreLive: MaintenanceStore {
     /// 未処理のPendingFileDeletionをすべて読む。デコードできないkindが来た場合は
     /// 握りつぶさず`MaintenanceStoreError.unknownPendingFileDeletionKind`をthrowする。
     public func loadPendingFileDeletions() async throws -> [PendingFileDeletion] {
-        let rows = try await database.dbQueue.read { connection in
+        let rows: [Row] = try await database.dbQueue.read { connection in
             try Row.fetchAll(connection, sql: "SELECT kind, fileID FROM PendingFileDeletion")
         }
         return try rows.map { row in
