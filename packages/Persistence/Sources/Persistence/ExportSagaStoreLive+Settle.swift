@@ -74,16 +74,19 @@ extension ExportSagaStoreLive {
     fileprivate static func settleSingleExportRecord(
         _ connection: Database, exportID: ExportID, settledAt: Date, scope: SettleScope
     ) throws -> SettleOutcome {
-        guard let job = try Self.loadExportJob(connection, exportID: exportID) else {
+        guard let loaded = try Self.loadExportJob(connection, exportID: exportID) else {
             throw ExportSagaStoreError.settleExportJobNotFound(exportID: exportID)
         }
+        let job = loaded.job
         try Self.validateJobBatchScope(job: job, exportID: exportID, scope: scope)
         let pendingOutput = try Self.loadPendingOutputRecord(connection, exportID: exportID)
         try Self.validateQueueItemForSettle(connection, job: job)
 
         try Self.confirmOutputRecord(connection, exportID: exportID, settledAt: settledAt)
         try Self.insertExportRecordRow(connection, job: job, settledAt: settledAt, output: pendingOutput)
-        try Self.upsertExportedSettingsEntryRow(connection, job: job, settledAt: settledAt)
+        try Self.upsertExportedSettingsEntryRow(
+            connection, job: job, settledAt: settledAt, settingsHash: loaded.settingsHash
+        )
         try Self.completeQueueItemIfPresent(connection, queueItemID: job.queueItemID)
         try Self.deleteWorkingSourceRecordForSettle(connection, projectID: job.projectID)
         try connection.execute(sql: "DELETE FROM ExportJob WHERE exportID = ?", arguments: [exportID.rawValue])

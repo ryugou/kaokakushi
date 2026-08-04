@@ -121,15 +121,4 @@ extension WorkingSourceStoreLive {
         )
         return rawValue.map(ManagedFileID.init(rawValue:))
     }
-
-    /// `PendingFileDeletion` へ `INSERT OR IGNORE` で登録する共通ヘルパー
-    /// （image-pipeline.md 5章「削除の経路」の単一経路パターン。重複登録による主キー
-    /// 制約違反を避けるため OR IGNORE にする）。実ファイルの削除自体は
-    /// SourceImportCoordinator側（Task 5）の担当であり、ここでは行わない。
-    static func registerPendingFileDeletion(_ connection: Database, fileID: ManagedFileID) throws {
-        try connection.execute(
-            sql: "INSERT OR IGNORE INTO PendingFileDeletion (kind, fileID) VALUES (?, ?)",
-            arguments: [ManagedFileKind.processingTemporary.rawValue, fileID.rawValue]
-        )
-    }
 }

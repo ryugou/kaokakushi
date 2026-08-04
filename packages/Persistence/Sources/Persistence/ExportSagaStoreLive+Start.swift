@@ -95,17 +95,14 @@ extension ExportSagaStoreLive {
     /// resolveCapabilitiesが行う）。行が2件以上あれば契約違反としてthrowする（7番の修正。
     /// SubscriptionStateは単一行であることをApplication層が保証する契約）。
     private static func loadSubscriptionState(_ connection: Database) throws -> SubscriptionState? {
-        let rows = try Row.fetchAll(
+        guard let row = try Self.fetchSingletonRow(
             connection,
+            table: "SubscriptionState",
             sql: """
             SELECT plan, status, expiresAt, lastVerifiedAt, isSandbox, willRenew, fetchedAt
             FROM SubscriptionState
             """
-        )
-        guard rows.count <= 1 else {
-            throw ExportSagaStoreError.multipleSingletonRows(table: "SubscriptionState", count: rows.count)
-        }
-        guard let row = rows.first else {
+        ) else {
             return nil
         }
         let (plan, status) = try Self.decodePlanAndStatus(

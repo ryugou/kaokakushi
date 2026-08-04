@@ -44,10 +44,7 @@ extension OutputDeliveryStoreLive {
                 return
             }
             try connection.execute(sql: "DELETE FROM OutputRecord WHERE exportID = ?", arguments: [exportID.rawValue])
-            try connection.execute(
-                sql: "INSERT OR IGNORE INTO PendingFileDeletion (kind, fileID) VALUES (?, ?)",
-                arguments: [ManagedFileKind.output.rawValue, outputFileID]
-            )
+            try registerPendingFileDeletion(connection, kind: .output, fileID: outputFileID)
         }
     }
 

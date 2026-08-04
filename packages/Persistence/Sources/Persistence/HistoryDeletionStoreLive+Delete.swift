@@ -22,7 +22,7 @@ import GRDB
 //      RESTRICT違反がthrowされ、トランザクション全体がロールバックされる（判定漏れへの
 //      二重防御。正本どおりcatchして握りつぶさず伝播させる）。
 //   6. cで読み取ったassetHashごとにProjectStampAssetの参照解放を行う
-//      （HistoryDeletionStoreLive+StampRelease.swift）。
+//      （StampAssetReferences.swift。StampStoreと共有する）。
 //   7. dで読み取ったbatchIDごとに、ExportQueueItemの残存行が0件ならBatch行を削除する
 //      （architecture.md「Project削除Saga」直後の解説。ExportRecord/OutputRecord/ExportJobの
 //      batchID列はonDelete: .setNullのため追加対応不要）。
@@ -49,7 +49,9 @@ extension HistoryDeletionStoreLive {
             try connection.execute(sql: "DELETE FROM Project WHERE projectID = ?", arguments: [projectID.rawValue])
 
             for assetHash in assetHashes {
-                try Self.releaseStampAssetIfUnreferenced(connection, assetHash: try StampAssetHash(bytes: assetHash))
+                try StampAssetReferences.releaseIfUnreferenced(
+                    connection, assetHash: try StampAssetHash(bytes: assetHash)
+                )
             }
             for batchID in batchIDs {
                 try Self.deleteBatchIfEmpty(connection, batchID: batchID)
@@ -82,17 +84,15 @@ extension HistoryDeletionStoreLive {
     }
 
     /// 手順3。行が無ければ何もしない（DELETEもPendingFileDeletion登録も不要）。
+    /// PendingFileDeletionへの登録は1文（複数行VALUES）でまとめて行う。
     private static func deleteOutputRecordsAndRegisterPendingDeletion(
         _ connection: Database, projectID: ProjectID, outputFileIDs: [UUID]
     ) throws {
         guard !outputFileIDs.isEmpty else { return }
         try connection.execute(sql: "DELETE FROM OutputRecord WHERE projectID = ?", arguments: [projectID.rawValue])
-        for outputFileID in outputFileIDs {
-            try connection.execute(
-                sql: "INSERT OR IGNORE INTO PendingFileDeletion (kind, fileID) VALUES (?, ?)",
-                arguments: [ManagedFileKind.output.rawValue, outputFileID]
-            )
-        }
+        try registerPendingFileDeletions(connection, files: outputFileIDs.map { outputFileID in
+            ManagedFileRef(kind: .output, fileID: ManagedFileID(rawValue: outputFileID))
+        })
     }
 
     /// 手順4。WorkingSourceRecord行自体はProject削除のCASCADEに任せ、ここではPending
@@ -101,10 +101,7 @@ extension HistoryDeletionStoreLive {
         _ connection: Database, sourceFileID: ManagedFileID?
     ) throws {
         guard let sourceFileID else { return }
-        try connection.execute(
-            sql: "INSERT OR IGNORE INTO PendingFileDeletion (kind, fileID) VALUES (?, ?)",
-            arguments: [ManagedFileKind.processingTemporary.rawValue, sourceFileID.rawValue]
-        )
+        try registerPendingFileDeletion(connection, kind: .processingTemporary, fileID: sourceFileID.rawValue)
     }
 
     /// 手順7。対象batchIDに一致するExportQueueItemが0件になっていればBatch行を削除する。

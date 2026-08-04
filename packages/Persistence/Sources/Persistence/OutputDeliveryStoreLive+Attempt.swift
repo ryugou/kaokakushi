@@ -79,13 +79,11 @@ extension OutputDeliveryStoreLive {
             let previousState = try Self.decodeOutputState(
                 previousStateRaw, table: "DeliveryAttempt", column: "previousState"
             )
-            guard let currentStateRaw = try Int.fetchOne(
-                connection, sql: "SELECT state FROM OutputRecord WHERE exportID = ?",
-                arguments: [exportID.rawValue]
-            ) else {
-                throw OutputDeliveryStoreError.outputRecordNotFound(exportID: exportID)
-            }
-            if currentStateRaw != Int(OutputState.delivered.rawValue) {
+            // 現在の状態はcurrentOutputStateヘルパーでデコードしてから比較する（生のInt値
+            // 同士の比較にしない。resolveOrphanedAttemptsと同じ判定材料・同じ失敗の仕方に
+            // 揃える）。
+            let currentState = try Self.currentOutputState(connection, exportID: exportID)
+            if currentState != .delivered {
                 try Self.updateOutputRecordState(connection, exportID: exportID, state: previousState)
             }
             try Self.deleteDeliveryAttempt(connection, exportID: exportID)

@@ -85,12 +85,13 @@ extension OutputDeliveryStoreLive {
     /// outputFileIDはkindを.outputへ固定して構築するためOutputFileRef.init(_:)は理論上
     /// 失敗しないが、契約違反時にforce-unwrap/fatalErrorでクラッシュさせず、フェイル
     /// クローズで例外にする（他のPersistenceコードにforce-unwrapの前例が無いため）。
+    /// この失敗は列値の不正ではなく型の契約の食い違いのため、専用の
+    /// invalidOutputFileKind（対象exportIDを持つ）で報告する。
     private static func makeOutputDeliverySnapshot(_ row: Row) throws -> OutputDeliverySnapshot {
+        let exportID = ExportID(rawValue: row["exportID"])
         let outputFileRef = ManagedFileRef(kind: .output, fileID: ManagedFileID(rawValue: row["outputFileID"]))
         guard let outputFile = OutputFileRef(outputFileRef) else {
-            throw OutputDeliveryStoreError.invalidColumnValue(
-                table: "OutputRecord", column: "outputFileID", rawValue: 0
-            )
+            throw OutputDeliveryStoreError.invalidOutputFileKind(exportID: exportID)
         }
         let stateRaw: Int = row["state"]
         let state = try Self.decodeOutputState(stateRaw, table: "OutputRecord", column: "state")
@@ -102,7 +103,7 @@ extension OutputDeliveryStoreLive {
         }
         let batchIDRaw: UUID? = row["batchID"]
         let output = OutputRecord(
-            exportID: ExportID(rawValue: row["exportID"]),
+            exportID: exportID,
             projectID: ProjectID(rawValue: row["projectID"]),
             batchID: batchIDRaw.map(BatchID.init(rawValue:)),
             outputFile: outputFile,

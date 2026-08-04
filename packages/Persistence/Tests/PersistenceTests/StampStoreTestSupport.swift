@@ -3,15 +3,19 @@ import GRDB
 import Domain
 @testable import Persistence
 
-// StampStoreImportTests / StampStoreReferenceTests / StampStoreStorageTests が共有する
-// ヘルパー群。makeTestAppDatabase()（WorkingSourceStoreTestSupport.swift）・insertProject
-// （SchemaTestSupport.swift）はそのまま再利用し、ここでは重複定義しない。
+// StampStoreImportTests / StampStoreReferenceTests / StampStoreStorageTests /
+// ManagedFileStoreTests が共有するヘルパー群。makeTestAppDatabase()
+// （WorkingSourceStoreTestSupport.swift）・insertProject（SchemaTestSupport.swift）は
+// そのまま再利用し、ここでは重複定義しない。
 
-/// テストごとに衝突しない一時ディレクトリ群を発行する
-/// （ManagedFileStoreTests.makeTemporaryDirectoriesと同じ流儀）。
-func makeStampTestDirectories() -> (root: URL, directories: ManagedFileDirectories) {
+/// テストごとに衝突しない一時ディレクトリ群を発行する。`prefix`はルートディレクトリ名の
+/// 先頭に付く識別子で、どのテストが作った一時ディレクトリかを目視できるようにするためだけの
+/// もの（一意性はUUIDが担保する）。既定値はStampStore系テストの従来の名前。
+func makeStampTestDirectories(
+    prefix: String = "StampStoreTests"
+) -> (root: URL, directories: ManagedFileDirectories) {
     let root = FileManager.default.temporaryDirectory
-        .appendingPathComponent("StampStoreTests-\(UUID().uuidString)")
+        .appendingPathComponent("\(prefix)-\(UUID().uuidString)")
     let directories = ManagedFileDirectories(
         output: root.appendingPathComponent("outputs"),
         stampAsset: root.appendingPathComponent("stamps"),

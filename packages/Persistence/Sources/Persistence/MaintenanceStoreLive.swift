@@ -79,10 +79,7 @@ public struct MaintenanceStoreLive: MaintenanceStore {
     /// 複数回登録してもPRIMARY KEY制約違反でクラッシュしない（冪等性）。
     public func registerOrphan(_ file: ManagedFileRef) async throws {
         try await database.dbQueue.write { connection in
-            try connection.execute(
-                sql: "INSERT OR IGNORE INTO PendingFileDeletion (kind, fileID) VALUES (?, ?)",
-                arguments: [file.kind.rawValue, file.fileID.rawValue]
-            )
+            try registerPendingFileDeletion(connection, kind: file.kind, fileID: file.fileID.rawValue)
         }
     }
 

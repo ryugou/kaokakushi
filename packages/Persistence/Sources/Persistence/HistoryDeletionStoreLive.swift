@@ -19,10 +19,9 @@ import GRDB
 //     privateヘルパー群・削除可否判定ロジック（evaluateDeletion）
 //   - HistoryDeletionStoreLive+Inspect.swift: inspectDeletion
 //   - HistoryDeletionStoreLive+Delete.swift: deleteHistoryUnit（判定＋削除本体）
-//   - HistoryDeletionStoreLive+StampRelease.swift: ProjectStampAsset解放ロジック
-//     （StampStoreLive+References.swiftのdeleteStampAssetIfUnreferencedと同型。
-//     private staticのため直接再利用できず、同等ロジックをこちらにも実装する。
-//     コード重複は許容——オーケストレーター確定判断）。
+//
+// ProjectStampAssetの解放ロジックはStampStoreと共通のため、モジュール共有の
+// StampAssetReferences.swift（StampStoreLive+References.swiftも同じ関数を呼ぶ）に置く。
 //
 // 既知のスキーマギャップ（実装不可。判断を求めず、コメントで明記するだけに留める）:
 //   - Project.isFavorite / isBeingEdited: Schema+Project.swiftのProjectテーブルに対応する

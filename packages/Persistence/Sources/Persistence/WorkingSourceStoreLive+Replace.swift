@@ -8,6 +8,21 @@ import GRDB
 // （image-pipeline.md 5章「再選択後のSaga」手順2の分岐表）、共通処理をこのファイル内の
 // privateヘルパーへ集約する。
 
+/// replaceWorkingSource / attachWorkingSourceToExistingProjectの差分（入力型が異なるだけで
+/// 置き換え処理そのものは同一）を1つにまとめた値。引数を構造体へ束ねるのはlintの引数上限
+/// 対応パターン（ExportSagaStoreLive.AccountingModeContextと同じ理由）。このファイル内の
+/// privateヘルパーだけが使うためfile-scope privateで足りる。
+private struct WorkingSourceReplacement {
+    let projectID: ProjectID
+    /// 新しい処理用素材のfileID（replaceならnewSourceFile、attachならsourceFile由来）。
+    let sourceFileID: ManagedFileID
+    /// WorkingSourceRecord.createdAtへ書く時刻（replaceならreplacedAt、attachならattachedAt）。
+    let createdAt: Date
+    let capture: OriginalCaptureMetadata
+    let libraryCreationDate: Date?
+    let representation: SourceRepresentation
+}
+
 extension WorkingSourceStoreLive {
     /// 単一トランザクションで: (1) 旧sourceFileIDを読む (2) WorkingSourceRecordをupsert
     /// (3) Projectの撮影メタデータを更新 (4) FaceTrackを全削除（EffectSettingはFK CASCADE
@@ -16,26 +31,14 @@ extension WorkingSourceStoreLive {
     /// （image-pipeline.md 5章「再選択後のSaga」）。
     public func replaceWorkingSource(_ input: ReplaceWorkingSourceInput) async throws {
         try await database.dbQueue.write { connection in
-            let previousSourceFileID = try Self.loadSourceFileID(connection, projectID: input.projectID)
-
-            try Self.upsertWorkingSourceRecord(
-                connection,
+            try Self.applyWorkingSourceReplacement(connection, replacement: WorkingSourceReplacement(
                 projectID: input.projectID,
                 sourceFileID: input.newSourceFile.ref.fileID,
-                createdAt: input.replacedAt
-            )
-            try Self.updateProjectCaptureMetadata(
-                connection,
-                projectID: input.projectID,
+                createdAt: input.replacedAt,
                 capture: input.capture,
                 libraryCreationDate: input.libraryCreationDate,
                 representation: input.representation
-            )
-            try Self.discardFaceTracksAndBumpRevisions(connection, projectID: input.projectID)
-
-            if let previousSourceFileID {
-                try Self.registerPendingFileDeletion(connection, fileID: previousSourceFileID)
-            }
+            ))
         }
     }
 
@@ -43,31 +46,51 @@ extension WorkingSourceStoreLive {
     /// 存在しない前提だが、念のためUPSERT的に書く（spec確定判断）。万一契約違反で
     /// 既存WorkingSourceRecordが残っていた場合に備え、upsert前に旧sourceFileIDを読み、
     /// upsert後にPendingFileDeletionへ登録することで旧ファイルが失われないようにする
-    /// （replaceWorkingSourceと同じ防御。呼び出し位置・呼び出し方も揃えている）。
-    /// 通常経路（契約どおりWorkingSourceRecordが存在しない場合）は旧ファイルが無いため
-    /// PendingFileDeletion登録は行われない。
+    /// （replaceWorkingSourceと同じ防御。手順そのものを共有しているため、呼び出し位置・
+    /// 呼び出し方の差異は生じない）。通常経路（契約どおりWorkingSourceRecordが存在しない
+    /// 場合）は旧ファイルが無いためPendingFileDeletion登録は行われない。
     public func attachWorkingSourceToExistingProject(_ input: AttachWorkingSourceInput) async throws {
         try await database.dbQueue.write { connection in
-            let previousSourceFileID = try Self.loadSourceFileID(connection, projectID: input.projectID)
-
-            try Self.upsertWorkingSourceRecord(
-                connection,
+            try Self.applyWorkingSourceReplacement(connection, replacement: WorkingSourceReplacement(
                 projectID: input.projectID,
                 sourceFileID: input.sourceFile.ref.fileID,
-                createdAt: input.attachedAt
-            )
-            try Self.updateProjectCaptureMetadata(
-                connection,
-                projectID: input.projectID,
+                createdAt: input.attachedAt,
                 capture: input.capture,
                 libraryCreationDate: input.libraryCreationDate,
                 representation: input.representation
-            )
-            try Self.discardFaceTracksAndBumpRevisions(connection, projectID: input.projectID)
+            ))
+        }
+    }
 
-            if let previousSourceFileID {
-                try Self.registerPendingFileDeletion(connection, fileID: previousSourceFileID)
-            }
+    /// replaceWorkingSource / attachWorkingSourceToExistingProjectが共有する5段の骨格
+    /// （上記replaceWorkingSourceのdocコメントの手順1〜6）。両者の違いは入力の取り出し方
+    /// だけなので、DBへの手順はこの1箇所に集約する（片方だけ手順が変わる事故を防ぐ）。
+    /// 呼び出し元のdbQueue.writeクロージャ内から呼ばれるため、全手順が同一トランザクションに
+    /// 含まれる。
+    private static func applyWorkingSourceReplacement(
+        _ connection: Database, replacement: WorkingSourceReplacement
+    ) throws {
+        let previousSourceFileID = try Self.loadSourceFileID(connection, projectID: replacement.projectID)
+
+        try Self.upsertWorkingSourceRecord(
+            connection,
+            projectID: replacement.projectID,
+            sourceFileID: replacement.sourceFileID,
+            createdAt: replacement.createdAt
+        )
+        try Self.updateProjectCaptureMetadata(
+            connection,
+            projectID: replacement.projectID,
+            capture: replacement.capture,
+            libraryCreationDate: replacement.libraryCreationDate,
+            representation: replacement.representation
+        )
+        try Self.discardFaceTracksAndBumpRevisions(connection, projectID: replacement.projectID)
+
+        if let previousSourceFileID {
+            try registerPendingFileDeletion(
+                connection, kind: .processingTemporary, fileID: previousSourceFileID.rawValue
+            )
         }
     }
 

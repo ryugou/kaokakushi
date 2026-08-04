@@ -20,20 +20,11 @@ private struct BodyFailure: Error, Equatable {
 @Suite("ManagedFileStoreLive")
 struct ManagedFileStoreTests {
 
-    /// テストごとに衝突しない一時ディレクトリ群を発行する。裸のDate()は使わず、
-    /// ルートディレクトリ名の一意性はUUIDで担保する。
+    /// テストごとに衝突しない一時ディレクトリ群を発行する（実体は
+    /// StampStoreTestSupport.makeStampTestDirectories。裸のDate()は使わず、ルート
+    /// ディレクトリ名の一意性はUUIDで担保する）。prefixだけをこのSuite用に変える。
     private func makeTemporaryDirectories() -> (root: URL, directories: ManagedFileDirectories) {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ManagedFileStoreTests-\(UUID().uuidString)")
-        let directories = ManagedFileDirectories(
-            output: root.appendingPathComponent("outputs"),
-            stampAsset: root.appendingPathComponent("stamps"),
-            historyThumbnail: root.appendingPathComponent("thumbnails"),
-            stampThumbnail: root.appendingPathComponent("stamp-thumbnails"),
-            processingTemporary: root.appendingPathComponent("working"),
-            rasterTemporary: root.appendingPathComponent("raster")
-        )
-        return (root, directories)
+        makeStampTestDirectories(prefix: "ManagedFileStoreTests")
     }
 
     @Test("createFileで作成したファイルはisExcludedFromBackupがtrueになること")

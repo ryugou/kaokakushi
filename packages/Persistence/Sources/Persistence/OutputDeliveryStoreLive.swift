@@ -45,6 +45,11 @@ public enum OutputDeliveryStoreError: Error, Sendable, Equatable {
     /// raw valueがDomainのenumのどのcaseにも対応しない（スキーマ移行漏れ、または手動でのDB
     /// 改変が疑われる）。
     case invalidColumnValue(table: String, column: String, rawValue: Int)
+    /// resolveOrphanedAttempts: OutputRecord.outputFileIDから`kind = .output`固定で組み立てた
+    /// `ManagedFileRef`を`OutputFileRef.init(_:)`が受け付けなかった。列値ではなく型の契約
+    /// （ManagedFileRef.swift「種別つきの参照」）が食い違っている構造的不整合のため、列の
+    /// raw valueを持つinvalidColumnValueとは別のcaseにする（ダミーのrawValueを詰めない）。
+    case invalidOutputFileKind(exportID: ExportID)
 }
 
 extension OutputDeliveryStoreError: LocalizedError {
@@ -85,6 +90,15 @@ extension OutputDeliveryStoreError: LocalizedError {
             OutputDeliveryStore: \(table).\(column) の値 \(rawValue) はDomainのenumのどの \
             caseにも対応しません。スキーマとDomainのenum定義が不整合になっている可能性が \
             あります（マイグレーション漏れ、または手動でのDB改変を疑ってください）。
+            """
+        case .invalidOutputFileKind(let exportID):
+            return """
+            OutputDeliveryStore: exportID=\(exportID.rawValue.uuidString) のOutputRecord. \
+            outputFileIDからOutputFileRefを構築できませんでした。Persistence側はkindを \
+            .outputに固定して組み立てているため、Domainの種別つき参照（OutputFileRef.init(_:)。 \
+            ManagedFileRef.swift）が受け付けるkindの条件と食い違っています。DomainパッケージとPersistence \
+            アダプタのバージョンが一致しているか（ManagedFileKindの割当やOutputFileRefの受け入れ \
+            条件の変更が片側だけ取り込まれていないか）を確認してください。
             """
         }
     }

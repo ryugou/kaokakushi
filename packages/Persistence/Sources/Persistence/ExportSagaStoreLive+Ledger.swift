@@ -46,14 +46,11 @@ extension ExportSagaStoreLive {
     /// 判断する。行が2件以上あれば契約違反としてfail-closedでthrowする（他の単一行テーブルと
     /// 同じ方針。multipleSingletonRows）。
     static func loadUsageLedger(_ connection: Database) throws -> UsageLedger? {
-        let rows = try Row.fetchAll(
+        guard let row = try Self.fetchSingletonRow(
             connection,
+            table: "UsageLedger",
             sql: "SELECT periodYear, periodMonth, consumedExportIDs, trialConsumedExportIDs FROM UsageLedger"
-        )
-        guard rows.count <= 1 else {
-            throw ExportSagaStoreError.multipleSingletonRows(table: "UsageLedger", count: rows.count)
-        }
-        guard let row = rows.first else {
+        ) else {
             return nil
         }
         let consumedBlob: Data = row["consumedExportIDs"]

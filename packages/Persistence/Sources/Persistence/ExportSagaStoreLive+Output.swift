@@ -13,10 +13,10 @@ extension ExportSagaStoreLive {
     public func recordGeneratedOutput(_ input: RecordOutputInput) async throws {
         let generatedAt = now()
         try await database.dbQueue.write { connection in
-            guard let job = try Self.loadExportJob(connection, exportID: input.exportID) else {
+            guard let loaded = try Self.loadExportJob(connection, exportID: input.exportID) else {
                 throw ExportSagaStoreError.exportJobNotFound(exportID: input.exportID)
             }
-            try Self.insertOutputRecord(connection, job: job, input: input, generatedAt: generatedAt)
+            try Self.insertOutputRecord(connection, job: loaded.job, input: input, generatedAt: generatedAt)
         }
     }
 
@@ -80,7 +80,9 @@ extension ExportSagaStoreLive {
             }
 
             try Self.deletePendingOutputRecordIfPresent(connection, exportID: exportID)
-            try Self.registerTemporaryFilesForDeletion(connection, temporaryFiles: temporaryFiles)
+            // temporaryFilesは1文（複数行VALUES）でまとめて登録する。INSERT OR IGNOREのため、
+            // 同じ参照が複数回渡されても安全（冪等）。
+            try registerPendingFileDeletions(connection, files: temporaryFiles)
 
             try connection.execute(sql: "DELETE FROM ExportJob WHERE exportID = ?", arguments: [exportID.rawValue])
         }
@@ -100,22 +102,6 @@ extension ExportSagaStoreLive {
         try connection.execute(
             sql: "DELETE FROM OutputRecord WHERE exportID = ? AND settledAt IS NULL", arguments: [exportID.rawValue]
         )
-        try connection.execute(
-            sql: "INSERT OR IGNORE INTO PendingFileDeletion (kind, fileID) VALUES (?, ?)",
-            arguments: [ManagedFileKind.output.rawValue, outputFileID]
-        )
-    }
-
-    /// temporaryFilesの各要素をPendingFileDeletionへ登録する（4番の修正）。INSERT OR
-    /// IGNOREのため、同じ参照が複数回渡されても安全（冪等）。
-    private static func registerTemporaryFilesForDeletion(
-        _ connection: Database, temporaryFiles: [ManagedFileRef]
-    ) throws {
-        for file in temporaryFiles {
-            try connection.execute(
-                sql: "INSERT OR IGNORE INTO PendingFileDeletion (kind, fileID) VALUES (?, ?)",
-                arguments: [file.kind.rawValue, file.fileID.rawValue]
-            )
-        }
+        try registerPendingFileDeletion(connection, kind: .output, fileID: outputFileID)
     }
 }

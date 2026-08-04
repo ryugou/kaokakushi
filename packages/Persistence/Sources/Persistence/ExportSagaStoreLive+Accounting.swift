@@ -140,15 +140,17 @@ extension ExportSagaStoreLive {
 
     /// UsageLedger行はApplication層が単一行であることを保証する契約
     /// （Schema+Accounting.swiftのコメント参照）。行が2件以上あれば契約違反として
-    /// fail-closedでthrowする（5番・7番の修正。先頭行だけを暗黙に使わない）。
+    /// fail-closedでthrowする（5番・7番の修正。先頭行だけを暗黙に使わない）。この検査は
+    /// fetchSingletonRow（+Mapping.swift）に集約している。
     private static func loadTrialConsumedCount(_ connection: Database) throws -> Int {
-        let blobs = try Data.fetchAll(connection, sql: "SELECT trialConsumedExportIDs FROM UsageLedger")
-        guard blobs.count <= 1 else {
-            throw ExportSagaStoreError.multipleSingletonRows(table: "UsageLedger", count: blobs.count)
-        }
-        guard let blob = blobs.first else {
+        guard let row = try Self.fetchSingletonRow(
+            connection, table: "UsageLedger", sql: "SELECT trialConsumedExportIDs FROM UsageLedger"
+        ) else {
             return 0
         }
+        // trialConsumedExportIDsはNOT NULL列（Schema+Accounting.swift）のため非Optionalで
+        // デコードする。
+        let blob: Data = row["trialConsumedExportIDs"]
         guard blob.count % exportIDByteLength == 0 else {
             throw ExportSagaStoreError.corruptUsageLedgerBlob(byteCount: blob.count)
         }

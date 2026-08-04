@@ -14,7 +14,8 @@ import Domain
 //   - StampStoreLive.swift（このファイル）: struct定義・init
 //   - StampStoreLive+Import.swift: importCustomStamp
 //   - StampStoreLive+References.swift: removeCustomStamp / attachStampReference /
-//     releaseStampReference と共有ヘルパー deleteStampAssetIfUnreferenced
+//     releaseStampReference（参照が0になった実体の解放はHistoryDeletionStoreと共有する
+//     StampAssetReferences.swiftが担当する）
 //   - StampStoreLive+Storage.swift: loadCustomStamps / loadStampStorageBreakdown
 
 /// StampStoreの実装。GRDBのAppDatabaseとManagedFileStoreを1つずつ受け取り、全メソッドを

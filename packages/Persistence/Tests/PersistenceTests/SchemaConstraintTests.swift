@@ -12,21 +12,14 @@ import GRDB
 @Suite("SchemaConstraints")
 struct SchemaConstraintTests {
 
-    private func makeTemporaryDatabaseURL() -> URL {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent("SchemaConstraintTests-\(UUID().uuidString).sqlite")
-    }
-
-    private func openTestDatabase() throws -> (AppDatabase, URL) {
-        let url = makeTemporaryDatabaseURL()
-        return (try AppDatabase.open(at: url), url)
-    }
+    // 一時ファイルDBの用意はmakeTestAppDatabase()（WorkingSourceStoreTestSupport.swift）を
+    // 再利用する（AppDatabase.open(at:)経由・テストごとにUUIDで衝突回避、という条件が同じ）。
 
     // MARK: - RESTRICT
 
     @Test("非終端のOutputRecordが存在するProjectの削除がRESTRICTで失敗すること")
     func projectDeletionRestrictedByPendingOutputRecord() throws {
-        let (appDatabase, url) = try openTestDatabase()
+        let (appDatabase, url) = try makeTestAppDatabase()
         defer { try? FileManager.default.removeItem(at: url) }
         let projectID = UUID()
 
@@ -49,7 +42,7 @@ struct SchemaConstraintTests {
 
     @Test("進行中のExportJobが存在するProjectの削除がRESTRICTで失敗すること")
     func projectDeletionRestrictedByRunningExportJob() throws {
-        let (appDatabase, url) = try openTestDatabase()
+        let (appDatabase, url) = try makeTestAppDatabase()
         defer { try? FileManager.default.removeItem(at: url) }
         let projectID = UUID()
 
@@ -74,7 +67,7 @@ struct SchemaConstraintTests {
 
     @Test("Batch削除でOutputRecord/ExportRecord/ExportJobのbatchIDがSET NULLになること")
     func batchDeletionSetsNullOnDependentBatchIDs() throws {
-        let (appDatabase, url) = try openTestDatabase()
+        let (appDatabase, url) = try makeTestAppDatabase()
         defer { try? FileManager.default.removeItem(at: url) }
         let projectID = UUID()
         let batchID = UUID()
@@ -116,7 +109,7 @@ struct SchemaConstraintTests {
 
     @Test("同一projectIDで未確定のOutputRecordを2件INSERTすると一意制約違反になること")
     func pendingOutputRecordPartialUniqueRejectsSecondPendingRow() throws {
-        let (appDatabase, url) = try openTestDatabase()
+        let (appDatabase, url) = try makeTestAppDatabase()
         defer { try? FileManager.default.removeItem(at: url) }
         let projectID = UUID()
 
@@ -139,7 +132,7 @@ struct SchemaConstraintTests {
 
     @Test("1件目のOutputRecordをsettleしてから2件目（未確定）をINSERTすると成功すること")
     func pendingOutputRecordPartialUniqueAllowsAfterFirstIsSettled() throws {
-        let (appDatabase, url) = try openTestDatabase()
+        let (appDatabase, url) = try makeTestAppDatabase()
         defer { try? FileManager.default.removeItem(at: url) }
         let projectID = UUID()
         let firstExportID = UUID()
@@ -174,7 +167,7 @@ struct SchemaConstraintTests {
 
     @Test("CustomStampが参照するStampAssetの削除が失敗すること")
     func stampAssetDeletionRestrictedByCustomStamp() throws {
-        let (appDatabase, url) = try openTestDatabase()
+        let (appDatabase, url) = try makeTestAppDatabase()
         defer { try? FileManager.default.removeItem(at: url) }
         let assetHash = schemaTestHash(seed: 0x01)
 
@@ -197,7 +190,7 @@ struct SchemaConstraintTests {
 
     @Test("ProjectStampAssetが参照するStampAssetの削除が失敗すること")
     func stampAssetDeletionRestrictedByProjectStampAsset() throws {
-        let (appDatabase, url) = try openTestDatabase()
+        let (appDatabase, url) = try makeTestAppDatabase()
         defer { try? FileManager.default.removeItem(at: url) }
         let assetHash = schemaTestHash(seed: 0x02)
         let projectID = UUID()
@@ -271,7 +264,7 @@ struct SchemaConstraintTests {
 
     @Test("Projectを削除すると依存する子行がCASCADEで消えること")
     func cascadeChainDeletesDependentRows() throws {
-        let (appDatabase, url) = try openTestDatabase()
+        let (appDatabase, url) = try makeTestAppDatabase()
         defer { try? FileManager.default.removeItem(at: url) }
         let projectID = UUID()
         let faceTrackID = UUID()
@@ -296,7 +289,7 @@ struct SchemaConstraintTests {
     /// 直接削除し、EffectSettingが単独でもCASCADEされることを確認する。
     @Test("FaceTrackを単独削除するとEffectSettingがCASCADEで消えること")
     func faceTrackDeletionCascadesEffectSetting() throws {
-        let (appDatabase, url) = try openTestDatabase()
+        let (appDatabase, url) = try makeTestAppDatabase()
         defer { try? FileManager.default.removeItem(at: url) }
         let projectID = UUID()
         let faceTrackID = UUID()

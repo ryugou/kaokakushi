@@ -41,7 +41,9 @@ extension WorkingSourceStoreLive {
                 sql: "DELETE FROM WorkingSourceRecord WHERE projectID = ?",
                 arguments: [projectID.rawValue]
             )
-            try Self.registerPendingFileDeletion(connection, fileID: sourceFileID)
+            try registerPendingFileDeletion(
+                connection, kind: .processingTemporary, fileID: sourceFileID.rawValue
+            )
         }
     }
 
@@ -83,7 +85,9 @@ extension WorkingSourceStoreLive {
             // architecture.md 7.5「出力の削除経路」と同じ単一経路に揃える）。fileIDが
             // 取れなかった場合（WorkingSourceRecordが元から無かった場合）は登録しない。
             if let sourceFileID {
-                try Self.registerPendingFileDeletion(connection, fileID: sourceFileID)
+                try registerPendingFileDeletion(
+                    connection, kind: .processingTemporary, fileID: sourceFileID.rawValue
+                )
             }
         }
     }

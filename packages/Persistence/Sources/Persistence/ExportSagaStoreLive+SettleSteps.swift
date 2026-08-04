@@ -98,23 +98,16 @@ extension ExportSagaStoreLive {
         )
     }
 
-    /// ExportJob.settingsHash列（Schema+Accounting.swift。startExport時点で計算済み）を
-    /// 読む。ここに到達する時点でloadExportJobが既に同じexportIDの行を読めているため
-    /// 行が無いことは通常起こらないが、防御的にsettleExportJobNotFoundでthrowする。
-    private static func loadSettingsHash(_ connection: Database, exportID: ExportID) throws -> Data {
-        guard let hash = try Data.fetchOne(
-            connection, sql: "SELECT settingsHash FROM ExportJob WHERE exportID = ?", arguments: [exportID.rawValue]
-        ) else {
-            throw ExportSagaStoreError.settleExportJobNotFound(exportID: exportID)
-        }
-        return hash
-    }
-
     /// confirmed設定エントリ（ExportedSettingsEntry）をUPSERTする（3章「confirmed設定
     /// エントリの更新」）。PRIMARY KEYはprojectIDのため、同一projectIDへの2回目以降の
     /// settleは既存行を上書きする。
-    static func upsertExportedSettingsEntryRow(_ connection: Database, job: ExportJob, settledAt: Date) throws {
-        let settingsHash = try Self.loadSettingsHash(connection, exportID: job.exportID)
+    ///
+    /// settingsHash（ExportJob.settingsHash列。Schema+Accounting.swift。startExport時点で
+    /// 計算済み）は呼び出し元がloadExportJobで既に読んだ値をそのまま受け取る（同一
+    /// トランザクション内で同じ行を読み直さない）。
+    static func upsertExportedSettingsEntryRow(
+        _ connection: Database, job: ExportJob, settledAt: Date, settingsHash: Data
+    ) throws {
         try connection.execute(
             sql: """
             INSERT INTO ExportedSettingsEntry (projectID, settingsHash, exportedAt) VALUES (?, ?, ?)
@@ -151,9 +144,6 @@ extension ExportSagaStoreLive {
         try connection.execute(
             sql: "DELETE FROM WorkingSourceRecord WHERE projectID = ?", arguments: [projectID.rawValue]
         )
-        try connection.execute(
-            sql: "INSERT OR IGNORE INTO PendingFileDeletion (kind, fileID) VALUES (?, ?)",
-            arguments: [ManagedFileKind.processingTemporary.rawValue, sourceFileID]
-        )
+        try registerPendingFileDeletion(connection, kind: .processingTemporary, fileID: sourceFileID)
     }
 }
