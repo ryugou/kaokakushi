@@ -26,8 +26,7 @@ import GRDB
 // 既知のスキーマギャップ（実装不可。判断を求めず、コメントで明記するだけに留める）:
 //   - Project.isFavorite / isBeingEdited: Schema+Project.swiftのProjectテーブルに対応する
 //     列が存在しないため常にfalse固定。MaintenanceStoreLive+References.swiftの
-//     `.historyThumbnail`ケースと同水準の扱い。列が追加されるまでの暫定であり、
-//     オーケストレーターが最終報告でエスカレーションする。
+//     `.historyThumbnail`ケースと同水準の扱い。列の追加はIssue #23で行う。
 //   - 履歴サムネイル（ManagedFileRef(.historyThumbnail, ...)）はv1では実体解放を行わない
 //     （Projectがその参照を保持する列が存在しないため。MaintenanceStoreLive+
 //     References.swiftの`.historyThumbnail`ケースも同じ理由で常に空集合を返している）。

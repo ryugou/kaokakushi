@@ -179,8 +179,8 @@ extension ExportSagaStoreError: LocalizedError {
         case .multipleSingletonRows(let table, let count):
             return """
             ExportSagaStore: \(table) は単一行であることが契約ですが、実際には \(count) \
-            行存在します。Application層が単一行を保証する経路に不整合がある可能性が \
-            あります（手動でのDB改変やマイグレーション不備を疑ってください）。
+            行存在します。DBの単一行キー（id INTEGER PRIMARY KEY CHECK(id = 1)）が \
+            迂回されています（マイグレーション不備や手動でのDB改変を疑ってください）。
             """
         case .previewConfirmationProjectMismatch(let projectID, let previewConfirmationProjectID):
             return """
