@@ -55,6 +55,38 @@ struct OutputDeliveryStoreShareTests {
         }
     }
 
+    @Test("completeShareはDeliveryAttemptが存在すればdeliveryAttemptAlreadyInProgressをthrowすること")
+    func throwsAlreadyInProgressWhenAttemptExists() async throws {
+        let (database, url) = try makeTestAppDatabase()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let projectID = UUID()
+        let exportID = UUID()
+        try await database.dbQueue.write { connection in
+            try insertProject(connection, projectID: projectID)
+            try insertDeliveryOutputRecord(
+                connection, exportID: exportID, projectID: projectID,
+                state: Int(OutputState.generated.rawValue), settledAt: schemaTestReferenceDate
+            )
+            try insertDeliveryAttemptRow(
+                connection, exportID: exportID, startedAt: schemaTestReferenceDate,
+                previousState: Int(OutputState.generated.rawValue)
+            )
+        }
+        let store = makeOutputDeliveryStore(database: database)
+
+        do {
+            try await store.completeShare(ExportID(rawValue: exportID))
+            Issue.record("DeliveryAttemptが存在するのにcompleteShareが成功した")
+        } catch let error as OutputDeliveryStoreError {
+            #expect(error == .deliveryAttemptAlreadyInProgress(exportID: ExportID(rawValue: exportID)))
+        } catch {
+            Issue.record("OutputDeliveryStoreError以外がthrowされた: \(error)")
+        }
+
+        let fields = try outputRecordFields(database, exportID: exportID)
+        #expect(fields?.state == Int(OutputState.generated.rawValue))
+    }
+
     @Test("completeShareは対象OutputRecordが存在しなければoutputRecordNotFoundをthrowすること")
     func throwsOutputRecordNotFoundWhenMissing() async throws {
         let (database, url) = try makeTestAppDatabase()

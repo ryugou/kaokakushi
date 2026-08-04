@@ -53,12 +53,19 @@ struct StampStoreImportTests {
         let kind = ManagedFileKind.stampAsset.rawValue
 
         let first = try await importStamp(store, name: "スタンプA", bytes: bytes)
+        let existingFileID = try #require(try stampAssetFileID(database, contentHash: first.assetHash.bytes))
         let countBeforeSecondImport = try pendingFileDeletionCount(database, kind: kind)
         let second = try await importStamp(store, name: "スタンプA複製", bytes: bytes)
         let countAfterSecondImport = try pendingFileDeletionCount(database, kind: kind)
 
         #expect(first.assetHash == second.assetHash)
         #expect(countAfterSecondImport == countBeforeSecondImport + 1)
+        // 参照中（StampAssetが指している）fileIDは削除予約されていないこと（退行防止）。
+        #expect(try !pendingFileDeletionExists(database, kind: kind, fileID: existingFileID))
+        // 実際に削除予約されたのは2回目のimportで新規作成された未参照fileIDであり、
+        // 参照中のexistingFileIDとは別物であること。
+        let registeredFileID = try #require(try pendingFileDeletionFileID(database, kind: kind))
+        #expect(registeredFileID != existingFileID)
     }
 
     @Test("重複インポートでもthumbnailFileIDは毎回別ファイルとして作られること")

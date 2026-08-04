@@ -25,8 +25,9 @@ extension StampStoreError: LocalizedError {
         case .sortOrderOverflow:
             return """
             StampStore: CustomStamp.sortOrderの最大値が既にInt32.maxに達しているため、 \
-            新規スタンプの採番ができません。不要なCustomStampを削除してsortOrderの空きを \
-            作ってから再試行してください。
+            新規スタンプの採番ができません。採番はMAX(sortOrder) + 1で行うため、 \
+            sortOrderが最大のCustomStamp行を削除するか、CustomStamp.sortOrder列を \
+            再採番してから再試行してください。
             """
         }
     }

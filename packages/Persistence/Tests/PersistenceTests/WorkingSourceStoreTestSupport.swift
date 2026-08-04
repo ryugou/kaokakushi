@@ -166,6 +166,19 @@ func pendingFileDeletionCount(_ database: AppDatabase, kind: UInt32) throws -> I
     }
 }
 
+/// kind別のPendingFileDeletion行のfileID（該当kindの行が複数あるときの挙動はSQLの
+/// `LIMIT 1`に委ねる未定義動作。呼び出し側のテストは対象kindのPendingFileDeletion行が
+/// この1件のみである前提でしか使わないこと）。
+func pendingFileDeletionFileID(_ database: AppDatabase, kind: UInt32) throws -> UUID? {
+    try database.dbQueue.read { connection in
+        try UUID.fetchOne(
+            connection,
+            sql: "SELECT fileID FROM PendingFileDeletion WHERE kind = ? LIMIT 1",
+            arguments: [kind]
+        )
+    }
+}
+
 func faceTrackRowCount(_ database: AppDatabase, projectID: UUID) throws -> Int {
     try database.dbQueue.read { connection in try countFaceTrackRows(connection, projectID: projectID) }
 }

@@ -56,11 +56,15 @@ extension OutputDeliveryStoreLive {
         }
     }
 
-    /// generated/deliveryUnknown → delivered。共有には DeliveryAttempt を作らないため
-    /// attemptの読み書きは一切しない（7.0末尾）。事前条件: settledAt != nil。
+    /// generated/deliveryUnknown → delivered。共有自体は DeliveryAttempt を作らないが、
+    /// 既存の DeliveryAttempt があれば拒否する（試行中の共有・破棄・別保存の排他は
+    /// export-saga.md 450行の不変条件）。事前条件: settledAt != nil。
     public func completeShare(_ exportID: ExportID) async throws {
         try await database.dbQueue.write { connection in
             try Self.requireSettled(connection, exportID: exportID)
+            guard try Self.deliveryAttemptCount(connection, exportID: exportID) == 0 else {
+                throw OutputDeliveryStoreError.deliveryAttemptAlreadyInProgress(exportID: exportID)
+            }
             try Self.updateOutputRecordState(connection, exportID: exportID, state: .delivered)
         }
     }
