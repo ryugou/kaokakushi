@@ -58,26 +58,23 @@ jobs:
         uses: ./.github/actions/select-xcode
 
       # Issue #6（Persistence への GRDB.swift 導入）で初めて外部SwiftPM依存が入った。
-      # --scratch-path 配下（checkouts/repositories/artifacts 等の解決済みパッケージ）
-      # に加え、SwiftPM が既定で使う OS 共有のリポジトリクローンキャッシュ
-      # （macOS: ~/Library/Caches/org.swift.swiftpm。--cache-path 未指定時の既定で
-      # scratch-path の外に置かれる）もキャッシュ対象にする。実際にどちらへ
-      # クローンキャッシュが作られるかはこのコンテナでは実行検証できないため、
-      # 両方を対象にして取りこぼしを避ける（存在しないパスは actions/cache が
-      # 無視するだけで失敗しない）。
+      # キャッシュ対象は「依存の取得物」だけに限定する: scratch-path 配下の
+      # checkouts / repositories / artifacts と、SwiftPM の OS 共有クローンキャッシュ
+      # （macOS: ~/Library/Caches/org.swift.swiftpm）。ビルド成果物（.build/ci-shared
+      # 全体）を Package.resolved キーで丸ごとキャッシュすると、完全一致キーの保存は
+      # 初回しか走らず、ソース変更後も古いオブジェクトが凍結されたまま使われる
+      # （「一度も更新されないキャッシュ」の再来。PR #24 レビュー指摘）。
       #
-      # キャッシュキーは packages/**/Package.resolved のハッシュを含める。
-      # Package.resolved はこのコンテナでは生成できず未コミットのため、初回実行時は
-      # restore-keys（runner.os のみのプレフィックス）にフォールバックし、
-      # swift test 実行時に GRDB 解決が走って Package.resolved が生成される。
-      # 以後のコミットで Package.resolved がリポジトリへ入れば、そのハッシュを含む
-      # 完全一致キーでキャッシュが効くようになる（CI 側で生成物をコミットする責務は
-      # 持たない）。
-      - name: Cache SwiftPM (package-tests)
+      # キーは packages/**/Package.resolved（コミット済み。GRDB は exact ピン）の
+      # ハッシュ。依存が変わらない限り完全一致し、変われば restore-keys の
+      # プレフィックスから差分取得する。
+      - name: Cache SwiftPM dependencies (package-tests)
         uses: actions/cache@v4
         with:
           path: |
-            .build/ci-shared
+            .build/ci-shared/checkouts
+            .build/ci-shared/repositories
+            .build/ci-shared/artifacts
             ~/Library/Caches/org.swift.swiftpm
           key: swiftpm-package-tests-${{ runner.os }}-${{ hashFiles('packages/**/Package.resolved') }}
           restore-keys: |

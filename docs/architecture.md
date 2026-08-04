@@ -1199,8 +1199,9 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `BatchPreset` | 一括設定プリセット |
 | `DeliveryAttempt` | 写真ライブラリ保存の試行中を表す。`previousState` を持つ（[書き出し Saga](export-saga.md) が正本） |
 | `UnknownLibrarySave` | 保存結果が不明のまま `delivered` を維持したことの記録 |
-| `ExportJob` | 書き出しの進行中を表す（状態列を持たず、行の存在そのものが進行中を示す。完了操作または破棄で削除する。[書き出し Saga](export-saga.md) が正本） |
+| `ExportJob` | 書き出しの進行中を表す（状態列を持たず、行の存在そのものが進行中を示す。完了操作または破棄で削除する。[書き出し Saga](export-saga.md) が正本）。`settingsHash` 列（startExport 時点の `ProjectSettingsHash`。settle で `ExportedSettingsEntry` へコピーする Persistence 内部列）を持つ |
 | `OutputRecord` | 写真ごとの出力状態。`exportID` で書き出しと対応づける |
+| `ExportedSettingsEntry` | 「変更せず再書き出し」免除の確定記録（6.3）。`projectID` ごとに 1 件 |
 | `ExportQueueItem` | 一括処理のキュー状態（6.4） |
 | `WorkingSourceRecord` | 処理用にアプリ領域へ複製した元素材（[画像処理](image-pipeline.md)） |
 | `PendingFileDeletion` | 参照 0 になった実体の削除候補（7.5） |
@@ -1256,6 +1257,8 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `ExportQueueItem(batchID, projectID)` | **UNIQUE** |
 | `DeliveryAttempt.exportID` | **PRIMARY KEY** |
 | `UnknownLibrarySave.exportID` | **PRIMARY KEY** |
+| `ExportedSettingsEntry.projectID` | **PRIMARY KEY**（免除の確定記録は projectID ごとに 1 件。6.3） |
+| `UsageLedger` / `SubscriptionState` | **単一行キー**（`id INTEGER PRIMARY KEY CHECK(id = 1)` 相当。「台帳は 1 つ」「キャッシュは 1 つ」を DB 制約で固定する） |
 
 外部キーは `PRAGMA foreign_keys = ON` で有効化し、次を宣言します。
 
@@ -1981,9 +1984,10 @@ protocol MaintenanceStore: Sendable {
 | `.stampAsset` | `StampAsset` の行そのもの（内容ハッシュが主キー） |
 | `.historyThumbnail` | `Project` が保持する `ManagedFileRef` |
 | `.processingTemporary` | `WorkingSourceRecord.sourceFile` |
-| `.stampThumbnail` / `.rasterTemporary` | **常に空集合**（DB 参照を持たない一時ファイル・再生成可能なキャッシュ。存在するものはすべて孤児候補として扱う） |
+| `.stampThumbnail` | `CustomStamp.thumbnailFileID`（一覧サムネイルは行が参照を持つ。欠損時は実体から再生成する） |
+| `.rasterTemporary` | **常に空集合**（DB 参照を持たない一時ファイル。存在するものはすべて孤児候補として扱う） |
 
-起動時復旧の手順は、(1) `loadPendingFileDeletions` で未処理分の実体削除を再試行し成功したものを `clearPendingFileDeletion` で消す、(2) 種別ごとに `listExistingFileIDs` と `listReferencedFileIDs` の差集合を求め `registerOrphan` で削除候補へ登録する、(3) 登録した候補を（1）と同じ経路で削除する。**`.stampThumbnail` / `.rasterTemporary` は参照元が無いため、次回起動をまたいで存在するものはすべて孤児として削除してよい**（前者は実体から再生成できるキャッシュ、後者は 1 回の `render` 呼び出し内でのみ有効なため）。
+起動時復旧の手順は、(1) `loadPendingFileDeletions` で未処理分の実体削除を再試行し成功したものを `clearPendingFileDeletion` で消す、(2) 種別ごとに `listExistingFileIDs` と `listReferencedFileIDs` の差集合を求め `registerOrphan` で削除候補へ登録する、(3) 登録した候補を（1）と同じ経路で削除する。**`.rasterTemporary` は参照元が無いため、次回起動をまたいで存在するものはすべて孤児として削除してよい**（1 回の `render` 呼び出し内でのみ有効なため）。`.stampThumbnail` は `CustomStamp.thumbnailFileID` を参照元とし、参照されない実体のみを孤児として削除する（欠損時は実体から再生成できるキャッシュだが、行が参照を持つ以上、参照中の実体を削除しない）。
 
 ##### 使用容量の表示
 

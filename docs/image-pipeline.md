@@ -1042,6 +1042,7 @@ struct ReplaceWorkingSourceInput: Sendable {
     let capture: OriginalCaptureMetadata       // Project の値を新しい素材のもので置き換える
     let libraryCreationDate: Date?
     let representation: SourceRepresentation
+    let sourceLocator: ProjectSourceLocator    // 再選択した素材の参照で Project を更新する
     // 旧ファイルは DB トランザクション内で読む。呼び出し側から渡さない
 }
 
@@ -1052,6 +1053,7 @@ struct AttachWorkingSourceInput: Sendable {
     let capture: OriginalCaptureMetadata
     let libraryCreationDate: Date?
     let representation: SourceRepresentation
+    let sourceLocator: ProjectSourceLocator    // 再接続した素材の参照で Project を更新する
 }
 ```
 

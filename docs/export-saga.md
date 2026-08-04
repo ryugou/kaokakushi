@@ -214,9 +214,12 @@ enum ExportStartBlockReason: Sendable, Equatable {
     case capabilityVerificationRequired   // entitlementSnapshot.verificationRequired、
                                           // または開始時点の能力が勘定の前提（proBatch の
                                           // canUseProBatch）を満たさない（1.5 の store 側ゲート）。
-                                          // batchTrial は能力ゲート対象外（作成時の可否は
-                                          // canEnterBatch が担い、開始後はクレジット残量のみで
-                                          // 判定する。アップグレード後にバッチを中断させないため）
+                                          // batchTrial は能力ゲートでブロックしない（作成時の
+                                          // 可否は canEnterBatch が担う）。ただし開始時点で
+                                          // canUseProBatch を持つ（Pro 加入済み）なら
+                                          // クレジットを消費せず paidUnlimited で認可する
+                                          // （architecture.md 6.3「Pro へ加入済みの場合は
+                                          // 消費しない」。アップグレード後もバッチを中断させない）
 }
 struct ExportStartBlock: Sendable, Equatable {
     let reason: ExportStartBlockReason
@@ -299,7 +302,7 @@ struct OutputDeliveryDescriptor: Sendable {
 | 2 | 一時ファイルを出力ディレクトリへ移動する | ファイルシステム | — |
 | 3 | 出力ファイルの健全性を確認する（下記） | ファイルシステム | — |
 | 4 | `recordGeneratedOutput` で確認用の `OutputRecord`（`settledAt: nil`）を作成する。台帳・`ExportRecord`・キュー・`WorkingSourceRecord` には触れない | DB | 確認用 `OutputRecord` 作成 |
-| 5（settle） | **単一トランザクション**。`ExportJob.authorization.accountingMode` に従って台帳を加算またはトライアルクレジットを消費、`settledAt` の確定、`ExportRecord` の作成、confirmed 設定エントリの更新、キュー項目の `completed` 更新、`Project` の最終更新時刻の更新、`WorkingSourceRecord` の削除、`ExportJob` の削除を行う。ここが唯一の確定境界 | DB | 完了 |
+| 5（settle） | **単一トランザクション**。`ExportJob.authorization.accountingMode` に従って台帳を加算またはトライアルクレジットを消費、`settledAt` の確定、`ExportRecord` の作成、confirmed 設定エントリの更新、キュー項目の `completed` 更新、`WorkingSourceRecord` の削除、`ExportJob` の削除を行う。ここが唯一の確定境界 | DB | 完了 |
 
 ```
 ExportJob 作成 → レンダリング・移動・健全性確認（DB 上の状態変化なし）
