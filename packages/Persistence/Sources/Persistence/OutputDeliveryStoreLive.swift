@@ -35,8 +35,9 @@ public enum OutputDeliveryStoreError: Error, Sendable, Equatable {
     case notSettled(exportID: ExportID)
     /// beginDeliveryAttempt: 同一exportIDに対応するDeliveryAttempt行が既に存在する。
     /// グローバル直列キューの前提（export-saga.md 4.2/7.0）が崩れた場合の防御。
-    /// deleteOutput: 同じ検査条件を「試行中の出力の破棄を拒否する」（7.0表）ために再利用する
-    /// （意味は異なるが検査条件は同一のため）。
+    /// deleteOutput / completeShare: 同じ検査条件を「試行中の出力の破棄・共有を拒否する」
+    /// （7.0表「DeliveryAttempt が存在する間、共有・破棄・別の保存はすべて拒否」）ために
+    /// 再利用する（意味は異なるが検査条件は同一のため）。
     case deliveryAttemptAlreadyInProgress(exportID: ExportID)
     /// completeLibrarySave / abandonDeliveryAttempt: 対象exportIDに対応するDeliveryAttempt
     /// 行が存在しない。
@@ -75,8 +76,8 @@ extension OutputDeliveryStoreError: LocalizedError {
             DeliveryAttempt行が存在します。グローバル直列キューにより本来同時に複数の保存 \
             試行は起き得ません（export-saga.md 4.2/7.0）。beginDeliveryAttemptであれば前回の \
             試行がabandonDeliveryAttempt/completeLibrarySaveで解消されずに残っている可能性が、 \
-            deleteOutputであれば試行中の出力を破棄しようとした可能性があります。起動時復旧 \
-            （resolveOrphanedAttempts）が実行されているか確認してください。
+            deleteOutput/completeShareであれば試行中の出力を破棄・共有しようとした可能性が \
+            あります。起動時復旧（resolveOrphanedAttempts）が実行されているか確認してください。
             """
         case .deliveryAttemptNotFound(let exportID):
             return """
