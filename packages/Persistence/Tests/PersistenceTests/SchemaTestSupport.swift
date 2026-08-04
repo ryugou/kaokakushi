@@ -170,13 +170,18 @@ func insertStampAsset(_ database: Database, contentHash: Data, fileID: UUID) thr
 
 /// sortOrderは既定0（既存呼び出し元は境界値を意識する必要が無いよう省略可能にする）。
 /// sortOrderOverflowの境界値テスト（StampStoreImportTests）はInt32.maxを明示的に渡す。
-func insertCustomStamp(_ database: Database, customStampID: UUID, assetHash: Data, sortOrder: Int32 = 0) throws {
+/// thumbnailFileIDも既定でランダムUUIDを生成する（大半の呼び出し元は値そのものを検証
+/// しないため）。MaintenanceStoreTestsのように具体的な値を検証したい場合のみ明示的に渡す。
+func insertCustomStamp(
+    _ database: Database, customStampID: UUID, assetHash: Data, sortOrder: Int32 = 0,
+    thumbnailFileID: UUID = UUID()
+) throws {
     try database.execute(
         sql: """
         INSERT INTO CustomStamp (customStampID, assetHash, name, sortOrder, thumbnailFileID)
         VALUES (?, ?, ?, ?, ?)
         """,
-        arguments: [customStampID, assetHash, "スタンプ", sortOrder, UUID()]
+        arguments: [customStampID, assetHash, "スタンプ", sortOrder, thumbnailFileID]
     )
 }
 

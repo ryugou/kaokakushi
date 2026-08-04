@@ -107,8 +107,8 @@ struct MaintenanceStoreTests {
     }
 
     @Test(
-        "listReferencedFileIDsが.historyThumbnail/.stampThumbnail/.rasterTemporaryについて常に空集合を返すこと",
-        arguments: [ManagedFileKind.historyThumbnail, .stampThumbnail, .rasterTemporary]
+        "listReferencedFileIDsが.historyThumbnail/.rasterTemporaryについて常に空集合を返すこと",
+        arguments: [ManagedFileKind.historyThumbnail, .rasterTemporary]
     )
     func listReferencedFileIDsReturnsEmptySetForUnregisteredKinds(kind: ManagedFileKind) async throws {
         let (database, url) = try makeTestAppDatabase()
@@ -120,6 +120,27 @@ struct MaintenanceStoreTests {
         let referenced = try await store.listReferencedFileIDs(kind: kind)
 
         #expect(referenced.isEmpty)
+    }
+
+    @Test("listReferencedFileIDsが.stampThumbnailについてCustomStamp.thumbnailFileIDを返すこと")
+    func listReferencedFileIDsReturnsCustomStampThumbnailFileIDForStampThumbnail() async throws {
+        let (database, url) = try makeTestAppDatabase()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let (root, directories) = makeTemporaryDirectories()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MaintenanceStoreLive(database: database, directories: directories)
+        let assetHash = schemaTestHash(seed: 0x30)
+        let thumbnailFileID = UUID()
+        try await database.dbQueue.write { connection in
+            try insertStampAsset(connection, contentHash: assetHash, fileID: UUID())
+            try insertCustomStamp(
+                connection, customStampID: UUID(), assetHash: assetHash, thumbnailFileID: thumbnailFileID
+            )
+        }
+
+        let referenced = try await store.listReferencedFileIDs(kind: .stampThumbnail)
+
+        #expect(referenced == [ManagedFileID(rawValue: thumbnailFileID)])
     }
 
     @Test("listExistingFileIDsとlistReferencedFileIDsの差分が孤児ファイルの候補になること")

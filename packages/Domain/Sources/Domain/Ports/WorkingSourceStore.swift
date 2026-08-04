@@ -122,6 +122,7 @@ public struct ReplaceWorkingSourceInput: Sendable {
     public let capture: OriginalCaptureMetadata       // Project の値を新しい素材のもので置き換える
     public let libraryCreationDate: Date?
     public let representation: SourceRepresentation
+    public let sourceLocator: ProjectSourceLocator    // 再選択した素材の参照で Project を更新する
     // 旧ファイルは DB トランザクション内で読む。呼び出し側から渡さない
 
     public init(
@@ -130,7 +131,8 @@ public struct ReplaceWorkingSourceInput: Sendable {
         replacedAt: Date,
         capture: OriginalCaptureMetadata,
         libraryCreationDate: Date?,
-        representation: SourceRepresentation
+        representation: SourceRepresentation,
+        sourceLocator: ProjectSourceLocator
     ) {
         self.projectID = projectID
         self.newSourceFile = newSourceFile
@@ -138,6 +140,7 @@ public struct ReplaceWorkingSourceInput: Sendable {
         self.capture = capture
         self.libraryCreationDate = libraryCreationDate
         self.representation = representation
+        self.sourceLocator = sourceLocator
     }
 }
 
@@ -149,6 +152,7 @@ public struct AttachWorkingSourceInput: Sendable {
     public let capture: OriginalCaptureMetadata
     public let libraryCreationDate: Date?
     public let representation: SourceRepresentation
+    public let sourceLocator: ProjectSourceLocator    // 再接続した素材の参照で Project を更新する
 
     public init(
         projectID: ProjectID,
@@ -156,7 +160,8 @@ public struct AttachWorkingSourceInput: Sendable {
         attachedAt: Date,
         capture: OriginalCaptureMetadata,
         libraryCreationDate: Date?,
-        representation: SourceRepresentation
+        representation: SourceRepresentation,
+        sourceLocator: ProjectSourceLocator
     ) {
         self.projectID = projectID
         self.sourceFile = sourceFile
@@ -164,5 +169,6 @@ public struct AttachWorkingSourceInput: Sendable {
         self.capture = capture
         self.libraryCreationDate = libraryCreationDate
         self.representation = representation
+        self.sourceLocator = sourceLocator
     }
 }

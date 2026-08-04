@@ -34,8 +34,9 @@ func createDeliveryTables(_ database: Database) throws {
     }
 
     try database.create(table: "SubscriptionState") { tableDef in
-        // 一意制約表に記載が無いため明示的なPRIMARY KEY/UNIQUEは追加しない
-        // （UsageLedgerと同じ理由。単一行であることはApplication層が保証する）。
+        // 単一行キー（architecture.md 7.1: id INTEGER PRIMARY KEY CHECK(id = 1)相当）。
+        // 「キャッシュは1つ」をDB制約で固定する（UsageLedgerと同じ理由）。
+        tableDef.primaryKey("id", .integer).check(sql: "id = 1")
         // Plan.rawValue / PlanStatus.rawValue。
         tableDef.column("plan", .integer).notNull()
         tableDef.column("status", .integer).notNull()

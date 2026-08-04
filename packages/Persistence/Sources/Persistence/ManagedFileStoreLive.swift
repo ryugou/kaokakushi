@@ -195,8 +195,11 @@ public struct ManagedFileStoreLive: ManagedFileStore {
 
         do {
             // 手順1: 最終ファイルと同じディレクトリ内に一時ファイルを作る
-            // （別ディレクトリで作ってから移すと、その間だけディレクトリの既定保護
-            // クラスが効かないため）。ディレクトリが無ければ先に作成する。
+            // （手順4で同一ボリューム上のatomicなrenameにするため。別ボリューム
+            // だとrenameがコピー+削除になり中断時に不整合が生じうる）。保護属性は
+            // ディレクトリの既定値に頼らずファイル単位で明示設定・検証する設計
+            // （手順2・5+6）のため、この時点ではまだ意識する必要が無い。
+            // ディレクトリが無ければ先に作成する。
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             guard FileManager.default.createFile(atPath: temporaryURL.path, contents: nil) else {
                 throw ManagedFileStoreError.temporaryFileCreationFailed(kind: kind, fileID: fileID)

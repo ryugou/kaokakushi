@@ -21,6 +21,10 @@ private struct WorkingSourceReplacement {
     let capture: OriginalCaptureMetadata
     let libraryCreationDate: Date?
     let representation: SourceRepresentation
+    /// 再選択・再接続した素材の参照。Project.photoLibraryLocalIdentifierへ反映する
+    /// （image-pipeline.md 5章、ReplaceWorkingSourceInput/AttachWorkingSourceInputの
+    /// sourceLocatorコメント）。
+    let sourceLocator: ProjectSourceLocator
 }
 
 extension WorkingSourceStoreLive {
@@ -38,7 +42,8 @@ extension WorkingSourceStoreLive {
                 createdAt: input.replacedAt,
                 capture: input.capture,
                 libraryCreationDate: input.libraryCreationDate,
-                representation: input.representation
+                representation: input.representation,
+                sourceLocator: input.sourceLocator
             ))
         }
     }
@@ -60,7 +65,8 @@ extension WorkingSourceStoreLive {
                 createdAt: input.attachedAt,
                 capture: input.capture,
                 libraryCreationDate: input.libraryCreationDate,
-                representation: input.representation
+                representation: input.representation,
+                sourceLocator: input.sourceLocator
             ))
         }
     }
@@ -81,13 +87,7 @@ extension WorkingSourceStoreLive {
             sourceFileID: replacement.sourceFileID,
             createdAt: replacement.createdAt
         )
-        try Self.updateProjectCaptureMetadata(
-            connection,
-            projectID: replacement.projectID,
-            capture: replacement.capture,
-            libraryCreationDate: replacement.libraryCreationDate,
-            representation: replacement.representation
-        )
+        try Self.updateProjectCaptureMetadata(connection, replacement: replacement)
         try Self.discardFaceTracksAndBumpRevisions(connection, projectID: replacement.projectID)
 
         // 旧sourceFileIDが新sourceFileIDと同一の場合は登録しない（同一ファイルを起動時GCの
@@ -124,12 +124,11 @@ extension WorkingSourceStoreLive {
         )
     }
 
+    /// 引数をreplacement 1個に束ねているのは、captureの4項目に加えsourceLocatorも
+    /// 渡すと個別スカラー引数では5個の上限を超えるため（lintの引数上限対応パターン。
+    /// このファイル冒頭のWorkingSourceReplacementのコメントと同じ理由）。
     private static func updateProjectCaptureMetadata(
-        _ connection: Database,
-        projectID: ProjectID,
-        capture: OriginalCaptureMetadata,
-        libraryCreationDate: Date?,
-        representation: SourceRepresentation
+        _ connection: Database, replacement: WorkingSourceReplacement
     ) throws {
         try connection.execute(
             sql: """
@@ -139,17 +138,19 @@ extension WorkingSourceStoreLive {
                 captureOffsetTimeOriginal = ?,
                 captureUtcMillis = ?,
                 libraryCreationDate = ?,
-                sourceRepresentation = ?
+                sourceRepresentation = ?,
+                photoLibraryLocalIdentifier = ?
             WHERE projectID = ?
             """,
             arguments: [
-                capture.dateTimeOriginal,
-                capture.subSecTimeOriginal,
-                capture.offsetTimeOriginal,
-                capture.utcMillis,
-                libraryCreationDate,
-                SourceRepresentationColumn(representation).rawValue,
-                projectID.rawValue
+                replacement.capture.dateTimeOriginal,
+                replacement.capture.subSecTimeOriginal,
+                replacement.capture.offsetTimeOriginal,
+                replacement.capture.utcMillis,
+                replacement.libraryCreationDate,
+                SourceRepresentationColumn(replacement.representation).rawValue,
+                replacement.sourceLocator.photoLibraryLocalIdentifier,
+                replacement.projectID.rawValue
             ]
         )
     }

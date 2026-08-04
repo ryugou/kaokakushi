@@ -39,6 +39,7 @@ public struct DeletionContext: Sendable {
     public let hasUndeliveredOutputRecord: Bool   // isUndelivered のみ（settledAt != nil の出力が対象）。delivered は保護しない
     public let hasRunningExportJob: Bool
     public let hasWorkingSourceRecord: Bool
+    public let hasDeliveryAttemptInProgress: Bool // 対象Projectの出力に試行中のDeliveryAttemptが1件でもあるか
 
     public init(
         trigger: DeletionTrigger,
@@ -47,7 +48,8 @@ public struct DeletionContext: Sendable {
         hasNonTerminalQueueItem: Bool,
         hasUndeliveredOutputRecord: Bool,
         hasRunningExportJob: Bool,
-        hasWorkingSourceRecord: Bool
+        hasWorkingSourceRecord: Bool,
+        hasDeliveryAttemptInProgress: Bool
     ) {
         self.trigger = trigger
         self.isFavorite = isFavorite
@@ -56,6 +58,7 @@ public struct DeletionContext: Sendable {
         self.hasUndeliveredOutputRecord = hasUndeliveredOutputRecord
         self.hasRunningExportJob = hasRunningExportJob
         self.hasWorkingSourceRecord = hasWorkingSourceRecord
+        self.hasDeliveryAttemptInProgress = hasDeliveryAttemptInProgress
     }
 }
 
@@ -96,4 +99,6 @@ public enum AbsoluteProtection: Sendable, Hashable {
     case nonTerminalQueueItem
     case exportJobRunning
     case undeliveredOutput
+    /// 試行中のDeliveryAttempt（写真ライブラリ保存）が存在するため削除を拒否する
+    case deliveryAttemptInProgress
 }

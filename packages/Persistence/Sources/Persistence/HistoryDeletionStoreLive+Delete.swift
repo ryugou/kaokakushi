@@ -46,6 +46,12 @@ extension HistoryDeletionStoreLive {
             )
             try Self.registerWorkingSourcePendingDeletion(connection, sourceFileID: sourceFileID)
 
+            // 対象projectIDが既に存在しなければ0件影響のまま正常終了する（暗黙のno-op）。
+            // WorkingSourceStoreLive.deleteWorkingSourceやOutputDeliveryStoreLive.deleteOutputと
+            // 同じ設計判断で、存在しないprojectIDへの呼び出しも冪等に成功として扱う
+            // （呼び出し元が再試行等で複数回呼びうるため。上のevaluateDeletionも対象行が
+            // 無ければ全ての絶対保護判定がfalseになり素通りするため、ここで初めて
+            // 気づく特別な分岐ではない）。
             try connection.execute(sql: "DELETE FROM Project WHERE projectID = ?", arguments: [projectID.rawValue])
 
             for assetHash in assetHashes {
@@ -104,12 +110,17 @@ extension HistoryDeletionStoreLive {
         try registerPendingFileDeletion(connection, kind: .processingTemporary, fileID: sourceFileID.rawValue)
     }
 
-    /// 手順7。対象batchIDに一致するExportQueueItemが0件になっていればBatch行を削除する。
+    /// 手順7。正本（architecture.md「Project削除Saga」手順3）の判定基準は「同じトランザクション
+    /// 内で数えた残り所属Project数が0」であるため、ExportQueueItem.projectIDのDISTINCT数で
+    /// 判定する。ExportQueueItemはUNIQUE(batchID, projectID)のためcount(*)と値は一致するが、
+    /// SQL自体に「残存Project数」という判定意図を明示する。
     private static func deleteBatchIfEmpty(_ connection: Database, batchID: UUID) throws {
-        let remaining = try Int.fetchOne(
-            connection, sql: "SELECT count(*) FROM ExportQueueItem WHERE batchID = ?", arguments: [batchID]
+        let remainingProjectCount = try Int.fetchOne(
+            connection,
+            sql: "SELECT count(DISTINCT projectID) FROM ExportQueueItem WHERE batchID = ?",
+            arguments: [batchID]
         ) ?? 0
-        guard remaining == 0 else { return }
+        guard remainingProjectCount == 0 else { return }
         try connection.execute(sql: "DELETE FROM Batch WHERE batchID = ?", arguments: [batchID])
     }
 }

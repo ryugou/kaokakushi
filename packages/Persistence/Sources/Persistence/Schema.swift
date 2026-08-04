@@ -28,7 +28,7 @@ import GRDB
 public enum AppSchema {
     /// v1スキーマを適用する DatabaseMigrator を組み立てる。
     /// 呼び出し側（AppDatabase.open(at:)）が `migrate(_ writer:)` を呼ぶ。
-    public static func makeMigrator() -> DatabaseMigrator {
+    static func makeMigrator() -> DatabaseMigrator {
         var migrator = DatabaseMigrator()
         // リリース前は v1 マイグレーションを直接変更する（適用済み開発DBは作り直す）。
         // リリース後は v2 以降の追加のみ（オーケストレーター確定判断。Issue #6 Task 5後半）。

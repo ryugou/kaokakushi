@@ -46,66 +46,17 @@ struct ExportSagaStoreStartValidationTests {
         }
     }
 
-    @Test("SubscriptionStateが2件以上ある場合multipleSingletonRowsでthrowすること")
-    func throwsWhenSubscriptionStateHasMultipleRows() async throws {
-        let (database, url) = try makeTestAppDatabase()
-        defer { try? FileManager.default.removeItem(at: url) }
-        let projectID = ProjectID(rawValue: UUID())
-        try await database.dbQueue.write { connection in
-            try insertProject(connection, projectID: projectID.rawValue)
-            try insertSubscriptionStateRow(connection, plan: 1, status: 1)
-            try insertSubscriptionStateRow(connection, plan: 2, status: 1)
-        }
-        let store = makeExportSagaStore(database: database)
-
-        do {
-            _ = try await store.startExport(
-                try makeStartExportInputFixture(projectID: projectID), expectedProjectRevision: 0
-            )
-            Issue.record("SubscriptionStateが2件あるのにstartExportが成功した")
-        } catch let error as ExportSagaStoreError {
-            guard case .multipleSingletonRows(let table, let count) = error else {
-                Issue.record("期待したエラーケース(multipleSingletonRows)ではない: \(error)")
-                return
-            }
-            #expect(table == "SubscriptionState")
-            #expect(count == 2)
-        } catch {
-            Issue.record("ExportSagaStoreError以外がthrowされた: \(error)")
-        }
-    }
-
-    @Test("UsageLedgerが2件以上ある場合multipleSingletonRowsでthrowすること")
-    func throwsWhenUsageLedgerHasMultipleRows() async throws {
-        let (database, url) = try makeTestAppDatabase()
-        defer { try? FileManager.default.removeItem(at: url) }
-        let projectID = ProjectID(rawValue: UUID())
-        let batchID = BatchID(rawValue: UUID())
-        try await database.dbQueue.write { connection in
-            try insertProject(connection, projectID: projectID.rawValue)
-            try insertSubscriptionStateRow(connection, plan: 1, status: 1)
-            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 2, trialCreditCount: 5)
-            try insertUsageLedgerRow(connection, trialConsumedCount: 1)
-            try insertUsageLedgerRow(connection, trialConsumedCount: 2)
-        }
-        let store = makeExportSagaStore(database: database)
-
-        do {
-            _ = try await store.startExport(
-                try makeStartExportInputFixture(projectID: projectID, batchID: batchID), expectedProjectRevision: 0
-            )
-            Issue.record("UsageLedgerが2件あるのにstartExportが成功した")
-        } catch let error as ExportSagaStoreError {
-            guard case .multipleSingletonRows(let table, let count) = error else {
-                Issue.record("期待したエラーケース(multipleSingletonRows)ではない: \(error)")
-                return
-            }
-            #expect(table == "UsageLedger")
-            #expect(count == 2)
-        } catch {
-            Issue.record("ExportSagaStoreError以外がthrowされた: \(error)")
-        }
-    }
+    // SubscriptionState / UsageLedgerへ「2件目のINSERT」でmultipleSingletonRowsの
+    // fail-closedを検証するテストは、ここに置いていた（throwsWhenSubscriptionState
+    // HasMultipleRows / throwsWhenUsageLedgerHasMultipleRows）。id INTEGER PRIMARY KEY
+    // CHECK(id = 1)（Schema+Delivery.swift / Schema+Accounting.swift）の導入により、
+    // 通常のINSERT経路では2件目の行そのものが物理的に作れなくなった（id省略でも
+    // 自動採番id=2でCHECK違反、id=1明示でもPRIMARY KEY重複で失敗する）ため、この
+    // 異常系はDB制約そのものを検証するSchemaConstraintTests.swiftの
+    // usageLedgerSingleRowKeyRejectsSecondInsert /
+    // subscriptionStateSingleRowKeyRejectsSecondInsertへ統合し、ここでは削除した
+    // （fetchSingletonRowのmultipleSingletonRows検知自体は二重担保としてコード上
+    // 維持されている。テストのみの整理）。
 
     @Test("UsageLedgerのBLOB長が16の倍数でない場合corruptUsageLedgerBlobでthrowすること")
     func throwsWhenUsageLedgerBlobLengthIsNotAMultipleOf16() async throws {
@@ -234,5 +185,42 @@ struct ExportSagaStoreStartValidationTests {
         } catch {
             Issue.record("ExportSagaStoreError以外がthrowされた: \(error)")
         }
+    }
+
+    @Test("Pro加入済み利用者のトライアルバッチはクレジット状態に関わらずpaidUnlimitedで認可されトライアル台帳を消費しないこと")
+    func authorizesTrialBatchForProSubscriberAsPaidUnlimitedWithoutConsumingTrialLedger() async throws {
+        let (database, url) = try makeTestAppDatabase()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let projectID = ProjectID(rawValue: UUID())
+        let batchID = BatchID(rawValue: UUID())
+        try await database.dbQueue.write { connection in
+            try insertProject(connection, projectID: projectID.rawValue)
+            // plan 3 = pro（active）。canUseProBatch == true。
+            try insertSubscriptionStateRow(connection, plan: 3, status: 1)
+            // trialCreditCount=3・trialConsumedCount=3で通常なら使い切り状態
+            // （blocksTrialBatchWhenCreditsExhaustedと同条件）。Pro加入済みならこの状態でも
+            // ブロックされないことを検証する（architecture.md 6.3「Pro へ加入済みの場合は
+            // 消費しない」）。
+            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 2, trialCreditCount: 3)
+            try insertUsageLedgerRow(connection, trialConsumedCount: 3)
+        }
+        let trialConsumedExportIDsBefore = try await database.dbQueue.read { connection in
+            try Data.fetchOne(connection, sql: "SELECT trialConsumedExportIDs FROM UsageLedger")
+        }
+        let store = makeExportSagaStore(database: database)
+
+        let decision = try await store.startExport(
+            try makeStartExportInputFixture(projectID: projectID, batchID: batchID), expectedProjectRevision: 0
+        )
+
+        guard case let .authorized(job) = decision else {
+            Issue.record("Pro加入済みのトライアルバッチはauthorizedであるべき")
+            return
+        }
+        #expect(job.authorization.accountingMode == .paidUnlimited)
+        let trialConsumedExportIDsAfter = try await database.dbQueue.read { connection in
+            try Data.fetchOne(connection, sql: "SELECT trialConsumedExportIDs FROM UsageLedger")
+        }
+        #expect(trialConsumedExportIDsAfter == trialConsumedExportIDsBefore)
     }
 }

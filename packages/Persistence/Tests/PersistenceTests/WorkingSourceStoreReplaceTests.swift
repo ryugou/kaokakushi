@@ -31,7 +31,8 @@ struct WorkingSourceStoreReplaceTests {
             replacedAt: laterReferenceDate,
             capture: makeCaptureMetadata(),
             libraryCreationDate: laterReferenceDate,
-            representation: .transcoded
+            representation: .transcoded,
+            sourceLocator: ProjectSourceLocator(photoLibraryLocalIdentifier: "replaced-asset-id")
         )
 
         try await store.replaceWorkingSource(input)
@@ -42,6 +43,8 @@ struct WorkingSourceStoreReplaceTests {
         let revisions = try projectRevisions(database, projectID: projectID.rawValue)
         #expect(revisions?.projectRevision == 1)
         #expect(revisions?.detectionRevision == 1)
+        let identifier = try projectPhotoLibraryLocalIdentifier(database, projectID: projectID.rawValue)
+        #expect(identifier == "replaced-asset-id")
     }
 
     @Test("replaceWorkingSourceでFaceTrackが破棄されEffectSettingもCASCADEで消えること")
@@ -63,7 +66,8 @@ struct WorkingSourceStoreReplaceTests {
             replacedAt: laterReferenceDate,
             capture: makeCaptureMetadata(),
             libraryCreationDate: laterReferenceDate,
-            representation: .original
+            representation: .original,
+            sourceLocator: ProjectSourceLocator(photoLibraryLocalIdentifier: nil)
         )
 
         try await store.replaceWorkingSource(input)
@@ -89,7 +93,8 @@ struct WorkingSourceStoreReplaceTests {
             replacedAt: laterReferenceDate,
             capture: makeCaptureMetadata(),
             libraryCreationDate: laterReferenceDate,
-            representation: .original
+            representation: .original,
+            sourceLocator: ProjectSourceLocator(photoLibraryLocalIdentifier: nil)
         )
 
         try await store.replaceWorkingSource(input)
@@ -115,7 +120,8 @@ struct WorkingSourceStoreReplaceTests {
             replacedAt: laterReferenceDate,
             capture: makeCaptureMetadata(),
             libraryCreationDate: laterReferenceDate,
-            representation: .original
+            representation: .original,
+            sourceLocator: ProjectSourceLocator(photoLibraryLocalIdentifier: nil)
         )
 
         try await store.replaceWorkingSource(input)
@@ -140,7 +146,8 @@ struct WorkingSourceStoreReplaceTests {
             attachedAt: laterReferenceDate,
             capture: makeCaptureMetadata(),
             libraryCreationDate: laterReferenceDate,
-            representation: .original
+            representation: .original,
+            sourceLocator: ProjectSourceLocator(photoLibraryLocalIdentifier: "attached-asset-id")
         )
 
         try await store.attachWorkingSourceToExistingProject(input)
@@ -151,6 +158,8 @@ struct WorkingSourceStoreReplaceTests {
         let revisions = try projectRevisions(database, projectID: projectID.rawValue)
         #expect(revisions?.projectRevision == 1)
         #expect(revisions?.detectionRevision == 1)
+        let identifier = try projectPhotoLibraryLocalIdentifier(database, projectID: projectID.rawValue)
+        #expect(identifier == "attached-asset-id")
     }
 
     @Test("attachWorkingSourceToExistingProjectの契約違反ケースで旧sourceFileIDがPendingFileDeletionへ登録されること")
@@ -171,7 +180,8 @@ struct WorkingSourceStoreReplaceTests {
             attachedAt: laterReferenceDate,
             capture: makeCaptureMetadata(),
             libraryCreationDate: laterReferenceDate,
-            representation: .original
+            representation: .original,
+            sourceLocator: ProjectSourceLocator(photoLibraryLocalIdentifier: nil)
         )
 
         try await store.attachWorkingSourceToExistingProject(input)
@@ -199,7 +209,8 @@ struct WorkingSourceStoreReplaceTests {
             attachedAt: laterReferenceDate,
             capture: makeCaptureMetadata(),
             libraryCreationDate: laterReferenceDate,
-            representation: .original
+            representation: .original,
+            sourceLocator: ProjectSourceLocator(photoLibraryLocalIdentifier: nil)
         )
 
         try await store.attachWorkingSourceToExistingProject(input)

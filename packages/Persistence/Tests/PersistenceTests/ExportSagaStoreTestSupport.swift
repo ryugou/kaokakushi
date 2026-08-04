@@ -10,13 +10,12 @@ import Domain
 // （WorkingSourceStoreTestSupport.swift）・makeStampTestDirectories()
 // （StampStoreTestSupport.swift）はそのまま再利用し、ここでは重複定義しない。
 
-/// ExportSagaStoreLiveをテスト用に組み立てる。fileStoreは settleExport/settleBatchを
-/// 含む全7メソッドが一切呼ばないため（ファイル実体の削除はPendingFileDeletion経由の
-/// 別タスクの担当）、実ファイルを書かないManagedFileStoreLive（未使用のまま存在するだけの
-/// 一時ディレクトリ）で十分。enabledStampPacks/hardMaxTrialCredits/monthlyLimitは
-/// デフォルト値のままで足りるテストが大半のため引数のデフォルトをコンストラクタと同じ値に
-/// 揃える（差し戻し対応1番・3番）。deviceTimeZoneはUTC固定（schemaTestReferenceDateが
-/// UTCで2023-11-14であることを前提にしたテストと一致させる）。
+/// ExportSagaStoreLiveをテスト用に組み立てる。ExportSagaStoreLiveはファイル実体に一切
+/// 触れない実装（出力ファイルの実削除はPendingFileDeletion経由の別タスクの担当）のため、
+/// ManagedFileStoreへの依存自体を持たない。enabledStampPacks/hardMaxTrialCredits/
+/// monthlyLimitはデフォルト値のままで足りるテストが大半のため引数のデフォルトを
+/// コンストラクタと同じ値に揃える（差し戻し対応1番・3番）。deviceTimeZoneはUTC固定
+/// （schemaTestReferenceDateがUTCで2023-11-14であることを前提にしたテストと一致させる）。
 func makeExportSagaStore(
     database: AppDatabase,
     now: @escaping @Sendable () -> Date = { schemaTestReferenceDate },
@@ -25,10 +24,8 @@ func makeExportSagaStore(
     hardMaxTrialCredits: Int = 5,
     monthlyLimit: Int = 5
 ) -> ExportSagaStoreLive {
-    let (_, directories) = makeStampTestDirectories()
-    return ExportSagaStoreLive(
+    ExportSagaStoreLive(
         database: database,
-        fileStore: ManagedFileStoreLive(directories: directories),
         now: now,
         deviceTimeZone: deviceTimeZone,
         limits: ExportSagaStoreLimits(

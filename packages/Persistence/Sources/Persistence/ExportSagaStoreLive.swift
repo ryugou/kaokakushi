@@ -307,7 +307,7 @@ enum ExportAccountingModeColumn: Int, Sendable {
 
 /// 設定可能な閾値・機能フラグ束（引数を構造体へ束ねるlint対応パターン。
 /// StampStoreLive.insertStampRowsのNewStampRowsと同じ理由。ExportSagaStoreLive.initが
-/// database/fileStore/now/deviceTimeZoneに加えてこれら3つも受け取ると引数が5個を超える
+/// database/now/deviceTimeZoneに加えてこれら3つも受け取ると引数が5個を超える
 /// ため、既定値を持つ設定値だけをここへ束ねる）。
 public struct ExportSagaStoreLimits: Sendable {
     /// resolveCapabilities(_:usageNow:enabledStampPacks:)（Domain）のシグネチャ上必須
@@ -327,19 +327,20 @@ public struct ExportSagaStoreLimits: Sendable {
     }
 }
 
-/// ExportSagaStoreの実装。GRDBのAppDatabaseとManagedFileStoreを1つずつ受け取り、全
-/// メソッドをdbQueue.write / dbQueue.readとfileStoreの呼び出しだけで完結させる。
+/// ExportSagaStoreの実装。GRDBのAppDatabaseを1つ受け取り、全メソッドをdbQueue.write /
+/// dbQueue.readの呼び出しだけで完結させる（全7メソッドともファイル実体には一切触れない。
+/// 出力ファイルの実削除はPendingFileDeletion経由の別タスクの担当のため、ManagedFileStoreへの
+/// 依存は持たない）。
 ///
-/// `database` / `fileStore` / `now` / `deviceTimeZone` / `enabledStampPacks` /
-/// `hardMaxTrialCredits` / `monthlyLimit` はpublicではないが、複数ファイルへ分割した
-/// extensionから参照する必要があるため（StampStoreLiveと同じ理由）モジュール内既定
-/// アクセス（internal）のままにする。外部パッケージからは見えない。
+/// `database` / `now` / `deviceTimeZone` / `enabledStampPacks` / `hardMaxTrialCredits` /
+/// `monthlyLimit` はpublicではないが、複数ファイルへ分割したextensionから参照する必要が
+/// あるため（StampStoreLiveと同じ理由）モジュール内既定アクセス（internal）のままにする。
+/// 外部パッケージからは見えない。
 ///
 /// `deviceTimeZone`は`now`と同じ設計判断（デフォルト値なし、呼び出し側が必ず注入する。
 /// 裸のTimeZone.currentをコード内で直接使わない。オーケストレーター確定判断）。
 public struct ExportSagaStoreLive: ExportSagaStore {
     let database: AppDatabase
-    let fileStore: ManagedFileStore
     let now: @Sendable () -> Date
     let deviceTimeZone: @Sendable () -> TimeZone
     let enabledStampPacks: Set<String>
@@ -348,13 +349,11 @@ public struct ExportSagaStoreLive: ExportSagaStore {
 
     public init(
         database: AppDatabase,
-        fileStore: ManagedFileStore,
         now: @escaping @Sendable () -> Date,
         deviceTimeZone: @escaping @Sendable () -> TimeZone,
         limits: ExportSagaStoreLimits = ExportSagaStoreLimits()
     ) {
         self.database = database
-        self.fileStore = fileStore
         self.now = now
         self.deviceTimeZone = deviceTimeZone
         self.enabledStampPacks = limits.enabledStampPacks

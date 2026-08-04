@@ -14,10 +14,10 @@ extension MaintenanceStoreLive {
         case .stampAsset:
             return try await fetchReferencedIDs(sql: "SELECT fileID FROM StampAsset")
         case .stampThumbnail:
-            // architecture.md 7.5の対応表（正本）により、`.stampThumbnail`はDB参照を
-            // 持たない一時ファイル・再生成可能なキャッシュであり常に空集合を返す。
-            // 存在するものはすべて孤児候補として扱ってよい（実体から再生成できるため）。
-            return []
+            // architecture.md 1987行（正本）により、`.stampThumbnail`の参照元は
+            // `CustomStamp.thumbnailFileID`（一覧サムネイルは行が参照を持つ。欠損時は
+            // 実体から再生成する）。
+            return try await fetchReferencedIDs(sql: "SELECT thumbnailFileID FROM CustomStamp")
         case .processingTemporary:
             return try await fetchReferencedIDs(sql: "SELECT sourceFileID FROM WorkingSourceRecord")
         case .historyThumbnail:

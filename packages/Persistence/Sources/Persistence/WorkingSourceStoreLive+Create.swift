@@ -7,6 +7,11 @@ import GRDB
 // （queueItemIDがあれば）ExportQueueItem・WorkingSourceRecordを作成する。
 
 extension WorkingSourceStoreLive {
+    /// `input.initialSpec`（RenderSpec）は意図的に使わない。EffectSetting/FaceTrackへの
+    /// 展開はサブプロジェクト4/5のApplication層の担当であり（Issue #25参照）、Project・
+    /// ExportQueueItem・WorkingSourceRecordの3テーブルをトランザクションで作るだけの
+    /// このPersistence層メソッドの担当範囲外である。取りこぼしではなく、EffectSetting/
+    /// FaceTrackへ書き込む処理をここに実装しないことがこのメソッドの契約そのもの。
     public func createProjectWithWorkingSource(_ input: CreateWorkingSourceInput) async throws {
         try await database.dbQueue.write { connection in
             try Self.insertProject(connection, input: input)

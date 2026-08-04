@@ -63,9 +63,9 @@ extension ExportSagaStoreLive {
     }
 
     /// UsageLedgerをUPSERTする（単一行契約。行が無ければINSERT、あれば全列UPDATE。
-    /// UsageLedgerにはPRIMARY KEYが無いため`SELECT count(*)`で存在確認してから分岐する。
-    /// Schema+Accounting.swiftのコメントどおり単一行であることはApplication層の契約であり
-    /// DB制約としては存在しない）。
+    /// 単一行キー（Schema+Accounting.swift: id INTEGER PRIMARY KEY CHECK(id = 1)）により
+    /// DB制約としても単一行が保証されるが、INSERT/UPDATEのどちらを発行するかの分岐自体は
+    /// 引き続き`SELECT count(*)`で存在確認する）。
     static func saveUsageLedger(_ connection: Database, ledger: UsageLedger) throws {
         let existingCount = try Int.fetchOne(connection, sql: "SELECT count(*) FROM UsageLedger") ?? 0
         let consumedBlob = Self.encodeExportIDSet(ledger.consumedExportIDs)
@@ -76,8 +76,8 @@ extension ExportSagaStoreLive {
         if existingCount == 0 {
             try connection.execute(
                 sql: """
-                INSERT INTO UsageLedger (periodYear, periodMonth, consumedExportIDs, trialConsumedExportIDs)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO UsageLedger (id, periodYear, periodMonth, consumedExportIDs, trialConsumedExportIDs)
+                VALUES (1, ?, ?, ?, ?)
                 """,
                 arguments: arguments
             )
@@ -86,6 +86,7 @@ extension ExportSagaStoreLive {
                 sql: """
                 UPDATE UsageLedger
                 SET periodYear = ?, periodMonth = ?, consumedExportIDs = ?, trialConsumedExportIDs = ?
+                WHERE id = 1
                 """,
                 arguments: arguments
             )

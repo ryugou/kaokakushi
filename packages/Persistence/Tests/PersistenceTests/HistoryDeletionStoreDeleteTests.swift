@@ -139,4 +139,42 @@ struct HistoryDeletionStoreDeleteTests {
         }
         #expect(try projectRowExists(database, projectID: projectID.rawValue))
     }
+
+    @Test("試行中のDeliveryAttemptがあるとblockedByAbsoluteProtectionをthrowしProjectが消えないこと")
+    func rejectsWhenDeliveryAttemptInProgressExists() async throws {
+        let (database, url) = try makeTestAppDatabase()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let projectID = ProjectID(rawValue: UUID())
+        let outputExportID = UUID()
+        try await database.dbQueue.write { connection in
+            try insertProject(connection, projectID: projectID.rawValue)
+            // delivered状態にしhasUndeliveredOutputRecordを発火させない
+            // （このテストの関心はhasDeliveryAttemptInProgressのみに絞る）。
+            try insertDeliveryOutputRecord(
+                connection, exportID: outputExportID, projectID: projectID.rawValue,
+                state: Int(OutputState.delivered.rawValue), settledAt: schemaTestReferenceDate
+            )
+            try insertDeliveryAttemptRow(
+                connection, exportID: outputExportID, startedAt: schemaTestReferenceDate,
+                previousState: Int(OutputState.generated.rawValue)
+            )
+        }
+        let store = makeHistoryDeletionStore(database: database)
+
+        do {
+            try await store.deleteHistoryUnit(
+            .project(projectID),
+            trigger: .userInitiated(confirmedOverrides: [.workingSource])
+        )
+            Issue.record("試行中のDeliveryAttemptがあるのにdeleteHistoryUnitが成功した")
+        } catch let error as HistoryDeletionStoreError {
+            #expect(
+                error
+                    == .blockedByAbsoluteProtection(unit: .project(projectID), reasons: [.deliveryAttemptInProgress])
+            )
+        } catch {
+            Issue.record("HistoryDeletionStoreError以外がthrowされた: \(error)")
+        }
+        #expect(try projectRowExists(database, projectID: projectID.rawValue))
+    }
 }

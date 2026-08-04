@@ -60,6 +60,13 @@ extension ExportSagaStoreLive {
             }
             return .resolved(.paidUnlimited)
         case .trial:
+            // architecture.md 6.3「Pro へ加入済みの場合は消費しない」・export-saga.md 1.3
+            // ExportStartBlockReasonのコメント。開始時点でcanUseProBatchを持つ利用者は
+            // トライアルクレジットの残数に関わらず消費せずpaidUnlimitedで認可する
+            // （アップグレード後もバッチを中断させないため）。
+            guard !context.capabilities.canUseProBatch else {
+                return .resolved(.paidUnlimited)
+            }
             return try Self.resolveTrialAccountingMode(
                 connection, trialCreditCount: batch.trialCreditCount,
                 hardMaxTrialCredits: context.hardMaxTrialCredits

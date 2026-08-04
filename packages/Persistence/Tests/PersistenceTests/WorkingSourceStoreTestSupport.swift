@@ -48,6 +48,25 @@ func makeRenderSpecFixture() throws -> RenderSpec {
     return RenderSpec(sourceCrop: rect, scaleMode: .fit, background: .none, regions: [])
 }
 
+/// mosaic領域を1つ持つ非空のRenderSpecフィクスチャ（C1: createProjectWithWorkingSourceが
+/// initialSpecをEffectSetting/FaceTrackへ展開しないことを検証するテスト専用。
+/// makeRenderSpecFixtureのregionsは空のため、「展開されないこと」の検証としては弱い
+/// ——展開ロジックが無くても空配列なら結果は変わらないため。実際に隠す領域を1つ持たせ、
+/// それでも展開されないことを示す）。
+func makeRenderSpecFixtureWithRegion() throws -> RenderSpec {
+    let sourceCrop = try NormalizedRect(left: 0, top: 0, rightExclusive: 1, bottomExclusive: 1)
+    let regionBounds = try NormalizedRect(left: 0.1, top: 0.1, rightExclusive: 0.4, bottomExclusive: 0.4)
+    let region = RenderRegionSpec(
+        bounds: regionBounds,
+        rotationDegrees: try RotationDegrees(0),
+        shape: .ellipse,
+        featherRatio: try FeatherRatio(0.1),
+        origin: .auto,
+        op: .mosaic(cellRatio: try MosaicRatio(0.2))
+    )
+    return RenderSpec(sourceCrop: sourceCrop, scaleMode: .fit, background: .none, regions: [region])
+}
+
 /// CreateWorkingSourceInputのフィクスチャビルダー。テストごとに変えたいフィールドだけ
 /// 上書きする。
 func makeCreateWorkingSourceInput(
@@ -123,6 +142,22 @@ func workingSourceRecordFields(
             return nil
         }
         return (row["sourceFileID"], row["createdAt"])
+    }
+}
+
+/// Project.photoLibraryLocalIdentifierを直接読む（ReplaceWorkingSourceInput/
+/// AttachWorkingSourceInputのsourceLocatorがProjectへ反映されることを検証するため。
+/// 行が無い場合とNULLの場合を区別する必要が無いテストでのみ使うこと）。
+func projectPhotoLibraryLocalIdentifier(
+    _ database: AppDatabase,
+    projectID: UUID
+) throws -> String? {
+    try database.dbQueue.read { connection in
+        try String.fetchOne(
+            connection,
+            sql: "SELECT photoLibraryLocalIdentifier FROM Project WHERE projectID = ?",
+            arguments: [projectID]
+        )
     }
 }
 

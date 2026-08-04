@@ -267,6 +267,9 @@ struct ExportSagaStoreStartTests {
         #expect(block.reason == .capabilityVerificationRequired)
     }
 
+    // Pro 加入済みのトライアルバッチ（paidUnlimited 認可）のテストは
+    // ExportSagaStoreStartValidationTests.swift（type_body_length 対応で分離）。
+
     @Test("トライアルクレジット上限はhardMaxTrialCreditsでクランプされDB上のtrialCreditCountを無条件に信頼しないこと")
     func clampsTrialCreditLimitToHardMaximum() async throws {
         let (database, url) = try makeTestAppDatabase()

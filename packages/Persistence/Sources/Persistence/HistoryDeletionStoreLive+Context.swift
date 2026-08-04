@@ -34,7 +34,8 @@ extension HistoryDeletionStoreLive {
             hasNonTerminalQueueItem: try Self.hasNonTerminalQueueItem(connection, projectID: projectID),
             hasUndeliveredOutputRecord: try Self.hasUndeliveredOutputRecord(connection, projectID: projectID),
             hasRunningExportJob: try Self.hasRunningExportJob(connection, projectID: projectID),
-            hasWorkingSourceRecord: try Self.hasWorkingSourceRecord(connection, projectID: projectID)
+            hasWorkingSourceRecord: try Self.hasWorkingSourceRecord(connection, projectID: projectID),
+            hasDeliveryAttemptInProgress: try Self.hasDeliveryAttemptInProgress(connection, projectID: projectID)
         )
     }
 
@@ -73,6 +74,7 @@ extension HistoryDeletionStoreLive {
         if context.hasNonTerminalQueueItem { reasons.insert(.nonTerminalQueueItem) }
         if context.hasRunningExportJob { reasons.insert(.exportJobRunning) }
         if context.hasUndeliveredOutputRecord { reasons.insert(.undeliveredOutput) }
+        if context.hasDeliveryAttemptInProgress { reasons.insert(.deliveryAttemptInProgress) }
         return reasons
     }
 
@@ -131,5 +133,20 @@ extension HistoryDeletionStoreLive {
     /// loadSourceFileIDを再利用する（同じ問い合わせを重複定義しない）。
     private static func hasWorkingSourceRecord(_ connection: Database, projectID: ProjectID) throws -> Bool {
         try WorkingSourceStoreLive.loadSourceFileID(connection, projectID: projectID) != nil
+    }
+
+    /// 絶対保護4: 対象Projectに属するOutputRecordのいずれかに、試行中のDeliveryAttempt行が
+    /// あるか（export-saga.md 450行の不変条件。beginDeliveryAttempt/completeLibrarySave/
+    /// completeShareが課す排他ゲートと同じ理由で、履歴削除でも絶対保護対象にする）。
+    private static func hasDeliveryAttemptInProgress(_ connection: Database, projectID: ProjectID) throws -> Bool {
+        let count = try Int.fetchOne(
+            connection,
+            sql: """
+            SELECT count(*) FROM DeliveryAttempt
+            WHERE exportID IN (SELECT exportID FROM OutputRecord WHERE projectID = ?)
+            """,
+            arguments: [projectID.rawValue]
+        ) ?? 0
+        return count > 0
     }
 }

@@ -85,15 +85,15 @@ private func createSettlementTables(_ database: Database) throws {
     }
 
     try database.create(table: "UsageLedger") { tableDef in
+        // 単一行キー（architecture.md 7.1: id INTEGER PRIMARY KEY CHECK(id = 1)相当）。
+        // 「台帳は1つ」をDB制約で固定する。INTEGER PRIMARY KEYは自動的にNOT NULL。
+        tableDef.primaryKey("id", .integer).check(sql: "id = 1")
         tableDef.column("periodYear", .integer).notNull()
         tableDef.column("periodMonth", .integer).notNull()
         // Set<ExportID>のシリアライズ形式は未確定。シリアライズ方式はExportSagaStore
         // 実装タスクの担当。
         tableDef.column("consumedExportIDs", .blob).notNull()
         tableDef.column("trialConsumedExportIDs", .blob).notNull()
-        // 「台帳は1つ」だが一意制約表に記載が無いためDB制約としては追加しない。
-        // 単一行であることはApplication層が保証する（architecture.md原文どおり、
-        // 表に無い制約を追加発明しない）。
     }
 
     try database.create(table: "ExportedSettingsEntry") { tableDef in

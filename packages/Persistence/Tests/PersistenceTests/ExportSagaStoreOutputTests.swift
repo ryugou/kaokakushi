@@ -67,6 +67,42 @@ struct ExportSagaStoreOutputTests {
         }
     }
 
+    @Test("同一exportIDへの二重INSERTがPRIMARY KEY違反としてrecordGeneratedOutputInsertFailedでthrowすること")
+    func rejectsDuplicateExportIDInsertAsPrimaryKeyViolation() async throws {
+        let (database, url) = try makeTestAppDatabase()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = makeExportSagaStore(database: database)
+        let projectID = ProjectID(rawValue: UUID())
+        try await seedAuthorizedProject(database, projectID: projectID)
+        let job = try await authorizeExportJob(store: store, projectID: projectID)
+        // settledAt != nilの行を同一exportIDで先に用意する。部分UNIQUEインデックス
+        // （where settledAt IS NULL）には抵触しないが、exportID列のPRIMARY KEY制約には
+        // 抵触するため、後続のrecordGeneratedOutputはPRIMARY KEY違反で失敗するはず。
+        try await database.dbQueue.write { connection in
+            try insertOutputRecord(
+                connection, exportID: job.exportID.rawValue, projectID: projectID.rawValue,
+                batchID: nil, settledAt: schemaTestReferenceDate
+            )
+        }
+
+        do {
+            try await store.recordGeneratedOutput(RecordOutputInput(
+                exportID: job.exportID,
+                outputFile: makeOutputFileRefFixture(),
+                outputByteSize: 1_024,
+                outputSHA256: Data(repeating: 0x04, count: 32)
+            ))
+            Issue.record("同一exportIDのOutputRecordが既にあるのにrecordGeneratedOutputが成功した")
+        } catch let error as ExportSagaStoreError {
+            guard case .recordGeneratedOutputInsertFailed = error else {
+                Issue.record("期待したエラーケース(recordGeneratedOutputInsertFailed)ではない: \(error)")
+                return
+            }
+        } catch {
+            Issue.record("ExportSagaStoreError以外がthrowされた: \(error)")
+        }
+    }
+
     @Test("discardExportがOutputRecord不在のExportJob行を削除しPendingFileDeletionを登録しないこと")
     func discardsExportJobOnlyWithoutOutputRecord() async throws {
         let (database, url) = try makeTestAppDatabase()

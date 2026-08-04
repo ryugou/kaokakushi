@@ -142,6 +142,7 @@ func replaceWorkingSourceInputHoldsAllFieldsAndAllowsNilLibraryCreationDate() {
     let newSourceFile = makeWorkingSourceFileRef()
     let replacedAt = Date(timeIntervalSince1970: 1_700_001_000)
     let capture = makeCaptureMetadata()
+    let locator = ProjectSourceLocator(photoLibraryLocalIdentifier: "reselected-asset")
 
     let subject = ReplaceWorkingSourceInput(
         projectID: projectID,
@@ -149,7 +150,8 @@ func replaceWorkingSourceInputHoldsAllFieldsAndAllowsNilLibraryCreationDate() {
         replacedAt: replacedAt,
         capture: capture,
         libraryCreationDate: nil,
-        representation: .original
+        representation: .original,
+        sourceLocator: locator
     )
 
     #expect(subject.projectID == projectID)
@@ -158,6 +160,7 @@ func replaceWorkingSourceInputHoldsAllFieldsAndAllowsNilLibraryCreationDate() {
     #expect(subject.capture == capture)
     #expect(subject.libraryCreationDate == nil)
     #expect(subject.representation == .original)
+    #expect(subject.sourceLocator == locator)
 }
 
 @Test("AttachWorkingSourceInputが全フィールドを保持しlibraryCreationDateのnilを許容する")
@@ -166,6 +169,7 @@ func attachWorkingSourceInputHoldsAllFieldsAndAllowsNilLibraryCreationDate() {
     let sourceFile = makeWorkingSourceFileRef()
     let attachedAt = Date(timeIntervalSince1970: 1_700_002_000)
     let capture = makeCaptureMetadata()
+    let locator = ProjectSourceLocator(photoLibraryLocalIdentifier: "reconnected-asset")
 
     let subject = AttachWorkingSourceInput(
         projectID: projectID,
@@ -173,7 +177,8 @@ func attachWorkingSourceInputHoldsAllFieldsAndAllowsNilLibraryCreationDate() {
         attachedAt: attachedAt,
         capture: capture,
         libraryCreationDate: nil,
-        representation: .transcoded
+        representation: .transcoded,
+        sourceLocator: locator
     )
 
     #expect(subject.projectID == projectID)
@@ -182,6 +187,7 @@ func attachWorkingSourceInputHoldsAllFieldsAndAllowsNilLibraryCreationDate() {
     #expect(subject.capture == capture)
     #expect(subject.libraryCreationDate == nil)
     #expect(subject.representation == .transcoded)
+    #expect(subject.sourceLocator == locator)
 }
 
 // MARK: - WorkingSourceStore への最小準拠
@@ -246,7 +252,8 @@ func fakeWorkingSourceStoreForwardsArguments() async throws {
         replacedAt: Date(timeIntervalSince1970: 1_700_001_000),
         capture: makeCaptureMetadata(),
         libraryCreationDate: nil,
-        representation: .original
+        representation: .original,
+        sourceLocator: ProjectSourceLocator(photoLibraryLocalIdentifier: nil)
     )
     try await store.replaceWorkingSource(replaceInput)
 
@@ -256,7 +263,8 @@ func fakeWorkingSourceStoreForwardsArguments() async throws {
         attachedAt: Date(timeIntervalSince1970: 1_700_002_000),
         capture: makeCaptureMetadata(),
         libraryCreationDate: nil,
-        representation: .original
+        representation: .original,
+        sourceLocator: ProjectSourceLocator(photoLibraryLocalIdentifier: nil)
     )
     try await store.attachWorkingSourceToExistingProject(attachInput)
 

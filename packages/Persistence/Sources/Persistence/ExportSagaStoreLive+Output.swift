@@ -22,11 +22,12 @@ extension ExportSagaStoreLive {
 
     /// OutputRecordのINSERT本体。同一projectIDの未確定OutputRecordが既に存在する場合、
     /// 部分UNIQUEインデックス`OutputRecord_on_projectID_where_pending`
-    /// （Schema+Accounting.swift）がDatabaseErrorを送出する。GRDBの
-    /// DatabaseError.extendedResultCodeで真にUNIQUE制約違反かどうかを確定的に判定し、
-    /// UNIQUE制約違反ならrecordGeneratedOutputInsertFailedへ、それ以外のDBエラーは
-    /// recordOutputInsertUnexpectedFailureへ区別してラップする（握りつぶさず
-    /// rethrow。7番の修正）。
+    /// （Schema+Accounting.swift）がDatabaseErrorを送出する。また、同一exportIDへの
+    /// 二重INSERTはexportID列のPRIMARY KEY制約（Schema+Accounting.swift）違反として
+    /// 送出される。GRDBのDatabaseError.extendedResultCodeで真にUNIQUE制約違反・PRIMARY
+    /// KEY制約違反のいずれかどうかを確定的に判定し、該当すればrecordGeneratedOutput
+    /// InsertFailedへ、それ以外のDBエラーはrecordOutputInsertUnexpectedFailureへ区別して
+    /// ラップする（握りつぶさずrethrow。7番の修正）。
     private static func insertOutputRecord(
         _ connection: Database, job: ExportJob, input: RecordOutputInput, generatedAt: Date
     ) throws {
@@ -45,7 +46,9 @@ extension ExportSagaStoreLive {
                     ImageFormatColumn(job.delivery.format).rawValue, job.delivery.suggestedCreationDate
                 ]
             )
-        } catch let error as DatabaseError where error.extendedResultCode == .SQLITE_CONSTRAINT_UNIQUE {
+        } catch let error as DatabaseError
+        where error.extendedResultCode == .SQLITE_CONSTRAINT_UNIQUE
+            || error.extendedResultCode == .SQLITE_CONSTRAINT_PRIMARYKEY {
             throw ExportSagaStoreError.recordGeneratedOutputInsertFailed(
                 exportID: input.exportID,
                 projectID: job.projectID,
