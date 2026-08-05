@@ -1,16 +1,20 @@
 import Foundation
 import Domain
 
-// ExportCoordinator — 書き出しの認可・開始・生成・中断後始末・完了操作(Issue #7 Task 4 / 5 / 6)。
+// ExportCoordinator — 書き出しの認可・開始・生成・中断後始末・完了操作
+// (Issue #7 Task 4 / 5 / 6 / 10)。
 //
 // 正本: export-saga.md 1章「認可」（1.1〜1.6。Task 4）、3章「手順」・4章「中断・やり直し・
 // 破棄」（Task 5。実装は ExportCoordinator+Generate.swift）、3章 手順5・6章「確定後に出力
-// 実体が失われた場合」（Task 6。実装は ExportCoordinator+Settle.swift）、
+// 実体が失われた場合」（Task 6。実装は ExportCoordinator+Settle.swift）、1.2「変更せず
+// 再書き出しの免除」・architecture.md 6.2（Task 10。実装は
+// ExportCoordinator+CapabilityExemption.swift）、
 // docs/superpowers/specs/2026-08-05-issue7-task4-export-coordinator.md「実装方針」。
 // stored property と init はこのファイルに集約する（extension は stored property を
 // 追加できないため。Task 5 の生成 `generateOutput` / `discardExport` は
 // ExportCoordinator+Generate.swift、Task 6 の `settleExport` / `settleBatch` /
-// `verifyOutputIntegrity` は ExportCoordinator+Settle.swift が実装する）。
+// `verifyOutputIntegrity` は ExportCoordinator+Settle.swift、Task 10 の免除評価は
+// ExportCoordinator+CapabilityExemption.swift が実装する）。
 //
 // architecture.md 4.2「actor であることを排他の根拠にしない」ため、状態変更を伴う区間
 // （実体欠損時の invalidateWorkingSource 呼び出し、startExport 呼び出し、
@@ -41,6 +45,11 @@ public actor ExportCoordinator {
     /// export-saga.md 3章「settledAt は呼び出し側が渡した時刻で全件に統一する」。
     let now: @Sendable () -> Date
     let queue: SerialTaskQueue
+    /// Task 10「変更せず再書き出し」免除の確定記録の読み取りポート（export-saga.md 1.2）。
+    let exportedSettingsEntryStore: ExportedSettingsEntryStore
+    /// settingsHash 算出（Domain の正準エンコーダ）へ注入する SHA-256 実体計算
+    /// （canonical-schema.md 5.2。Domain は CryptoKit を import できないため）。
+    let settingsHashDigest: Sha256Digest
 
     public init(
         exportSagaStore: ExportSagaStore,
@@ -52,7 +61,9 @@ public actor ExportCoordinator {
         outputFileVerifier: OutputFileVerifier,
         outputDeliveryStore: OutputDeliveryStore,
         now: @escaping @Sendable () -> Date,
-        queue: SerialTaskQueue
+        queue: SerialTaskQueue,
+        exportedSettingsEntryStore: ExportedSettingsEntryStore,
+        settingsHashDigest: Sha256Digest
     ) {
         self.exportSagaStore = exportSagaStore
         self.workingSourceStore = workingSourceStore
@@ -64,6 +75,8 @@ public actor ExportCoordinator {
         self.outputDeliveryStore = outputDeliveryStore
         self.now = now
         self.queue = queue
+        self.exportedSettingsEntryStore = exportedSettingsEntryStore
+        self.settingsHashDigest = settingsHashDigest
     }
 
     /// export-saga.md 1.6 の順序で認可を評価し、成立すれば `ExportJob` を挿入する。
@@ -79,7 +92,13 @@ public actor ExportCoordinator {
             request.renderSpec, stampCatalog: stampCatalog, capabilities: capabilities
         )
         if case .blocked(let reason) = renderSpecAuthorization {
-            return .renderSpecBlocked(reason)
+            // Task 10「変更せず再書き出し」の免除（export-saga.md 1.2）。1.2 の能力ブロックの
+            // 場合にのみ評価し、成立しなければ従来どおり renderSpecBlocked を返す。1.3 の
+            // 権限・クォータ（accountingMode）の評価は免除せず、従来どおり authorizeAndStart
+            // 経由の startExport に委ねる。
+            guard try await isExemptFromCapabilityBlock(request) else {
+                return .renderSpecBlocked(reason)
+            }
         }
 
         return try await queue.run {

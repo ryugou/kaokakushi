@@ -32,7 +32,9 @@ private func makeCoordinator(
         outputFileVerifier: outputFileVerifier,
         outputDeliveryStore: outputDeliveryStore,
         now: now,
-        queue: SerialTaskQueue()
+        queue: SerialTaskQueue(),
+        exportedSettingsEntryStore: FakeExportedSettingsEntryStore(),
+        settingsHashDigest: FakeSha256Digest()
     )
 }
 

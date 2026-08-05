@@ -54,7 +54,9 @@ private func makeCoordinator(
         outputFileVerifier: outputFileVerifier,
         outputDeliveryStore: FakeOutputDeliveryStore(now: makeFixedClock()),
         now: makeFixedClock(),
-        queue: SerialTaskQueue()
+        queue: SerialTaskQueue(),
+        exportedSettingsEntryStore: FakeExportedSettingsEntryStore(),
+        settingsHashDigest: FakeSha256Digest()
     )
 }
 

@@ -226,7 +226,9 @@ func makeGenerateCoordinator(
         outputFileVerifier: outputFileVerifier,
         outputDeliveryStore: outputDeliveryStore,
         now: makeFixedClock(),
-        queue: SerialTaskQueue()
+        queue: SerialTaskQueue(),
+        exportedSettingsEntryStore: FakeExportedSettingsEntryStore(),
+        settingsHashDigest: FakeSha256Digest()
     )
 }
 

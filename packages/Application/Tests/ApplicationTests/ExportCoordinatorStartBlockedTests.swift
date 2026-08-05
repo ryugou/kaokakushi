@@ -50,7 +50,9 @@ private func accountingBlockedMapsToOutcomeWithoutCreatingJob() async throws {
         outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
         outputDeliveryStore: FakeOutputDeliveryStore(now: makeFixedClock()),
         now: makeFixedClock(),
-        queue: SerialTaskQueue()
+        queue: SerialTaskQueue(),
+        exportedSettingsEntryStore: FakeExportedSettingsEntryStore(),
+        settingsHashDigest: FakeSha256Digest()
     )
 
     let outcome = try await coordinator.startExport(request, capabilities: makeResolvedCapabilities())
