@@ -21,7 +21,8 @@ struct ExportSagaStoreSingletonContractTests {
             try insertProject(connection, projectID: projectID.rawValue)
             try insertSubscriptionStateRow(connection, plan: 1, status: 1)
             // 単一行キーのCHECK制約を一時的に無効化し、通常経路では作れない2件目の行を
-            // 直接作る（この無効化はこのdbQueue.writeブロック内でのみ有効）。
+            // 直接作る。PRAGMAは接続スコープの設定でロールバックしても戻らないため、
+            // 必ず直後の明示OFFで復帰させる（テストごとにDB・接続は独立）。
             try connection.execute(sql: "PRAGMA ignore_check_constraints = ON")
             try insertSubscriptionStateRow(connection, plan: 2, status: 1)
             try connection.execute(sql: "PRAGMA ignore_check_constraints = OFF")
@@ -57,7 +58,8 @@ struct ExportSagaStoreSingletonContractTests {
             try insertBatchRow(connection, batchID: batchID.rawValue, kind: 2, trialCreditCount: 5)
             try insertUsageLedgerRow(connection, trialConsumedCount: 1)
             // 単一行キーのCHECK制約を一時的に無効化し、通常経路では作れない2件目の行を
-            // 直接作る（この無効化はこのdbQueue.writeブロック内でのみ有効）。
+            // 直接作る。PRAGMAは接続スコープの設定でロールバックしても戻らないため、
+            // 必ず直後の明示OFFで復帰させる（テストごとにDB・接続は独立）。
             try connection.execute(sql: "PRAGMA ignore_check_constraints = ON")
             try insertUsageLedgerRow(connection, trialConsumedCount: 2)
             try connection.execute(sql: "PRAGMA ignore_check_constraints = OFF")

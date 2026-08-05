@@ -1033,7 +1033,7 @@ struct CreateWorkingSourceInput: Sendable {
     let libraryCreationDate: Date?            // Project へ保存する
     let representation: SourceRepresentation  // Project へ保存する（アーキテクチャ設計 7.5）
     let initialSpec: RenderSpec               // Application 層が EffectSetting/FaceTrack へ
-                                               // 展開する（Issue #25）。WorkingSourceStore は保存しない
+                                              // 展開する（Issue #25）。WorkingSourceStore は保存しない
 }
 
 struct ReplaceWorkingSourceInput: Sendable {
