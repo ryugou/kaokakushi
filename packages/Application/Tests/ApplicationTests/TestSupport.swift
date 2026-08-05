@@ -1,5 +1,6 @@
 import Foundation
 import Domain
+@testable import Application
 
 // ApplicationTests 全体で共有するテストフィクスチャ。各テストファイルへ同じ定義をコピーせず、
 // ここへ集約する（DomainTests/TestSupport.swift と同じ方針。simplify レビュー指摘の踏襲）。
@@ -134,6 +135,113 @@ func makeExportSetting() -> ExportSetting {
 /// （1.1 の不一致ケースを組み立てるのに使う）。
 func makePreviewRenderHash(fillByte: UInt8 = 0xCD) throws -> PreviewRenderHash {
     try PreviewRenderHash(bytes: Data(repeating: fillByte, count: 32))
+}
+
+/// 800x600 固定の PixelSize フィクスチャ（Issue #7 Task 5「生成」テスト用）。
+func makePixelSize(width: Int = 800, height: Int = 600) -> PixelSize {
+    PixelSize(width: width, height: height)
+}
+
+/// processingTemporary 種別の ImageSource フィクスチャ（レンダラーへの入力）。
+func makeImageSource() -> ImageSource {
+    ImageSource(
+        file: ManagedFileRef(kind: .processingTemporary, fileID: ManagedFileID(rawValue: UUID())),
+        pixelSize: makePixelSize(),
+        format: .jpeg
+    )
+}
+
+/// rasterTemporary 種別の RasterFileRef フィクスチャ（RenderedImage.file が指す実体の参照）。
+func makeRasterFileRef() -> RasterFileRef {
+    let ref = ManagedFileRef(kind: .rasterTemporary, fileID: ManagedFileID(rawValue: UUID()))
+    guard let rasterRef = RasterFileRef(ref) else {
+        fatalError("test setup invariant violated: kind must be .rasterTemporary")
+    }
+    return rasterRef
+}
+
+/// ImageEffectRenderer.render の戻り値フィクスチャ。
+func makeRenderedImage() -> RenderedImage {
+    RenderedImage(
+        file: makeRasterFileRef(),
+        descriptor: RawBitmapDescriptor(
+            pixelSize: makePixelSize(),
+            rowBytes: 800 * 4,
+            channelOrder: .rgba,
+            alpha: .straight,
+            bitDepth: .eightPerChannel,
+            colorSpace: .sRGB
+        )
+    )
+}
+
+/// ImageEncoder.encode へ渡すメタデータのフィクスチャ（保持設定なしの最小構成）。
+func makeOutputMetadata() -> OutputMetadata {
+    OutputMetadata(pixelSize: makePixelSize(), iccProfile: nil, capture: nil)
+}
+
+/// OutputFileVerifier.verify 成功時の測定値フィクスチャ。
+func makeVerifiedOutputMeasurement() -> VerifiedOutputMeasurement {
+    VerifiedOutputMeasurement(byteSize: 2_048, sha256: Data(repeating: 0xCD, count: 32))
+}
+
+/// ExportCoordinator.generateOutput(_:) への標準入力フィクスチャ。regions 無しの RenderSpec
+/// を使うため rasterAssets は空辞書のままで bindRasterAssets を通過できる（makeRenderSpec の
+/// コメントと同じ理由）。
+func makeGenerateExportInput(job: ExportJob) throws -> GenerateExportInput {
+    GenerateExportInput(
+        job: job,
+        renderSpec: try makeRenderSpec(),
+        exportSetting: makeExportSetting(),
+        sourceSize: makePixelSize(),
+        targetSize: makePixelSize(),
+        imageSource: makeImageSource(),
+        rasterAssets: [:],
+        metadata: makeOutputMetadata()
+    )
+}
+
+/// 標準構成の ExportCoordinator を組み立てる（Issue #7 Task 5「生成」テストの複数ファイルで
+/// 共有するため TestSupport.swift へ集約する）。個別に差し替えたい fake だけを引数で渡す。
+func makeGenerateCoordinator(
+    exportSagaStore: FakeExportSagaStore,
+    imageEffectRenderer: FakeImageEffectRenderer = FakeImageEffectRenderer(),
+    imageEncoder: FakeImageEncoder = FakeImageEncoder(),
+    outputFileVerifier: FakeOutputFileVerifier,
+    workingSourceStore: FakeWorkingSourceStore = FakeWorkingSourceStore()
+) -> ExportCoordinator {
+    ExportCoordinator(
+        exportSagaStore: exportSagaStore,
+        workingSourceStore: workingSourceStore,
+        managedFileStore: FakeManagedFileStore(),
+        stampCatalog: FakeStampCatalog(),
+        imageEffectRenderer: imageEffectRenderer,
+        imageEncoder: imageEncoder,
+        outputFileVerifier: outputFileVerifier,
+        queue: SerialTaskQueue()
+    )
+}
+
+/// 生成の全段階を成功させる標準構成一式（large_tuple lint 回避のため struct にまとめる）。
+struct SucceedingGenerationPipeline {
+    let renderer: FakeImageEffectRenderer
+    let encoder: FakeImageEncoder
+    let verifier: FakeOutputFileVerifier
+    let rendered: RenderedImage
+    let encoded: OutputFileRef
+    let measurement: VerifiedOutputMeasurement
+}
+
+func makeSucceedingGenerationPipeline() -> SucceedingGenerationPipeline {
+    let measurement = makeVerifiedOutputMeasurement()
+    return SucceedingGenerationPipeline(
+        renderer: FakeImageEffectRenderer(),
+        encoder: FakeImageEncoder(),
+        verifier: FakeOutputFileVerifier(defaultOutcome: .success(measurement)),
+        rendered: makeRenderedImage(),
+        encoded: makeOutputFileRef(),
+        measurement: measurement
+    )
 }
 
 /// 単体トライアル可・広告表示ありの標準的な ResolvedCapabilities フィクスチャ。

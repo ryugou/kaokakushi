@@ -56,3 +56,45 @@ public struct SingleExportRequest: Sendable {
         self.expectedProjectRevision = expectedProjectRevision
     }
 }
+
+// GenerateExportInput — 生成（export-saga.md 3章 手順1〜4）開始の入力（Issue #7 Task 5）。
+//
+// 正本: export-saga.md 3章「手順」。`compileRenderDraft` / `bindRasterAssets` へ渡す値
+// （renderSpec / sourceSize / targetSize / rasterAssets）と、`ImageEffectRenderer.render` /
+// `ImageEncoder.encode` へ渡す値（imageSource / exportSetting / metadata）をまとめて持つ。
+//
+// 決定済みの設計判断（オーケストレーターの spec で確定済み。疑問視しない）:
+// - `rasterAssets` は呼び出し元が事前に `StampRasterizer.rasterize` を呼んで用意したものを渡す
+//   （ExportCoordinator は StampRasterizer に依存しない）
+
+/// 生成開始の入力。`ExportCoordinator.generateOutput(_:)` へ渡す。
+public struct GenerateExportInput: Sendable {
+    public let job: ExportJob
+    public let renderSpec: RenderSpec
+    public let exportSetting: ExportSetting
+    public let sourceSize: PixelSize
+    public let targetSize: PixelSize
+    public let imageSource: ImageSource
+    public let rasterAssets: [StampRasterKey: RasterizedStampAsset]
+    public let metadata: OutputMetadata
+
+    public init(
+        job: ExportJob,
+        renderSpec: RenderSpec,
+        exportSetting: ExportSetting,
+        sourceSize: PixelSize,
+        targetSize: PixelSize,
+        imageSource: ImageSource,
+        rasterAssets: [StampRasterKey: RasterizedStampAsset],
+        metadata: OutputMetadata
+    ) {
+        self.job = job
+        self.renderSpec = renderSpec
+        self.exportSetting = exportSetting
+        self.sourceSize = sourceSize
+        self.targetSize = targetSize
+        self.imageSource = imageSource
+        self.rasterAssets = rasterAssets
+        self.metadata = metadata
+    }
+}

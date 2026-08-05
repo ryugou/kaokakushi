@@ -116,6 +116,9 @@ private func confirmationMismatchShortCircuitsBeforeCapabilityCheckAndStore(
         workingSourceStore: workingSourceStore,
         managedFileStore: managedFileStore,
         stampCatalog: catalog,
+        imageEffectRenderer: FakeImageEffectRenderer(),
+        imageEncoder: FakeImageEncoder(),
+        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
         queue: SerialTaskQueue()
     )
 
@@ -158,6 +161,9 @@ private func renderSpecBlockedByCapabilityCheckDoesNotCallStartExport() async th
         workingSourceStore: FakeWorkingSourceStore(),
         managedFileStore: FakeManagedFileStore(),
         stampCatalog: catalog,
+        imageEffectRenderer: FakeImageEffectRenderer(),
+        imageEncoder: FakeImageEncoder(),
+        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
         queue: SerialTaskQueue()
     )
 
@@ -180,6 +186,9 @@ private func missingWorkingSourceRecordInvalidatesAndReturnsMissing() async thro
         workingSourceStore: workingSourceStore,
         managedFileStore: FakeManagedFileStore(),
         stampCatalog: FakeStampCatalog(),
+        imageEffectRenderer: FakeImageEffectRenderer(),
+        imageEncoder: FakeImageEncoder(),
+        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
         queue: SerialTaskQueue()
     )
 
@@ -211,6 +220,9 @@ private func missingWorkingSourceFileInvalidatesAndReturnsMissing() async throws
         workingSourceStore: workingSourceStore,
         managedFileStore: managedFileStore,
         stampCatalog: FakeStampCatalog(),
+        imageEffectRenderer: FakeImageEffectRenderer(),
+        imageEncoder: FakeImageEncoder(),
+        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
         queue: SerialTaskQueue()
     )
 
@@ -246,6 +258,9 @@ private func projectRevisionMismatchPropagatesToCaller() async throws {
         workingSourceStore: workingSourceStore,
         managedFileStore: managedFileStore,
         stampCatalog: FakeStampCatalog(),
+        imageEffectRenderer: FakeImageEffectRenderer(),
+        imageEncoder: FakeImageEncoder(),
+        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
         queue: SerialTaskQueue()
     )
 
@@ -283,6 +298,9 @@ private func fullyAuthorizedRequestReturnsStartedJob() async throws {
         workingSourceStore: workingSourceStore,
         managedFileStore: managedFileStore,
         stampCatalog: FakeStampCatalog(),
+        imageEffectRenderer: FakeImageEffectRenderer(),
+        imageEncoder: FakeImageEncoder(),
+        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
         queue: SerialTaskQueue()
     )
 

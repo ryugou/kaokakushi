@@ -94,6 +94,12 @@ actor FakeExportSagaStore: ExportSagaStore {
     private(set) var meteredConsumedCount = 0
     /// トライアルクレジット消費カウンタ。同上、accountingMode == .batchTrial の対象を確定した回数
     private(set) var trialCreditConsumedCount = 0
+    /// true の間、discardExport は呼び出された瞬間の `Task.isCancelled` を検査し、true なら
+    /// 何もせず `CancellationError` を throw する。実ストアがキャンセルを尊重する実装に
+    /// なった場合を模し、呼び出し元（ExportCoordinator）が後始末をキャンセル非伝播の
+    /// コンテキストで実行しているかを検証するためのフック（Issue #7 Task 5 レビュー指摘
+    /// Important 1 の回帰テスト用。既定 false では既存の振る舞いを変えない）
+    var discardExportChecksCancellation = false
 
     init(
         startExportHandler: @escaping @Sendable (StartExportInput, Int64) -> ExportStartDecision = { _, _ in
@@ -112,6 +118,7 @@ actor FakeExportSagaStore: ExportSagaStore {
     func setDiscardExportFailure(_ value: Error?) { discardExportFailure = value }
     func setLoadRunningJobsFailure(_ value: Error?) { loadRunningJobsFailure = value }
     func setDeleteRunningJobsFailure(_ value: Error?) { deleteRunningJobsFailure = value }
+    func setDiscardExportChecksCancellation(_ value: Bool) { discardExportChecksCancellation = value }
 
     /// テストが起動時復旧シナリオ等のために ExportJob を直接注入する（startExport を経由しない）
     func seedRunningJob(_ job: ExportJob) {
@@ -198,6 +205,11 @@ actor FakeExportSagaStore: ExportSagaStore {
     }
 
     func discardExport(_ exportID: ExportID, temporaryFiles: [ManagedFileRef]) async throws {
+        // 呼び出し記録より前に検査する: シールドされていない実装だと、この throw により
+        // discardExportCalls に記録すら残らない（Issue #7 Task 5 レビュー指摘 Important 1）
+        if discardExportChecksCancellation {
+            try Task.checkCancellation()
+        }
         discardExportCalls.append(FakeDiscardExportCall(exportID: exportID, temporaryFiles: temporaryFiles))
         if let failure = discardExportFailure { throw failure }
         // ExportJob 行が無ければ何もしない（temporaryFiles の登録も行わない。冪等。export-saga.md

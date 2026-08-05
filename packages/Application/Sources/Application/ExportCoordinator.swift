@@ -1,16 +1,20 @@
 import Foundation
 import Domain
 
-// ExportCoordinator — 書き出しの認可と開始（Issue #7 Task 4）。
+// ExportCoordinator — 書き出しの認可・開始・生成・中断後始末（Issue #7 Task 4 / Task 5）。
 //
-// 正本: export-saga.md 1章「認可」（1.1〜1.6）、
+// 正本: export-saga.md 1章「認可」（1.1〜1.6。Task 4）、3章「手順」・4章「中断・やり直し・
+// 破棄」（Task 5。実装は ExportCoordinator+Generate.swift）、
 // docs/superpowers/specs/2026-08-05-issue7-task4-export-coordinator.md「実装方針」。
-// 生成 `recordGeneratedOutput` 以降（Task 5 の担当）はこのファイルの対象外。
+// stored property と init はこのファイルに集約する（extension は stored property を
+// 追加できないため。Task 5 の生成 `generateOutput` / `discardExport` は
+// ExportCoordinator+Generate.swift が実装する）。
 //
 // architecture.md 4.2「actor であることを排他の根拠にしない」ため、状態変更を伴う区間
-// （実体欠損時の invalidateWorkingSource 呼び出し、および startExport 呼び出し）は
-// SerialTaskQueue 経由で直列化する。1.1 の一致検査・1.2 の能力検査はどの store にも
-// 触れないため queue の外で評価する。
+// （実体欠損時の invalidateWorkingSource 呼び出し、startExport 呼び出し、および
+// ExportCoordinator+Generate.swift の generateOutput / discardExport）は SerialTaskQueue
+// 経由で直列化する。1.1 の一致検査・1.2 の能力検査はどの store にも触れないため queue の
+// 外で評価する。
 
 /// `startExport` の判定結果（export-saga.md 1章、上記スペック「実装方針」3）。
 public enum ExportStartOutcome: Sendable {
@@ -22,23 +26,32 @@ public enum ExportStartOutcome: Sendable {
 }
 
 public actor ExportCoordinator {
-    private let exportSagaStore: ExportSagaStore
+    let exportSagaStore: ExportSagaStore
     private let workingSourceStore: WorkingSourceStore
     private let managedFileStore: ManagedFileStore
     private let stampCatalog: StampCatalog
-    private let queue: SerialTaskQueue
+    let imageEffectRenderer: ImageEffectRenderer
+    let imageEncoder: ImageEncoder
+    let outputFileVerifier: OutputFileVerifier
+    let queue: SerialTaskQueue
 
     public init(
         exportSagaStore: ExportSagaStore,
         workingSourceStore: WorkingSourceStore,
         managedFileStore: ManagedFileStore,
         stampCatalog: StampCatalog,
+        imageEffectRenderer: ImageEffectRenderer,
+        imageEncoder: ImageEncoder,
+        outputFileVerifier: OutputFileVerifier,
         queue: SerialTaskQueue
     ) {
         self.exportSagaStore = exportSagaStore
         self.workingSourceStore = workingSourceStore
         self.managedFileStore = managedFileStore
         self.stampCatalog = stampCatalog
+        self.imageEffectRenderer = imageEffectRenderer
+        self.imageEncoder = imageEncoder
+        self.outputFileVerifier = outputFileVerifier
         self.queue = queue
     }
 

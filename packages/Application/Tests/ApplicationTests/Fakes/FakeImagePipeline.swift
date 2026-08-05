@@ -44,6 +44,13 @@ actor FakeImageEffectRenderer: ImageEffectRenderer {
     private(set) var calls: [FakeRenderCall] = []
     var failure: Error?
     var result: RenderedImage?
+    /// 直列化検証用の遅延注入（Issue #7 Task 5「ExportCoordinator.generateOutput が
+    /// SerialTaskQueue 経由で直列化されること」の検証で、同時実行の観測窓を作るために使う。
+    /// 未設定なら遅延なし（既存の振る舞いを変えない）
+    var delayNanoseconds: UInt64?
+    /// render 呼び出しの同時実行数。SerialTaskQueue が正しく機能していれば常に 1 のままになる
+    private var activeCallCount = 0
+    private(set) var maxObservedConcurrency = 0
 
     init() {}
 
@@ -51,6 +58,7 @@ actor FakeImageEffectRenderer: ImageEffectRenderer {
 
     func setFailure(_ value: Error?) { failure = value }
     func setResult(_ value: RenderedImage?) { result = value }
+    func setDelayNanoseconds(_ value: UInt64?) { delayNanoseconds = value }
 
     func render(
         source: ImageSource,
@@ -58,6 +66,12 @@ actor FakeImageEffectRenderer: ImageEffectRenderer {
         rasterAssets: [String: RasterizedStampAsset]
     ) async throws -> RenderedImage {
         calls.append(FakeRenderCall(source: source, plan: plan, rasterAssets: rasterAssets))
+        activeCallCount += 1
+        maxObservedConcurrency = max(maxObservedConcurrency, activeCallCount)
+        defer { activeCallCount -= 1 }
+        if let delayNanoseconds {
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
+        }
         if let failure { throw failure }
         guard let result else {
             throw FakeNotConfiguredError(fakeTypeName: "FakeImageEffectRenderer", methodName: "render")
