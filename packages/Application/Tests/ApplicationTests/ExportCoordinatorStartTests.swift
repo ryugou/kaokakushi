@@ -45,6 +45,28 @@ private func startedJob(_ outcome: ExportStartOutcome) -> ExportJob? {
     return nil
 }
 
+/// 標準構成の ExportCoordinator を組み立てる（ファイル行数制約〈Global Constraints〉のため、
+/// 各テストで異なる差し替え対象だけを引数化する。Fakes/*.swift 以外の依存は既定値で足りる）。
+private func makeCoordinator(
+    exportSagaStore: ExportSagaStore,
+    workingSourceStore: WorkingSourceStore = FakeWorkingSourceStore(),
+    managedFileStore: ManagedFileStore = FakeManagedFileStore(),
+    stampCatalog: StampCatalog = FakeStampCatalog()
+) -> ExportCoordinator {
+    ExportCoordinator(
+        exportSagaStore: exportSagaStore,
+        workingSourceStore: workingSourceStore,
+        managedFileStore: managedFileStore,
+        stampCatalog: stampCatalog,
+        imageEffectRenderer: FakeImageEffectRenderer(),
+        imageEncoder: FakeImageEncoder(),
+        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
+        outputDeliveryStore: FakeOutputDeliveryStore(now: makeFixedClock()),
+        now: makeFixedClock(),
+        queue: SerialTaskQueue()
+    )
+}
+
 /// processingTemporary 種別の WorkingSourceFileRef フィクスチャ。
 private func makeWorkingSourceFileRef() throws -> WorkingSourceFileRef {
     let ref = ManagedFileRef(kind: .processingTemporary, fileID: ManagedFileID(rawValue: UUID()))
@@ -111,15 +133,11 @@ private func confirmationMismatchShortCircuitsBeforeCapabilityCheckAndStore(
     let exportSagaStore = FakeExportSagaStore()
     let workingSourceStore = FakeWorkingSourceStore()
     let managedFileStore = FakeManagedFileStore()
-    let coordinator = ExportCoordinator(
+    let coordinator = makeCoordinator(
         exportSagaStore: exportSagaStore,
         workingSourceStore: workingSourceStore,
         managedFileStore: managedFileStore,
-        stampCatalog: catalog,
-        imageEffectRenderer: FakeImageEffectRenderer(),
-        imageEncoder: FakeImageEncoder(),
-        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
-        queue: SerialTaskQueue()
+        stampCatalog: catalog
     )
 
     let outcome = try await coordinator.startExport(request, capabilities: capabilities)
@@ -156,16 +174,7 @@ private func renderSpecBlockedByCapabilityCheckDoesNotCallStartExport() async th
     )
 
     let exportSagaStore = FakeExportSagaStore()
-    let coordinator = ExportCoordinator(
-        exportSagaStore: exportSagaStore,
-        workingSourceStore: FakeWorkingSourceStore(),
-        managedFileStore: FakeManagedFileStore(),
-        stampCatalog: catalog,
-        imageEffectRenderer: FakeImageEffectRenderer(),
-        imageEncoder: FakeImageEncoder(),
-        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
-        queue: SerialTaskQueue()
-    )
+    let coordinator = makeCoordinator(exportSagaStore: exportSagaStore, stampCatalog: catalog)
 
     let outcome = try await coordinator.startExport(request, capabilities: capabilities)
 
@@ -181,16 +190,7 @@ private func missingWorkingSourceRecordInvalidatesAndReturnsMissing() async thro
     let (request, capabilities) = try makeFullyConsistentRequest()
     let exportSagaStore = FakeExportSagaStore()
     let workingSourceStore = FakeWorkingSourceStore() // 何も seed しない → レコードが無い
-    let coordinator = ExportCoordinator(
-        exportSagaStore: exportSagaStore,
-        workingSourceStore: workingSourceStore,
-        managedFileStore: FakeManagedFileStore(),
-        stampCatalog: FakeStampCatalog(),
-        imageEffectRenderer: FakeImageEffectRenderer(),
-        imageEncoder: FakeImageEncoder(),
-        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
-        queue: SerialTaskQueue()
-    )
+    let coordinator = makeCoordinator(exportSagaStore: exportSagaStore, workingSourceStore: workingSourceStore)
 
     let outcome = try await coordinator.startExport(request, capabilities: capabilities)
 
@@ -215,15 +215,8 @@ private func missingWorkingSourceFileInvalidatesAndReturnsMissing() async throws
     )
     let managedFileStore = FakeManagedFileStore() // ref を seed しない → 実体欠損
     let exportSagaStore = FakeExportSagaStore()
-    let coordinator = ExportCoordinator(
-        exportSagaStore: exportSagaStore,
-        workingSourceStore: workingSourceStore,
-        managedFileStore: managedFileStore,
-        stampCatalog: FakeStampCatalog(),
-        imageEffectRenderer: FakeImageEffectRenderer(),
-        imageEncoder: FakeImageEncoder(),
-        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
-        queue: SerialTaskQueue()
+    let coordinator = makeCoordinator(
+        exportSagaStore: exportSagaStore, workingSourceStore: workingSourceStore, managedFileStore: managedFileStore
     )
 
     let outcome = try await coordinator.startExport(request, capabilities: capabilities)
@@ -253,15 +246,10 @@ private func projectRevisionMismatchPropagatesToCaller() async throws {
     )
     let managedFileStore = FakeManagedFileStore()
     await managedFileStore.seedExistingFile(sourceFileRef.ref)
-    let coordinator = ExportCoordinator(
+    let coordinator = makeCoordinator(
         exportSagaStore: FakeExportSagaStore(),
         workingSourceStore: workingSourceStore,
-        managedFileStore: managedFileStore,
-        stampCatalog: FakeStampCatalog(),
-        imageEffectRenderer: FakeImageEffectRenderer(),
-        imageEncoder: FakeImageEncoder(),
-        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
-        queue: SerialTaskQueue()
+        managedFileStore: managedFileStore
     )
 
     // FakeExportSagaStore は projectRevisions 未設定の projectID を revision 0 として扱う
@@ -293,15 +281,8 @@ private func fullyAuthorizedRequestReturnsStartedJob() async throws {
     let expectedJob = makeExportJob(exportID: exportID, projectID: request.projectID)
     let exportSagaStore = FakeExportSagaStore(startExportHandler: { _, _ in .authorized(expectedJob) })
 
-    let coordinator = ExportCoordinator(
-        exportSagaStore: exportSagaStore,
-        workingSourceStore: workingSourceStore,
-        managedFileStore: managedFileStore,
-        stampCatalog: FakeStampCatalog(),
-        imageEffectRenderer: FakeImageEffectRenderer(),
-        imageEncoder: FakeImageEncoder(),
-        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
-        queue: SerialTaskQueue()
+    let coordinator = makeCoordinator(
+        exportSagaStore: exportSagaStore, workingSourceStore: workingSourceStore, managedFileStore: managedFileStore
     )
 
     let outcome = try await coordinator.startExport(request, capabilities: capabilities)
@@ -331,15 +312,10 @@ private func existsFailurePropagatesWithoutInvalidatingOrMissing() async throws 
     )
     let managedFileStore = FakeManagedFileStore()
     await managedFileStore.setExistsFailure(ExistsBoom())
-    let coordinator = ExportCoordinator(
+    let coordinator = makeCoordinator(
         exportSagaStore: FakeExportSagaStore(),
         workingSourceStore: workingSourceStore,
-        managedFileStore: managedFileStore,
-        stampCatalog: FakeStampCatalog(),
-        imageEffectRenderer: FakeImageEffectRenderer(),
-        imageEncoder: FakeImageEncoder(),
-        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
-        queue: SerialTaskQueue()
+        managedFileStore: managedFileStore
     )
 
     await #expect(throws: ExistsBoom.self) {
@@ -355,16 +331,7 @@ private func loadWorkingSourceFailurePropagatesToCaller() async throws {
     let (request, capabilities) = try makeFullyConsistentRequest()
     let workingSourceStore = FakeWorkingSourceStore()
     await workingSourceStore.setLoadWorkingSourceFailure(LoadWorkingSourceBoom())
-    let coordinator = ExportCoordinator(
-        exportSagaStore: FakeExportSagaStore(),
-        workingSourceStore: workingSourceStore,
-        managedFileStore: FakeManagedFileStore(),
-        stampCatalog: FakeStampCatalog(),
-        imageEffectRenderer: FakeImageEffectRenderer(),
-        imageEncoder: FakeImageEncoder(),
-        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
-        queue: SerialTaskQueue()
-    )
+    let coordinator = makeCoordinator(exportSagaStore: FakeExportSagaStore(), workingSourceStore: workingSourceStore)
 
     await #expect(throws: LoadWorkingSourceBoom.self) {
         _ = try await coordinator.startExport(request, capabilities: capabilities)
@@ -377,16 +344,7 @@ private func invalidateWorkingSourceFailurePropagatesToCaller() async throws {
     let (request, capabilities) = try makeFullyConsistentRequest()
     let workingSourceStore = FakeWorkingSourceStore() // 何も seed しない → レコードが無い（欠損経路）
     await workingSourceStore.setInvalidateWorkingSourceFailure(InvalidateBoom())
-    let coordinator = ExportCoordinator(
-        exportSagaStore: FakeExportSagaStore(),
-        workingSourceStore: workingSourceStore,
-        managedFileStore: FakeManagedFileStore(),
-        stampCatalog: FakeStampCatalog(),
-        imageEffectRenderer: FakeImageEffectRenderer(),
-        imageEncoder: FakeImageEncoder(),
-        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
-        queue: SerialTaskQueue()
-    )
+    let coordinator = makeCoordinator(exportSagaStore: FakeExportSagaStore(), workingSourceStore: workingSourceStore)
 
     await #expect(throws: InvalidateBoom.self) {
         _ = try await coordinator.startExport(request, capabilities: capabilities)

@@ -1,20 +1,23 @@
 import Foundation
 import Domain
 
-// ExportCoordinator — 書き出しの認可・開始・生成・中断後始末（Issue #7 Task 4 / Task 5）。
+// ExportCoordinator — 書き出しの認可・開始・生成・中断後始末・完了操作(Issue #7 Task 4 / 5 / 6)。
 //
 // 正本: export-saga.md 1章「認可」（1.1〜1.6。Task 4）、3章「手順」・4章「中断・やり直し・
-// 破棄」（Task 5。実装は ExportCoordinator+Generate.swift）、
+// 破棄」（Task 5。実装は ExportCoordinator+Generate.swift）、3章 手順5・6章「確定後に出力
+// 実体が失われた場合」（Task 6。実装は ExportCoordinator+Settle.swift）、
 // docs/superpowers/specs/2026-08-05-issue7-task4-export-coordinator.md「実装方針」。
 // stored property と init はこのファイルに集約する（extension は stored property を
 // 追加できないため。Task 5 の生成 `generateOutput` / `discardExport` は
-// ExportCoordinator+Generate.swift が実装する）。
+// ExportCoordinator+Generate.swift、Task 6 の `settleExport` / `settleBatch` /
+// `verifyOutputIntegrity` は ExportCoordinator+Settle.swift が実装する）。
 //
 // architecture.md 4.2「actor であることを排他の根拠にしない」ため、状態変更を伴う区間
-// （実体欠損時の invalidateWorkingSource 呼び出し、startExport 呼び出し、および
-// ExportCoordinator+Generate.swift の generateOutput / discardExport）は SerialTaskQueue
-// 経由で直列化する。1.1 の一致検査・1.2 の能力検査はどの store にも触れないため queue の
-// 外で評価する。
+// （実体欠損時の invalidateWorkingSource 呼び出し、startExport 呼び出し、
+// ExportCoordinator+Generate.swift の generateOutput / discardExport、
+// ExportCoordinator+Settle.swift の settleExport / settleBatch / 実体喪失時の deleteOutput）は
+// SerialTaskQueue 経由で直列化する。1.1 の一致検査・1.2 の能力検査・実体喪失検査の
+// OutputFileVerifier 呼び出し（読み取りのみ）は store に触れないため queue の外で評価する。
 
 /// `startExport` の判定結果（export-saga.md 1章、上記スペック「実装方針」3）。
 public enum ExportStartOutcome: Sendable {
@@ -33,6 +36,10 @@ public actor ExportCoordinator {
     let imageEffectRenderer: ImageEffectRenderer
     let imageEncoder: ImageEncoder
     let outputFileVerifier: OutputFileVerifier
+    let outputDeliveryStore: OutputDeliveryStore
+    /// settleBatch へ渡す settledAt の取得元（Global Constraints「裸の Date() 禁止」）。
+    /// export-saga.md 3章「settledAt は呼び出し側が渡した時刻で全件に統一する」。
+    let now: @Sendable () -> Date
     let queue: SerialTaskQueue
 
     public init(
@@ -43,6 +50,8 @@ public actor ExportCoordinator {
         imageEffectRenderer: ImageEffectRenderer,
         imageEncoder: ImageEncoder,
         outputFileVerifier: OutputFileVerifier,
+        outputDeliveryStore: OutputDeliveryStore,
+        now: @escaping @Sendable () -> Date,
         queue: SerialTaskQueue
     ) {
         self.exportSagaStore = exportSagaStore
@@ -52,6 +61,8 @@ public actor ExportCoordinator {
         self.imageEffectRenderer = imageEffectRenderer
         self.imageEncoder = imageEncoder
         self.outputFileVerifier = outputFileVerifier
+        self.outputDeliveryStore = outputDeliveryStore
+        self.now = now
         self.queue = queue
     }
 

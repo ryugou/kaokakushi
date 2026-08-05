@@ -201,6 +201,11 @@ func makeGenerateExportInput(job: ExportJob) throws -> GenerateExportInput {
     )
 }
 
+/// 固定時刻を返すクロック（裸の Date() 禁止。ExportCoordinator.now 注入用の既定フィクスチャ）。
+func makeFixedClock(_ date: Date = Date(timeIntervalSince1970: 1_700_000_000)) -> @Sendable () -> Date {
+    { date }
+}
+
 /// 標準構成の ExportCoordinator を組み立てる（Issue #7 Task 5「生成」テストの複数ファイルで
 /// 共有するため TestSupport.swift へ集約する）。個別に差し替えたい fake だけを引数で渡す。
 func makeGenerateCoordinator(
@@ -208,7 +213,8 @@ func makeGenerateCoordinator(
     imageEffectRenderer: FakeImageEffectRenderer = FakeImageEffectRenderer(),
     imageEncoder: FakeImageEncoder = FakeImageEncoder(),
     outputFileVerifier: FakeOutputFileVerifier,
-    workingSourceStore: FakeWorkingSourceStore = FakeWorkingSourceStore()
+    workingSourceStore: FakeWorkingSourceStore = FakeWorkingSourceStore(),
+    outputDeliveryStore: FakeOutputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock())
 ) -> ExportCoordinator {
     ExportCoordinator(
         exportSagaStore: exportSagaStore,
@@ -218,6 +224,8 @@ func makeGenerateCoordinator(
         imageEffectRenderer: imageEffectRenderer,
         imageEncoder: imageEncoder,
         outputFileVerifier: outputFileVerifier,
+        outputDeliveryStore: outputDeliveryStore,
+        now: makeFixedClock(),
         queue: SerialTaskQueue()
     )
 }

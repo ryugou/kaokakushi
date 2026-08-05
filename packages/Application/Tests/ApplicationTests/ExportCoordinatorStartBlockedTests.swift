@@ -48,6 +48,8 @@ private func accountingBlockedMapsToOutcomeWithoutCreatingJob() async throws {
         imageEffectRenderer: FakeImageEffectRenderer(),
         imageEncoder: FakeImageEncoder(),
         outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
+        outputDeliveryStore: FakeOutputDeliveryStore(now: makeFixedClock()),
+        now: makeFixedClock(),
         queue: SerialTaskQueue()
     )
 
