@@ -3,34 +3,32 @@ import Testing
 import Domain
 @testable import Application
 
-// ExportCoordinator.startBatchItem（Issue #7 Task 7「バッチ進行」）。
+// ExportCoordinator.startBatchItem（Issue #7 Task 7「バッチ進行」+ 追補: batch-progression spec）。
 //
 // 正本: export-saga.md 1.1（バッチの開始条件: BatchReviewState と モード別条件）・
 // 1.5（開始後の権限変化: 開始済みは開始時の権限で完了、未認可は開始せず paused）、
-// test-plan.md 3.1 のバッチ項目。
+// architecture.md 6.4「一枚の失敗でバッチ全体を停止しない」、test-plan.md 2.4 / 3.1。
 //
 // startBatchItem 自身は1写真分の認可・開始のみを担う（ExportCoordinator+Batch.swift 冒頭
-// コメント参照）。「バッチ進行」は呼び出し元が写真を順番に呼び、.started 以外を受け取った
+// コメント参照）。「バッチ進行」は呼び出し元が写真を順番に呼び、`batchPaused` を受け取った
 // 時点で残りの waiting を呼ばないことで実現されるため、そのループを模してテストする。
+// itemFailed / itemPaused / confirmationMismatch が次の写真の開始を妨げないことの検証は
+// ファイル行数制約（Global Constraints）のため ExportCoordinatorBatchProgressionTests.swift
+// に分離する（ExportCoordinatorStartTests.swift / StartBlockedTests.swift と同じ方針）。
 
-// MARK: - ExportStartOutcome の判別ヘルパー（StartTests.swift と同じ方針）
+// MARK: - BatchItemStartOutcome の判別ヘルパー（StartTests.swift と同じ方針）
 
-private func isConfirmationMismatch(_ outcome: ExportStartOutcome) -> Bool {
+private func isConfirmationMismatch(_ outcome: BatchItemStartOutcome) -> Bool {
     if case .confirmationMismatch = outcome { return true }
     return false
 }
 
-private func renderSpecBlockReason(_ outcome: ExportStartOutcome) -> RenderSpecBlockReason? {
-    if case .renderSpecBlocked(let reason) = outcome { return reason }
+private func blockReason(_ outcome: BatchItemStartOutcome) -> ExportStartBlockReason? {
+    if case .batchPaused(let block) = outcome { return block.reason }
     return nil
 }
 
-private func blockReason(_ outcome: ExportStartOutcome) -> ExportStartBlockReason? {
-    if case .blocked(let block) = outcome { return block.reason }
-    return nil
-}
-
-private func startedJob(_ outcome: ExportStartOutcome) -> ExportJob? {
+private func startedJob(_ outcome: BatchItemStartOutcome) -> ExportJob? {
     if case .started(let job) = outcome { return job }
     return nil
 }
@@ -203,35 +201,9 @@ private func batchReviewStateBatchIDMismatchBlocksRegardlessOfMode() async throw
 }
 
 // MARK: - 1.2 能力検査・batchID / queueItemID の受け渡し
-
-@Test("1.2能力検査がblockedならrenderSpecBlockedを返しstartExportは呼ばれない")
-private func capabilityBlockedDoesNotCallStartExport() async throws {
-    let batchID = makeBatchID()
-    let renderSpec = try makeRenderSpec(regions: [try makeBuiltInStampRegion(code: "seasonal-cat")])
-    let item = try makeBatchItem(batchID: batchID, mode: .overview, overviewConfirmed: true, renderSpec: renderSpec)
-    let catalog = FakeStampCatalog(requirementsByCode: ["seasonal-cat": .premium(packID: "seasonal")])
-    let exportSagaStore = FakeExportSagaStore()
-    let coordinator = ExportCoordinator(
-        exportSagaStore: exportSagaStore,
-        workingSourceStore: FakeWorkingSourceStore(),
-        managedFileStore: FakeManagedFileStore(),
-        stampCatalog: catalog,
-        imageEffectRenderer: FakeImageEffectRenderer(),
-        imageEncoder: FakeImageEncoder(),
-        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
-        outputDeliveryStore: FakeOutputDeliveryStore(now: makeFixedClock()),
-        now: makeFixedClock(),
-        queue: SerialTaskQueue()
-    )
-
-    let outcome = try await coordinator.startBatchItem(
-        item, capabilities: makeResolvedCapabilities(canUsePremiumStamps: false)
-    )
-
-    #expect(renderSpecBlockReason(outcome) == .premiumStampNotAvailable)
-    let startExportCalls = await exportSagaStore.startExportCalls
-    #expect(startExportCalls.isEmpty)
-}
+//
+// itemFailed / itemPaused / confirmationMismatch がバッチを止めないことの検証は
+// ExportCoordinatorBatchProgressionTests.swift に分離する（ファイル行数制約）。
 
 @Test("全条件が成立する場合、StartExportInputへbatchIDとqueueItemIDが渡りExportJobを挿入する")
 private func fullyAuthorizedBatchItemPassesBatchIDAndQueueItemID() async throws {
