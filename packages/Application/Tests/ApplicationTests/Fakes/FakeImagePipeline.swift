@@ -47,6 +47,11 @@ actor FakeImageEffectRenderer: ImageEffectRenderer {
 
     init() {}
 
+    // MARK: - 失敗・結果注入セッター（actor 隔離のため外部から直接代入できない。Issue #7 Task 4 準備）
+
+    func setFailure(_ value: Error?) { failure = value }
+    func setResult(_ value: RenderedImage?) { result = value }
+
     func render(
         source: ImageSource,
         plan: RenderPlan,
@@ -76,6 +81,11 @@ actor FakeImageEncoder: ImageEncoder {
     var result: OutputFileRef?
 
     init() {}
+
+    // MARK: - 失敗・結果注入セッター（actor 隔離のため外部から直接代入できない。Issue #7 Task 4 準備）
+
+    func setFailure(_ value: Error?) { failure = value }
+    func setResult(_ value: OutputFileRef?) { result = value }
 
     func encode(
         _ image: RenderedImage,
@@ -114,6 +124,11 @@ actor FakeOutputFileVerifier: OutputFileVerifier {
         self.defaultOutcome = defaultOutcome
     }
 
+    // MARK: - 結果注入セッター（actor 隔離のため外部から直接代入できない。Issue #7 Task 4 準備）
+
+    func setOutcomes(_ value: [OutputFileRef: Outcome]) { outcomes = value }
+    func setDefaultOutcome(_ value: Outcome) { defaultOutcome = value }
+
     func verify(_ file: OutputFileRef) async throws(OutputFileVerificationError) -> VerifiedOutputMeasurement {
         calls.append(file)
         switch outcomes[file] ?? defaultOutcome {
@@ -134,6 +149,11 @@ actor FakeStampRasterizer: StampRasterizer {
 
     init() {}
 
+    // MARK: - 失敗・結果注入セッター（actor 隔離のため外部から直接代入できない。Issue #7 Task 4 準備）
+
+    func setFailure(_ value: Error?) { failure = value }
+    func setResult(_ value: [StampRasterKey: RasterizedStampAsset]?) { result = value }
+
     func rasterize(_ keys: Set<StampRasterKey>) async throws -> [StampRasterKey: RasterizedStampAsset] {
         calls.append(keys)
         if let failure { throw failure }
@@ -153,6 +173,10 @@ actor FakeMediaSaver: MediaSaver {
     var failure: Error?
 
     init() {}
+
+    // MARK: - 失敗注入セッター（actor 隔離のため外部から直接代入できない。Issue #7 Task 4 準備）
+
+    func setFailure(_ value: Error?) { failure = value }
 
     func saveToPhotoLibrary(_ file: OutputFile) async throws {
         calls.append(file)

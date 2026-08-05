@@ -59,6 +59,17 @@ actor FakeOutputDeliveryStore: OutputDeliveryStore {
         self.now = now
     }
 
+    // MARK: - 失敗注入セッター（actor 隔離のため外部から直接代入できない。Issue #7 Task 4 準備）
+
+    func setBeginDeliveryAttemptFailure(_ value: Error?) { beginDeliveryAttemptFailure = value }
+    func setCompleteLibrarySaveFailure(_ value: Error?) { completeLibrarySaveFailure = value }
+    func setCompleteShareFailure(_ value: Error?) { completeShareFailure = value }
+    func setAbandonDeliveryAttemptFailure(_ value: Error?) { abandonDeliveryAttemptFailure = value }
+    func setResolveOrphanedAttemptsFailure(_ value: Error?) { resolveOrphanedAttemptsFailure = value }
+    func setLoadUnknownLibrarySavesFailure(_ value: Error?) { loadUnknownLibrarySavesFailure = value }
+    func setClearUnknownLibrarySaveFailure(_ value: Error?) { clearUnknownLibrarySaveFailure = value }
+    func setDeleteOutputFailure(_ value: Error?) { deleteOutputFailure = value }
+
     /// テストが任意状態の OutputRecord を注入する（settledAt の有無・state を含めて呼び出し側が決める）
     func seedOutput(_ record: OutputRecord) {
         outputs[record.exportID] = record

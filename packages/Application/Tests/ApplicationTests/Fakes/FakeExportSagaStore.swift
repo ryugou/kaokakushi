@@ -103,6 +103,16 @@ actor FakeExportSagaStore: ExportSagaStore {
         self.startExportHandler = startExportHandler
     }
 
+    // MARK: - 失敗注入セッター（actor 隔離のため外部から直接代入できない。Issue #7 Task 4 準備）
+
+    func setStartExportFailure(_ value: Error?) { startExportFailure = value }
+    func setRecordGeneratedOutputFailure(_ value: Error?) { recordGeneratedOutputFailure = value }
+    func setSettleExportFailure(_ value: Error?) { settleExportFailure = value }
+    func setSettleBatchFailure(_ value: Error?) { settleBatchFailure = value }
+    func setDiscardExportFailure(_ value: Error?) { discardExportFailure = value }
+    func setLoadRunningJobsFailure(_ value: Error?) { loadRunningJobsFailure = value }
+    func setDeleteRunningJobsFailure(_ value: Error?) { deleteRunningJobsFailure = value }
+
     /// テストが起動時復旧シナリオ等のために ExportJob を直接注入する（startExport を経由しない）
     func seedRunningJob(_ job: ExportJob) {
         runningJobs[job.exportID] = job

@@ -89,3 +89,65 @@ func makeRecordOutputInput(exportID: ExportID) -> RecordOutputInput {
         outputSHA256: Data(repeating: 0xAB, count: 32)
     )
 }
+
+/// left=0,top=0,right=1,bottom=1 の正規化矩形（`RenderSpec.sourceCrop` 等の既定値として使う）。
+func makeNormalizedRect(
+    left: Double = 0,
+    top: Double = 0,
+    rightExclusive: Double = 1,
+    bottomExclusive: Double = 1
+) throws -> NormalizedRect {
+    try NormalizedRect(left: left, top: top, rightExclusive: rightExclusive, bottomExclusive: bottomExclusive)
+}
+
+/// regions を省略すると能力を必要としない最小構成になる（authorizeRenderSpec が常に
+/// .authorized を返す。Issue #7 Task 4 の 1.1/1.2 検査テストで多用する）。
+func makeRenderSpec(regions: [RenderRegionSpec] = []) throws -> RenderSpec {
+    RenderSpec(sourceCrop: try makeNormalizedRect(), scaleMode: .fit, background: .none, regions: regions)
+}
+
+/// 組み込みスタンプ1件だけを使う RenderRegionSpec フィクスチャ（authorizeRenderSpec の
+/// 能力検査を実際に経由させたいテスト用）。
+func makeBuiltInStampRegion(code: String) throws -> RenderRegionSpec {
+    RenderRegionSpec(
+        bounds: try makeNormalizedRect(),
+        rotationDegrees: try RotationDegrees(0),
+        shape: .ellipse,
+        featherRatio: try FeatherRatio(0),
+        origin: .auto,
+        op: .stamp(source: .builtIn(code: code), opacity: try EffectOpacity(1.0))
+    )
+}
+
+func makeExportSetting() -> ExportSetting {
+    ExportSetting(
+        outputAspect: .original,
+        outputFormat: .jpeg,
+        compressionQuality: 0.9,
+        metadataPolicy: MetadataPolicy(
+            removeLocation: true, removeDeviceInfo: true, removeSoftwareInfo: true, keepCaptureDate: true
+        )
+    )
+}
+
+/// 32 バイト固定の PreviewRenderHash フィクスチャ。fillByte を変えると別ハッシュになる
+/// （1.1 の不一致ケースを組み立てるのに使う）。
+func makePreviewRenderHash(fillByte: UInt8 = 0xCD) throws -> PreviewRenderHash {
+    try PreviewRenderHash(bytes: Data(repeating: fillByte, count: 32))
+}
+
+/// 単体トライアル可・広告表示ありの標準的な ResolvedCapabilities フィクスチャ。
+func makeResolvedCapabilities(
+    canUsePremiumStamps: Bool = true,
+    canUseCustomStamps: Bool = true
+) -> ResolvedCapabilities {
+    ResolvedCapabilities(
+        singleExportAccess: .metered,
+        canUsePremiumStamps: canUsePremiumStamps,
+        canUseCustomStamps: canUseCustomStamps,
+        enabledStampPacks: [],
+        canUseProBatch: false,
+        canUseBatchTrial: true,
+        shouldShowAds: true
+    )
+}

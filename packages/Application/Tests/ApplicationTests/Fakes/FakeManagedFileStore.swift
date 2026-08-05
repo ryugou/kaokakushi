@@ -40,6 +40,12 @@ actor FakeManagedFileStore: ManagedFileStore {
         self.existingFiles = existingFiles
     }
 
+    // MARK: - 失敗注入セッター（actor 隔離のため外部から直接代入できない。Issue #7 Task 4 準備）
+
+    func setWithReadAccessFailure(_ value: Error?) { withReadAccessFailure = value }
+    func setCreateFileFailure(_ value: Error?) { createFileFailure = value }
+    func setDeleteFailure(_ value: Error?) { deleteFailure = value }
+
     /// テストが実体確認の成功系シナリオ用に存在を注入する
     func seedExistingFile(_ ref: ManagedFileRef) {
         existingFiles.insert(ref)

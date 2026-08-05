@@ -36,6 +36,15 @@ actor FakeWorkingSourceStore: WorkingSourceStore {
 
     init() {}
 
+    // MARK: - 失敗注入セッター（actor 隔離のため外部から直接代入できない。Issue #7 Task 4 準備）
+
+    func setCreateProjectWithWorkingSourceFailure(_ value: Error?) { createProjectWithWorkingSourceFailure = value }
+    func setReplaceWorkingSourceFailure(_ value: Error?) { replaceWorkingSourceFailure = value }
+    func setAttachToExistingProjectFailure(_ value: Error?) { attachToExistingProjectFailure = value }
+    func setLoadWorkingSourceFailure(_ value: Error?) { loadWorkingSourceFailure = value }
+    func setDeleteWorkingSourceFailure(_ value: Error?) { deleteWorkingSourceFailure = value }
+    func setInvalidateWorkingSourceFailure(_ value: Error?) { invalidateWorkingSourceFailure = value }
+
     /// テストが再選択・履歴再接続前提のシナリオ用に直接注入する
     func seedWorkingSource(_ record: WorkingSourceRecord) {
         records[record.projectID] = record
