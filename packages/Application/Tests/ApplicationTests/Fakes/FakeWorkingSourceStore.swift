@@ -13,7 +13,7 @@ public actor FakeWorkingSourceStore: WorkingSourceStore {
 
     public private(set) var createProjectWithWorkingSourceCalls: [CreateWorkingSourceInput] = []
     public private(set) var replaceWorkingSourceCalls: [ReplaceWorkingSourceInput] = []
-    public private(set) var attachWorkingSourceToExistingProjectCalls: [AttachWorkingSourceInput] = []
+    public private(set) var attachToExistingProjectCalls: [AttachWorkingSourceInput] = []
     public private(set) var loadWorkingSourceCalls: [ProjectID] = []
     public private(set) var deleteWorkingSourceCalls: [ProjectID] = []
     public private(set) var invalidateWorkingSourceCalls: [ProjectID] = []
@@ -22,7 +22,7 @@ public actor FakeWorkingSourceStore: WorkingSourceStore {
 
     public var createProjectWithWorkingSourceFailure: Error?
     public var replaceWorkingSourceFailure: Error?
-    public var attachWorkingSourceToExistingProjectFailure: Error?
+    public var attachToExistingProjectFailure: Error?
     public var loadWorkingSourceFailure: Error?
     public var deleteWorkingSourceFailure: Error?
     public var invalidateWorkingSourceFailure: Error?
@@ -57,8 +57,8 @@ public actor FakeWorkingSourceStore: WorkingSourceStore {
     }
 
     public func attachWorkingSourceToExistingProject(_ input: AttachWorkingSourceInput) async throws {
-        attachWorkingSourceToExistingProjectCalls.append(input)
-        if let failure = attachWorkingSourceToExistingProjectFailure { throw failure }
+        attachToExistingProjectCalls.append(input)
+        if let failure = attachToExistingProjectFailure { throw failure }
         records[input.projectID] = WorkingSourceRecord(
             projectID: input.projectID, sourceFile: input.sourceFile, createdAt: input.attachedAt
         )

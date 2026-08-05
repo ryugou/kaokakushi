@@ -248,7 +248,7 @@ private actor FakeOutputFileVerifier: OutputFileVerifier {
 
     init(result: VerifiedOutputMeasurement) { self.result = result }
 
-    func verify(_ file: OutputFileRef) async throws -> VerifiedOutputMeasurement {
+    func verify(_ file: OutputFileRef) async throws(OutputFileVerificationError) -> VerifiedOutputMeasurement {
         verifyCalls.append(file)
         return result
     }

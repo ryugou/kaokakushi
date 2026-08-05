@@ -25,13 +25,28 @@ public actor SerialTaskQueue {
     /// この呼び出し自身の `op` が throw した場合は、そのエラーをそのまま呼び出し元へ伝える。
     ///
     /// キャンセルチェック（architecture.md 4.2 の「キュー投入前」「取り出して処理を開始する直前」の
-    /// 2 箇所）はこの関数の責務ではない。呼び出し側（Application の各 Coordinator）が、
-    /// 投入前の判断と `op` 冒頭での `Task.checkCancellation()` を担う。
+    /// 2 箇所）はこの関数自身が担う。`op` は非構造化 `Task`（`current`）の中で実行されるため
+    /// 呼び出し元のキャンセルを自動では継承しない。そこで `withTaskCancellationHandler` を使い、
+    /// 呼び出し元（`run` を `await` しているタスク）がキャンセルされたら `current.cancel()` で
+    /// `current` 側へ明示的に伝播させる:
+    /// - まだキューに投入していない時点でキャンセルされていれば、投入前の
+    ///   `Task.checkCancellation()` が `CancellationError` を throw し、`op` は実行されない。
+    /// - 直前の `op`（`previousTail`）の完了待ち中にキャンセルされた場合は、取り出して処理を
+    ///   開始する直前の `Task.checkCancellation()` が `op` の実行前に検出する。
+    /// - `op` の実行が既に始まっている場合、`current.cancel()` は `op` を強制中断しない。
+    ///   `op` の内部から見た `Task.isCancelled` が true になるだけであり、それを見て早期
+    ///   リターン・throw するかどうかは `op` 自身（呼び出し側）の責務のままである。
+    ///
+    /// 呼び出し元のキャンセルは `current` にのみ伝わり、キューに連結された後続の `op` の
+    /// 実行を妨げない（`tail` は `current` の失敗〈キャンセルを含む〉を握らず完了だけを
+    /// 次へ伝えるため）。
     public func run<T: Sendable>(_ op: @Sendable @escaping () async throws -> T) async throws -> T {
+        try Task.checkCancellation() // 4.2「キュー投入前」
         let previousTail = tail
 
         let current = Task<T, Error> {
             _ = await previousTail?.value
+            try Task.checkCancellation() // 4.2「取り出して処理を開始する直前」
             return try await op()
         }
 
@@ -39,6 +54,10 @@ public actor SerialTaskQueue {
             _ = try? await current.value
         }
 
-        return try await current.value
+        return try await withTaskCancellationHandler {
+            try await current.value
+        } onCancel: {
+            current.cancel()
+        }
     }
 }

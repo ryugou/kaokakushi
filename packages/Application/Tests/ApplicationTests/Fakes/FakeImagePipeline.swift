@@ -107,10 +107,12 @@ public actor FakeOutputFileVerifier: OutputFileVerifier {
 
     public init() {}
 
-    public func verify(_ file: OutputFileRef) async throws -> VerifiedOutputMeasurement {
+    public func verify(_ file: OutputFileRef) async throws(OutputFileVerificationError) -> VerifiedOutputMeasurement {
         calls.append(file)
         guard let outcome = outcomes[file] ?? defaultOutcome else {
-            throw FakeNotConfiguredError(fakeTypeName: "FakeOutputFileVerifier", methodName: "verify")
+            // typed throws のため FakeNotConfiguredError を投げられない。設定忘れは
+            // プログラマエラーとして即停止する（オーケストレーター確定判断）
+            preconditionFailure("FakeOutputFileVerifier.verify: outcomes/defaultOutcome が未設定")
         }
         switch outcome {
         case .success(let measurement):

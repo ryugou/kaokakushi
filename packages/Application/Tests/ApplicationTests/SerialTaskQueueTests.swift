@@ -31,6 +31,17 @@ private actor OneShotGate {
     }
 }
 
+/// テスト専用の一回限りの真偽値フラグ。`op` の内部から「観測できた」ことを actor 越しに
+/// テスト本体へ伝えるために使う（`Task.isCancelled` はローカル変数へキャプチャできない
+/// ため、actor 経由で記録する）。
+private actor ObservedFlag {
+    private(set) var wasObserved = false
+
+    func markObserved() {
+        wasObserved = true
+    }
+}
+
 /// 真に並列実行された `op` の同時実行数を数える。`SerialTaskQueue.run` の外側からは
 /// 排他が壊れているかどうかを直接観測できないため、`op` 自身に enter/exit を報告させる。
 private actor ConcurrencyTracker {
@@ -123,6 +134,8 @@ func executesQueuedOperationsSequentiallyInSubmissionOrder() async throws {
     #expect(try await task1.value == 1)
     #expect(try await task2.value == 2)
     #expect(try await task3.value == 3)
+
+    startedContinuation.finish()
 }
 
 @Test(
@@ -163,4 +176,155 @@ func throwingOpDoesNotBlockQueuedSuccessor() async throws {
 
     let result = try await succeeding.value
     #expect(result == 42)
+
+    startedContinuation.finish()
+}
+
+// MARK: - キャンセル伝播（architecture.md 4.2 の2箇所の Task.checkCancellation()）
+//
+// 以下3件は reviewer FAIL 指摘（`op` が非構造化 `Task` 内で実行され、呼び出し元の
+// キャンセルを継承しないため 4.2 の2チェックポイントが成立しない）に対する修正の検証。
+
+@Test(
+    "直前のopの完了待ち中にキャンセルされたopは実行されず、CancellationErrorが呼び出し元へ伝わる",
+    .timeLimit(.minutes(1))
+)
+func cancelingWhileWaitingInQueuePreventsExecutionAndPropagatesCancellationError() async throws {
+    let queue = SerialTaskQueue()
+    let (startedStream, startedContinuation) = AsyncStream<Int>.makeStream()
+    var startedIterator = startedStream.makeAsyncIterator()
+    let blockingGate = OneShotGate()
+
+    // op1をキューへ投入し、gate待ちで先頭を占有させる。これによりop2は必ず
+    // 「直前のopの完了待ち」（4.2の2つ目のチェックポイント手前）を経由する。
+    let blocking = Task<Void, Error> {
+        try await queue.run {
+            startedContinuation.yield(1)
+            await blockingGate.wait()
+        }
+    }
+    #expect(await startedIterator.next() == 1)
+
+    // op2はop1の完了待ちでまだ「取り出して処理を開始する直前」に到達していない状態で投入する。
+    let queued = Task<Int, Error> {
+        try await queue.run {
+            startedContinuation.yield(2)
+            return 99
+        }
+    }
+
+    // queuedがrun呼び出し内部へ進む猶予を与えてからキャンセルする。1つ目・2つ目どちらの
+    // Task.checkCancellation() で検出されても「opが実行されずCancellationErrorが返る」
+    // という期待結果は変わらないため、このyieldはテストの正しさに必須ではなく、
+    // より現実的な「投入後にキャンセルされる」経路を狙う演出。
+    await Task.yield()
+    queued.cancel()
+
+    // op1(blocking)を完了させ、op2側の「previousTail?.value」待ちから先へ進めるようにする。
+    await blockingGate.open()
+    _ = try? await blocking.value
+
+    var caughtError: Error?
+    do {
+        _ = try await queued.value
+    } catch {
+        caughtError = error
+    }
+    #expect(caughtError is CancellationError)
+
+    startedContinuation.finish()
+
+    // op2の本体（yield(2)）が実行されていれば既にストリームへバッファされているはず。
+    // finish()後にnextしてnilが返ることで「opが実行されなかった」ことを決定的に確認する。
+    #expect(await startedIterator.next() == nil)
+}
+
+@Test(
+    "実行中のopは、呼び出し元のキャンセルをTask.isCancelledとして観測できる",
+    .timeLimit(.minutes(1))
+)
+func cancelingWhileOpIsRunningPropagatesToTaskIsCancelled() async throws {
+    let queue = SerialTaskQueue()
+    let observed = ObservedFlag()
+    let (startedStream, startedContinuation) = AsyncStream<Void>.makeStream()
+    var startedIterator = startedStream.makeAsyncIterator()
+
+    let running = Task<Int, Error> {
+        try await queue.run {
+            startedContinuation.yield(())
+            // 外側（呼び出し元タスク）のキャンセルが current.cancel() 経由でここまで
+            // 届くことを、isCancelled のポーリングで確認する。
+            while !Task.isCancelled {
+                await Task.yield()
+            }
+            await observed.markObserved()
+            return 1
+        }
+    }
+    #expect(await startedIterator.next() != nil)
+
+    running.cancel()
+
+    // opはisCancelledを検出しても自動では中断されない（early return / throw するかは
+    // op自身の責務）ため、このopは正常にreturnし、run自体は成功として結果を返す。
+    let result = try await running.value
+    #expect(result == 1)
+    #expect(await observed.wasObserved)
+
+    startedContinuation.finish()
+}
+
+@Test(
+    "キャンセルされたopは、キューに続けて投入した後続opの実行を妨げない",
+    .timeLimit(.minutes(1))
+)
+func canceledOpDoesNotBlockQueuedSuccessor() async throws {
+    let queue = SerialTaskQueue()
+    let (startedStream, startedContinuation) = AsyncStream<Int>.makeStream()
+    var startedIterator = startedStream.makeAsyncIterator()
+    let blockingGate = OneShotGate()
+
+    // op1をキューへ投入し、gate待ちで先頭を占有させる。
+    let blocking = Task<Void, Error> {
+        try await queue.run {
+            startedContinuation.yield(1)
+            await blockingGate.wait()
+        }
+    }
+    #expect(await startedIterator.next() == 1)
+
+    // op2はop1の完了待ち中にキャンセルする。
+    let canceled = Task<Int, Error> {
+        try await queue.run {
+            startedContinuation.yield(2)
+            return 2
+        }
+    }
+    await Task.yield()
+    canceled.cancel()
+
+    // op3はop2の投入直後（tailの読み取り〜差し替えの間にawaitを挟まず）に投入するため、
+    // 既存のFIFO保証によりop2の直後へ連結される。
+    let succeeding = Task<Int, Error> {
+        try await queue.run {
+            startedContinuation.yield(3)
+            return 3
+        }
+    }
+
+    await blockingGate.open()
+    _ = try? await blocking.value
+
+    var caughtError: Error?
+    do {
+        _ = try await canceled.value
+    } catch {
+        caughtError = error
+    }
+    #expect(caughtError is CancellationError)
+
+    let result = try await succeeding.value
+    #expect(result == 3)
+
+    startedContinuation.finish()
 }
