@@ -1,0 +1,106 @@
+import Foundation
+import Domain
+
+// ExportCoordinator+Batch — バッチ進行（Issue #7 Task 7）。
+//
+// 正本: export-saga.md 1.1（バッチの開始条件: 各写真の確認一致 + BatchReviewState.batchID の
+// 一致 + モード別条件）・1.5（開始後の権限変化: 開始済みは開始時の権限で完了、未認可は開始せず
+// paused）、1.6（開始の順序は単体と共通）。
+//
+// 決定済みの設計判断（オーケストレーターの spec で確定済み。疑問視しない）:
+// - Coordinator はバッチ全体を1回の呼び出しでループ処理しない。1.6 の「専用の排他ゲートや
+//   素材単位のロックは不要」のとおり、直列性は SerialTaskQueue（Task 2）が構造的に保証する
+//   ため、呼び出し元（バッチ進行ループ）が写真ごとに startBatchItem → 認可されれば
+//   generateOutput（Task 5、既存の公開 API）の順で呼び、blocked を受け取ったら残りの
+//   waiting を呼ばないことで 1.5 の「未認可は開始せず paused」を実現する。Coordinator 自身が
+//   「バッチを paused にする」というグローバル状態を持つ必要はない
+//   （ExportJob の行の有無だけが状態を表す。export-saga.md 2 章と同じ設計原則）
+// - 1.1 のモード別条件はここでのみ判定する（Domain に新しい型を追加しない。おまかせ一括/
+//   1 枚ずつ確認という区別自体が Domain の正本コードブロックに型として存在しないため、
+//   Application 層の入力構築の都合として BatchReviewMode を定義する）
+// - startExport（単体）と処理順序を共有するため、実体確認・store 呼び出しは
+//   ExportCoordinator.swift の authorizeAndStart(_:batchID:queueItemID:) をそのまま再利用する
+
+/// 一括処理の確認モード（architecture.md 6.4「一括処理モード」）。
+/// おまかせ一括は一覧確認（`BatchReviewState.overviewConfirmed`）で全写真の確認を代表させ、
+/// 1 枚ずつ確認は写真ごとの `ReviewDecision` 確定（`SingleExportRequest.isReviewed`）を見る
+/// （export-saga.md 1.1 の表）。
+public enum BatchReviewMode: Sendable, Equatable {
+    case overview
+    case perPhoto
+}
+
+/// バッチ内 1 写真の開始入力。`ExportCoordinator.startBatchItem(_:capabilities:)` へ渡す。
+public struct BatchExportItemRequest: Sendable {
+    public let batchID: BatchID
+    public let queueItemID: ExportQueueItemID
+    public let mode: BatchReviewMode
+    public let batchReviewState: BatchReviewState
+    public let request: SingleExportRequest
+
+    public init(
+        batchID: BatchID,
+        queueItemID: ExportQueueItemID,
+        mode: BatchReviewMode,
+        batchReviewState: BatchReviewState,
+        request: SingleExportRequest
+    ) {
+        self.batchID = batchID
+        self.queueItemID = queueItemID
+        self.mode = mode
+        self.batchReviewState = batchReviewState
+        self.request = request
+    }
+}
+
+extension ExportCoordinator {
+    /// export-saga.md 1.6 の順序でバッチ内 1 写真を認可・開始する。1.1 のみ単体と異なり
+    /// バッチ向けの一致検査（isBatchConfirmationConsistent）を使う。1.2 以降
+    /// （能力検査・実体確認・startExport）は単体と共通の経路（authorizeAndStart）を再利用する。
+    ///
+    /// 呼び出し元は写真を順番に処理し、`.started` 以外が返った時点で残りの `waiting` を
+    /// 呼ばないことで、1.5「未認可は開始せず paused にする」を実現する。既に `.started` して
+    /// `generateOutput` まで進んだ写真は、この呼び出しの後で権限が変わっても開始時の
+    /// `ExportJob.authorization` のまま完了する（authorization は startExport 時点で
+    /// ExportJob へ固定済みのため、Coordinator 側で追加の対応は不要）。
+    public func startBatchItem(
+        _ item: BatchExportItemRequest,
+        capabilities: ResolvedCapabilities
+    ) async throws -> ExportStartOutcome {
+        guard isBatchConfirmationConsistent(item) else {
+            return .confirmationMismatch
+        }
+
+        let renderSpecAuthorization = authorizeRenderSpec(
+            item.request.renderSpec, stampCatalog: stampCatalog, capabilities: capabilities
+        )
+        if case .blocked(let reason) = renderSpecAuthorization {
+            return .renderSpecBlocked(reason)
+        }
+
+        return try await queue.run {
+            try await self.authorizeAndStart(item.request, batchID: item.batchID, queueItemID: item.queueItemID)
+        }
+    }
+
+    /// export-saga.md 1.1 バッチ行: 各写真の確認一致 + BatchReviewState.batchID の一致 +
+    /// モード別条件（おまかせ一括は overviewConfirmed、1 枚ずつ確認は isReviewed）。
+    private func isBatchConfirmationConsistent(_ item: BatchExportItemRequest) -> Bool {
+        guard item.batchReviewState.batchID == item.batchID else {
+            return false
+        }
+        let confirmation = item.request.previewConfirmation
+        guard confirmation.projectID == item.request.projectID,
+              confirmation.detectionRevision == item.request.currentDetectionRevision,
+              confirmation.previewRenderHash == item.request.currentPreviewRenderHash
+        else {
+            return false
+        }
+        switch item.mode {
+        case .overview:
+            return item.batchReviewState.overviewConfirmed
+        case .perPhoto:
+            return item.request.isReviewed
+        }
+    }
+}
