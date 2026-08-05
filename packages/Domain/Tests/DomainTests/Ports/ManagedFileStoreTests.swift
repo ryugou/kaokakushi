@@ -12,6 +12,7 @@ private actor FakeManagedFileStore: ManagedFileStore {
     private(set) var withReadAccessCalls: [ManagedFileRef] = []
     private(set) var createFileCalls: [ManagedFileKind] = []
     private(set) var deleteCalls: [ManagedFileRef] = []
+    private(set) var existsCalls: [ManagedFileRef] = []
 
     func withReadAccess<R: Sendable>(
         _ ref: ManagedFileRef,
@@ -32,6 +33,11 @@ private actor FakeManagedFileStore: ManagedFileStore {
 
     func delete(_ ref: ManagedFileRef) async throws {
         deleteCalls.append(ref)
+    }
+
+    func exists(_ ref: ManagedFileRef) async throws -> Bool {
+        existsCalls.append(ref)
+        return true
     }
 }
 

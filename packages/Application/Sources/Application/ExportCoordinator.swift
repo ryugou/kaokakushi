@@ -118,16 +118,14 @@ public actor ExportCoordinator {
     }
 
     /// `WorkingSourceRecord` が無い、または実体ファイルが無ければ false
-    /// （export-saga.md 1.6 手順3。実体確認の throw はすべて欠損として扱う）。
+    /// （export-saga.md 1.6 手順3）。実体確認は `exists` の存在確認専用 API のみを使う
+    /// （image-pipeline.md「実体の存在確認」）。`exists` の throw（保護データ利用不可・
+    /// I/O 障害など）は欠損として扱わず、そのまま呼び出し元へ伝播させる
+    /// （Global Constraints「エラーの握りつぶし禁止」）。
     private func workingSourceExists(for projectID: ProjectID) async throws -> Bool {
         guard let record = try await workingSourceStore.loadWorkingSource(for: projectID) else {
             return false
         }
-        do {
-            _ = try await managedFileStore.withReadAccess(record.sourceFile.ref) { _ in }
-            return true
-        } catch {
-            return false
-        }
+        return try await managedFileStore.exists(record.sourceFile.ref)
     }
 }

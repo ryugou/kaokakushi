@@ -80,7 +80,7 @@
 - Produces: `public enum ExportStartOutcome: Sendable`（blocked(ExportStartBlock) / renderSpecBlocked(RenderSpecBlockReason) / confirmationMismatch / workingSourceMissing / started(ExportJob)）
 - Consumes: SerialTaskQueue（Task 2）、Domain の resolveCapabilities / authorizeRenderSpec / StampCatalog
 
-- [ ] 1.6 の順序で実装: 1.1 一致検査 → 1.2 能力（authorizeRenderSpec。免除条件は startExport 内の評価に委ねる）→ 実体確認（ManagedFileStore.withReadAccess での存在確認）→ 1.3 は startExport が評価（ExportStartDecision.blocked を outcome へ写像）
+- [ ] 1.6 の順序で実装: 1.1 一致検査 → 1.2 能力（authorizeRenderSpec。免除条件は Task 10 で実装する。Task 4 時点では未実装のため、降格後の「変更せず再書き出し」はブロックされる既知ギャップ）→ 実体確認（ManagedFileStore.exists での存在確認専用 API）→ 1.3 は startExport が評価（ExportStartDecision.blocked を outcome へ写像）
 - [ ] テスト（test-plan 3.1）: 検査順序、各不成立で startExport が呼ばれない・ExportJob が作られないこと、triage 再導出をしないこと、実体欠損で invalidateWorkingSource が呼ばれ再選択導線 outcome になること、revision 不一致の throw が伝播すること
 - [ ] **完了条件（Task 3 レビューでの追加）**: 偽ストアの失敗注入を実際に使い、**ストアが throw したエラーを Coordinator が握りつぶさず呼び出し元へ伝播すること**を検証するテストを含める（Global Constraints「エラーの握りつぶし禁止」の担保。失敗注入セッターが使われないまま追加されるのを防ぐ）
 - [ ] reviewer 一次レビュー → コミット `feat: ExportCoordinator の認可と開始 (#7)`
@@ -153,12 +153,22 @@
 - [ ] テスト（test-plan 3.5）: 実行順序（偽ストアの呼び出し記録で検証）、完了済み出力に触れないこと、previousState による解決（generated → deliveryUnknown / delivered 維持＋注記）、復旧完了までの開始ゲート、report が snapshot を使うこと
 - [ ] reviewer 一次レビュー → コミット `feat: StartupRecoveryCoordinator (#7)`
 
+### Task 10: 「変更せず再書き出し」の能力免除（export-saga.md 1.2 の免除規則）
+
+**正本:** export-saga.md 1.2「変更せず再書き出しの免除」の表、architecture.md 6.2。
+
+- [ ] 免除の条件: `ExportedSettingsEntry` に当該 projectID の項目がある／その `settingsHash` がいま組み立てた `RenderSpec` と `ExportSetting` から計算した値と一致する／同一 Project である。適用範囲は**有料スタンプの能力要件のみ**（月間枠・トライアルクレジットの消費は免除しない）
+- [ ] 必要なもの: Application から確定記録を読む Domain ポート（例: `ExportedSettingsEntryStore`。`func loadEntry(for: ProjectID) async throws -> ExportedSettingsEntry?`）と、その Persistence 実装。`settingsHash` の算出は Domain の正準エンコーダ（canonical-schema.md）を使う
+- [ ] Coordinator は `authorizeRenderSpec` が `blocked` を返した場合にのみ免除を評価し、免除が成立するときだけ 1.2 のブロックを解除する（月間枠・クレジットの評価は従来どおり `startExport`）
+- [ ] テスト: 免除成立（降格後・設定一致）で開始できること／`settingsHash` 不一致ではブロックされること／確定記録が無ければブロックされること／免除が成立しても `accountingMode` の消費は通常どおり発生すること
+- [ ] reviewer 一次レビュー → コミット `feat: 変更せず再書き出しの能力免除 (#7)`
+
 ---
 
 ## Self-Review 済み事項
 
 - Issue #7 完了条件との対応: 3 Coordinator → T4〜T9、直列実行キュー → T2、生成無消費〜settle 確定 → T5・T6、偽ストアの状態機械・起動時復旧テスト → T3〜T9
 - test-plan 3章の対応: 3.1 → T4・T5・T7、3.2 → T6・T8、3.3 → T5、3.4 → T6、3.5 → T9、3.6 のうち受け渡し状態・復旧案内 → T8・T9
-- 対象外（担当サブプロジェクトを明記）: 3.6 の履歴削除系（HistoryDeletionCoordinator はサブプロジェクト10）、3.2「完了操作付近の文言表示」（UI。サブプロジェクト6）、孤児 GC の実装（サブプロジェクト3で完了済み。T9 は呼び出しのみ）、更新誘導の実装（サブプロジェクト10）
+- 対象外（担当サブプロジェクトを明記）: 3.6 の履歴削除系（HistoryDeletionCoordinator はサブプロジェクト10）、3.2「完了操作付近の文言表示」（UI。サブプロジェクト6）、孤児 GC の実装（サブプロジェクト3で完了済み。T9 は呼び出しのみ）、更新誘導の実装（サブプロジェクト10）、1.2「変更せず再書き出し」の能力免除（T4 では未実装。T10 の対象）
 - Domain へ追加する宣言は Coordinator が消費するものに限定（PickedPhotoLoader / FaceDetector はサブプロジェクト5 で追加）。check-imports の許可リストは不変
 - 型整合: ExportStartOutcome は Domain の ExportStartBlock / RenderSpecBlockReason を包む（再定義しない）。VerifiedOutputMeasurement の byteSize / sha256 は RecordOutputInput の outputByteSize / outputSHA256 と同型

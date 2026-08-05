@@ -127,10 +127,10 @@ private func confirmationMismatchShortCircuitsBeforeCapabilityCheckAndStore(
     #expect(isConfirmationMismatch(outcome))
     let startExportCalls = await exportSagaStore.startExportCalls
     let loadWorkingSourceCalls = await workingSourceStore.loadWorkingSourceCalls
-    let withReadAccessCalls = await managedFileStore.withReadAccessCalls
+    let existsCalls = await managedFileStore.existsCalls
     #expect(startExportCalls.isEmpty)
     #expect(loadWorkingSourceCalls.isEmpty)
-    #expect(withReadAccessCalls.isEmpty)
+    #expect(existsCalls.isEmpty)
 }
 
 // MARK: - 1.2 設定内容の能力検査
@@ -230,10 +230,10 @@ private func missingWorkingSourceFileInvalidatesAndReturnsMissing() async throws
 
     #expect(isWorkingSourceMissing(outcome))
     let invalidateCalls = await workingSourceStore.invalidateWorkingSourceCalls
-    let withReadAccessCalls = await managedFileStore.withReadAccessCalls
+    let existsCalls = await managedFileStore.existsCalls
     let startExportCalls = await exportSagaStore.startExportCalls
     #expect(invalidateCalls == [request.projectID])
-    #expect(withReadAccessCalls == [sourceFileRef.ref])
+    #expect(existsCalls == [sourceFileRef.ref])
     #expect(startExportCalls.isEmpty)
 }
 
@@ -312,4 +312,83 @@ private func fullyAuthorizedRequestReturnsStartedJob() async throws {
     let startExportCalls = await exportSagaStore.startExportCalls
     #expect(invalidateCalls.isEmpty)
     #expect(startExportCalls.count == 1)
+}
+
+// MARK: - 失敗注入の伝播テスト（C1 の回帰テスト。実体確認は exists 専用 API のみを使う）
+
+@Test("existsの失敗はworkingSourceMissingに化けず、invalidateWorkingSourceを呼ばずに呼び出し元へ伝播する")
+private func existsFailurePropagatesWithoutInvalidatingOrMissing() async throws {
+    struct ExistsBoom: Error, Equatable {}
+    let (request, capabilities) = try makeFullyConsistentRequest()
+    let sourceFileRef = try makeWorkingSourceFileRef()
+    let workingSourceStore = FakeWorkingSourceStore()
+    await workingSourceStore.seedWorkingSource(
+        WorkingSourceRecord(
+            projectID: request.projectID,
+            sourceFile: sourceFileRef,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+    )
+    let managedFileStore = FakeManagedFileStore()
+    await managedFileStore.setExistsFailure(ExistsBoom())
+    let coordinator = ExportCoordinator(
+        exportSagaStore: FakeExportSagaStore(),
+        workingSourceStore: workingSourceStore,
+        managedFileStore: managedFileStore,
+        stampCatalog: FakeStampCatalog(),
+        imageEffectRenderer: FakeImageEffectRenderer(),
+        imageEncoder: FakeImageEncoder(),
+        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
+        queue: SerialTaskQueue()
+    )
+
+    await #expect(throws: ExistsBoom.self) {
+        _ = try await coordinator.startExport(request, capabilities: capabilities)
+    }
+    let invalidateCalls = await workingSourceStore.invalidateWorkingSourceCalls
+    #expect(invalidateCalls.isEmpty)
+}
+
+@Test("loadWorkingSourceの失敗は握りつぶさず呼び出し元へ伝播する")
+private func loadWorkingSourceFailurePropagatesToCaller() async throws {
+    struct LoadWorkingSourceBoom: Error, Equatable {}
+    let (request, capabilities) = try makeFullyConsistentRequest()
+    let workingSourceStore = FakeWorkingSourceStore()
+    await workingSourceStore.setLoadWorkingSourceFailure(LoadWorkingSourceBoom())
+    let coordinator = ExportCoordinator(
+        exportSagaStore: FakeExportSagaStore(),
+        workingSourceStore: workingSourceStore,
+        managedFileStore: FakeManagedFileStore(),
+        stampCatalog: FakeStampCatalog(),
+        imageEffectRenderer: FakeImageEffectRenderer(),
+        imageEncoder: FakeImageEncoder(),
+        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
+        queue: SerialTaskQueue()
+    )
+
+    await #expect(throws: LoadWorkingSourceBoom.self) {
+        _ = try await coordinator.startExport(request, capabilities: capabilities)
+    }
+}
+
+@Test("欠損経路のinvalidateWorkingSourceの失敗は握りつぶさず呼び出し元へ伝播する")
+private func invalidateWorkingSourceFailurePropagatesToCaller() async throws {
+    struct InvalidateBoom: Error, Equatable {}
+    let (request, capabilities) = try makeFullyConsistentRequest()
+    let workingSourceStore = FakeWorkingSourceStore() // 何も seed しない → レコードが無い（欠損経路）
+    await workingSourceStore.setInvalidateWorkingSourceFailure(InvalidateBoom())
+    let coordinator = ExportCoordinator(
+        exportSagaStore: FakeExportSagaStore(),
+        workingSourceStore: workingSourceStore,
+        managedFileStore: FakeManagedFileStore(),
+        stampCatalog: FakeStampCatalog(),
+        imageEffectRenderer: FakeImageEffectRenderer(),
+        imageEncoder: FakeImageEncoder(),
+        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
+        queue: SerialTaskQueue()
+    )
+
+    await #expect(throws: InvalidateBoom.self) {
+        _ = try await coordinator.startExport(request, capabilities: capabilities)
+    }
 }

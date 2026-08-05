@@ -180,6 +180,15 @@ public struct ManagedFileStoreLive: ManagedFileStore {
         return try await body(url)
     }
 
+    /// 実体の存在確認のみを行う（スコープ付きアクセスは取得しない。image-pipeline.md
+    /// 「実体の存在確認」。ManagedFileStore.exists の契約）。withReadAccess と同じ保護データ
+    /// 検査・パス解決を使うが、fileNotFound は throw せず false を返す。
+    public func exists(_ ref: ManagedFileRef) async throws -> Bool {
+        try await ensureProtectedDataAvailable(for: ref)
+        let url = resolvedURL(for: ref)
+        return FileManager.default.fileExists(atPath: url.path)
+    }
+
     public func createFile<R: Sendable>(
         kind: ManagedFileKind,
         _ body: @Sendable (URL) async throws -> R

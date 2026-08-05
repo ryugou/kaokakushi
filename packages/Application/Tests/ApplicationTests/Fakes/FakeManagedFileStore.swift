@@ -24,12 +24,14 @@ actor FakeManagedFileStore: ManagedFileStore {
     private(set) var withReadAccessCalls: [ManagedFileRef] = []
     private(set) var createFileCalls: [ManagedFileKind] = []
     private(set) var deleteCalls: [ManagedFileRef] = []
+    private(set) var existsCalls: [ManagedFileRef] = []
 
     // MARK: - 注入可能な失敗
 
     var withReadAccessFailure: Error?
     var createFileFailure: Error?
     var deleteFailure: Error?
+    var existsFailure: Error?
 
     // MARK: - in-memory 状態
 
@@ -45,6 +47,7 @@ actor FakeManagedFileStore: ManagedFileStore {
     func setWithReadAccessFailure(_ value: Error?) { withReadAccessFailure = value }
     func setCreateFileFailure(_ value: Error?) { createFileFailure = value }
     func setDeleteFailure(_ value: Error?) { deleteFailure = value }
+    func setExistsFailure(_ value: Error?) { existsFailure = value }
 
     /// テストが実体確認の成功系シナリオ用に存在を注入する
     func seedExistingFile(_ ref: ManagedFileRef) {
@@ -85,6 +88,12 @@ actor FakeManagedFileStore: ManagedFileStore {
         deleteCalls.append(ref)
         if let failure = deleteFailure { throw failure }
         existingFiles.remove(ref)
+    }
+
+    func exists(_ ref: ManagedFileRef) async throws -> Bool {
+        existsCalls.append(ref)
+        if let failure = existsFailure { throw failure }
+        return existingFiles.contains(ref)
     }
 
     /// 実ファイルを持たないため、診断用に判別可能な固定形式の URL を作るだけの用途
