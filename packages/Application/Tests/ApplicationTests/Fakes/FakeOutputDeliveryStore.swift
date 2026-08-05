@@ -8,9 +8,12 @@ import Domain
 // テストは `seedOutput(_:)` で settle 済み（または任意状態）の `OutputRecord` を注入してから
 // 各メソッドの事前条件・状態遷移を検証する。`DeliveryAttempt.startedAt` /
 // `UnknownLibrarySave.occurredAt` に必要な時刻は `now` クロックで注入する（裸の Date() 禁止）。
+//
+// Fakes 配下の型はテストターゲット外から参照されないため internal で足りる
+// （DomainTests/TestSupport.swift と同じ方針。Task 3 レビュー Suggestion 2）。
 
 /// この偽実装が検査する事前条件違反。
-public enum FakeOutputDeliveryStoreError: Error, Sendable, Equatable {
+enum FakeOutputDeliveryStoreError: Error, Sendable, Equatable {
     /// 対象 exportID の OutputRecord が seedOutput / seedUnknownLibrarySave 未注入
     case outputNotFound(ExportID)
     /// 対象 OutputRecord.settledAt が nil（beginDeliveryAttempt / completeShare / deleteOutput の
@@ -22,28 +25,28 @@ public enum FakeOutputDeliveryStoreError: Error, Sendable, Equatable {
     case deliveryAttemptNotFound(ExportID)
 }
 
-public actor FakeOutputDeliveryStore: OutputDeliveryStore {
+actor FakeOutputDeliveryStore: OutputDeliveryStore {
     // MARK: - 呼び出し記録
 
-    public private(set) var beginDeliveryAttemptCalls: [ExportID] = []
-    public private(set) var completeLibrarySaveCalls: [ExportID] = []
-    public private(set) var completeShareCalls: [ExportID] = []
-    public private(set) var abandonDeliveryAttemptCalls: [ExportID] = []
-    public private(set) var resolveOrphanedAttemptsCallCount = 0
-    public private(set) var loadUnknownLibrarySavesCallCount = 0
-    public private(set) var clearUnknownLibrarySaveCalls: [ExportID] = []
-    public private(set) var deleteOutputCalls: [ExportID] = []
+    private(set) var beginDeliveryAttemptCalls: [ExportID] = []
+    private(set) var completeLibrarySaveCalls: [ExportID] = []
+    private(set) var completeShareCalls: [ExportID] = []
+    private(set) var abandonDeliveryAttemptCalls: [ExportID] = []
+    private(set) var resolveOrphanedAttemptsCallCount = 0
+    private(set) var loadUnknownLibrarySavesCallCount = 0
+    private(set) var clearUnknownLibrarySaveCalls: [ExportID] = []
+    private(set) var deleteOutputCalls: [ExportID] = []
 
     // MARK: - 注入可能な失敗
 
-    public var beginDeliveryAttemptFailure: Error?
-    public var completeLibrarySaveFailure: Error?
-    public var completeShareFailure: Error?
-    public var abandonDeliveryAttemptFailure: Error?
-    public var resolveOrphanedAttemptsFailure: Error?
-    public var loadUnknownLibrarySavesFailure: Error?
-    public var clearUnknownLibrarySaveFailure: Error?
-    public var deleteOutputFailure: Error?
+    var beginDeliveryAttemptFailure: Error?
+    var completeLibrarySaveFailure: Error?
+    var completeShareFailure: Error?
+    var abandonDeliveryAttemptFailure: Error?
+    var resolveOrphanedAttemptsFailure: Error?
+    var loadUnknownLibrarySavesFailure: Error?
+    var clearUnknownLibrarySaveFailure: Error?
+    var deleteOutputFailure: Error?
 
     // MARK: - in-memory 状態
 
@@ -52,30 +55,30 @@ public actor FakeOutputDeliveryStore: OutputDeliveryStore {
     private var unknownLibrarySaves: [ExportID: UnknownLibrarySave] = [:]
     private let now: @Sendable () -> Date
 
-    public init(now: @escaping @Sendable () -> Date) {
+    init(now: @escaping @Sendable () -> Date) {
         self.now = now
     }
 
     /// テストが任意状態の OutputRecord を注入する（settledAt の有無・state を含めて呼び出し側が決める）
-    public func seedOutput(_ record: OutputRecord) {
+    func seedOutput(_ record: OutputRecord) {
         outputs[record.exportID] = record
     }
 
-    public func seedUnknownLibrarySave(_ save: UnknownLibrarySave) {
+    func seedUnknownLibrarySave(_ save: UnknownLibrarySave) {
         unknownLibrarySaves[save.exportID] = save
     }
 
-    public func outputSnapshot(for exportID: ExportID) -> OutputRecord? {
+    func outputSnapshot(for exportID: ExportID) -> OutputRecord? {
         outputs[exportID]
     }
 
-    public func hasActiveAttempt(for exportID: ExportID) -> Bool {
+    func hasActiveAttempt(for exportID: ExportID) -> Bool {
         activeAttempts[exportID] != nil
     }
 
     // MARK: - OutputDeliveryStore
 
-    public func beginDeliveryAttempt(_ exportID: ExportID) async throws {
+    func beginDeliveryAttempt(_ exportID: ExportID) async throws {
         beginDeliveryAttemptCalls.append(exportID)
         if let failure = beginDeliveryAttemptFailure { throw failure }
         let record = try settledOutput(for: exportID)
@@ -85,32 +88,37 @@ public actor FakeOutputDeliveryStore: OutputDeliveryStore {
         activeAttempts[exportID] = DeliveryAttempt(exportID: exportID, startedAt: now(), previousState: record.state)
     }
 
-    public func completeLibrarySave(_ exportID: ExportID) async throws {
+    func completeLibrarySave(_ exportID: ExportID) async throws {
         completeLibrarySaveCalls.append(exportID)
         if let failure = completeLibrarySaveFailure { throw failure }
         try consumeActiveAttempt(for: exportID)
         setState(.delivered, for: exportID)
     }
 
-    public func completeShare(_ exportID: ExportID) async throws {
+    func completeShare(_ exportID: ExportID) async throws {
         completeShareCalls.append(exportID)
         if let failure = completeShareFailure { throw failure }
         _ = try settledOutput(for: exportID)
         setState(.delivered, for: exportID)
     }
 
-    public func abandonDeliveryAttempt(_ exportID: ExportID) async throws {
+    func abandonDeliveryAttempt(_ exportID: ExportID) async throws {
         abandonDeliveryAttemptCalls.append(exportID)
         if let failure = abandonDeliveryAttemptFailure { throw failure }
         let attempt = try consumeActiveAttempt(for: exportID)
         restorePreviousState(attempt.previousState, for: exportID)
     }
 
-    public func resolveOrphanedAttempts() async throws -> [OutputDeliverySnapshot] {
+    /// 起動時。残存 DeliveryAttempt を previousState に応じて解決する（export-saga.md 7.0 表）。
+    /// abandonDeliveryAttempt とは判定規則が異なるため restorePreviousState を再利用しない
+    /// （Task 3 レビュー Critical 1: 誤って同一挙動になっていたことの修正）。実 Persistence の
+    /// 対応実装は OutputDeliveryStoreLive+Recovery.swift の resolveOrphanedAttempt(_:row:resolvedAt:)。
+    func resolveOrphanedAttempts() async throws -> [OutputDeliverySnapshot] {
         resolveOrphanedAttemptsCallCount += 1
         if let failure = resolveOrphanedAttemptsFailure { throw failure }
+        let resolvedAt = now()
         for (exportID, attempt) in activeAttempts {
-            restorePreviousState(attempt.previousState, for: exportID)
+            resolveOrphanedAttempt(attempt, for: exportID, resolvedAt: resolvedAt)
         }
         activeAttempts.removeAll()
         return outputs.values.map { record in
@@ -118,19 +126,19 @@ public actor FakeOutputDeliveryStore: OutputDeliveryStore {
         }
     }
 
-    public func loadUnknownLibrarySaves() async throws -> [UnknownLibrarySave] {
+    func loadUnknownLibrarySaves() async throws -> [UnknownLibrarySave] {
         loadUnknownLibrarySavesCallCount += 1
         if let failure = loadUnknownLibrarySavesFailure { throw failure }
         return Array(unknownLibrarySaves.values)
     }
 
-    public func clearUnknownLibrarySave(_ exportID: ExportID) async throws {
+    func clearUnknownLibrarySave(_ exportID: ExportID) async throws {
         clearUnknownLibrarySaveCalls.append(exportID)
         if let failure = clearUnknownLibrarySaveFailure { throw failure }
         unknownLibrarySaves.removeValue(forKey: exportID)
     }
 
-    public func deleteOutput(_ exportID: ExportID) async throws {
+    func deleteOutput(_ exportID: ExportID) async throws {
         deleteOutputCalls.append(exportID)
         if let failure = deleteOutputFailure { throw failure }
         _ = try settledOutput(for: exportID)
@@ -168,10 +176,25 @@ public actor FakeOutputDeliveryStore: OutputDeliveryStore {
         outputs[exportID] = replacingState(record, state: state)
     }
 
-    /// previousState へ戻す。現在が delivered なら維持する（abandon / resolveOrphanedAttempts 共通）
+    /// previousState へ戻す。現在が delivered なら維持する（abandonDeliveryAttempt 専用。
+    /// resolveOrphanedAttempts は別規則のため resolveOrphanedAttempt(_:for:resolvedAt:) を使う）
     private func restorePreviousState(_ previousState: OutputState, for exportID: ExportID) {
         guard let record = outputs[exportID], record.state != .delivered else { return }
         outputs[exportID] = replacingState(record, state: previousState)
+    }
+
+    /// 1件の DeliveryAttempt を previousState と現在の OutputRecord.state に応じて解決する
+    /// （export-saga.md 7.0 表）:
+    /// - 現在 delivered、または previousState が delivered → UnknownLibrarySave を upsert（状態維持）
+    /// - previousState が generated → OutputRecord の状態を deliveryUnknown へ更新
+    /// - それ以外（previousState が deliveryUnknown かつ現在も delivered でない）→ 状態維持
+    private func resolveOrphanedAttempt(_ attempt: DeliveryAttempt, for exportID: ExportID, resolvedAt: Date) {
+        let currentState = outputs[exportID]?.state
+        if currentState == .delivered || attempt.previousState == .delivered {
+            unknownLibrarySaves[exportID] = UnknownLibrarySave(exportID: exportID, occurredAt: resolvedAt)
+        } else if attempt.previousState == .generated {
+            setState(.deliveryUnknown, for: exportID)
+        }
     }
 
     private func replacingState(_ record: OutputRecord, state: OutputState) -> OutputRecord {
