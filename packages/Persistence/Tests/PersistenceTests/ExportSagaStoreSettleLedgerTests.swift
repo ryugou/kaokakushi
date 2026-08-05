@@ -124,7 +124,7 @@ struct ExportSagaStoreSettleLedgerTests {
         let updatedEntry = try exportedSettingsEntryFields(database, projectID: projectID.rawValue)
         #expect(updatedEntry?.settingsHash == secondExpectedHash.bytes)
         #expect(updatedEntry?.settingsHash != firstHash)
-        let entryCount = try await database.dbQueue.read { connection in
+        let entryCount: Int = try await database.dbQueue.read { connection in
             try countExportedSettingsEntryRows(connection, projectID: projectID.rawValue)
         }
         #expect(entryCount == 1)

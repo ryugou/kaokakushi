@@ -8,7 +8,7 @@ extension ExportSagaStoreLive {
     /// 起動時復旧の入力（5章 手順1）。ExportJobの全行を読む。列リストはloadExportJobと
     /// 共有する（ExportSagaStoreLive+Mapping.swift）。
     public func loadRunningJobs() async throws -> [ExportJob] {
-        let rows = try await database.dbQueue.read { connection in
+        let rows: [Row] = try await database.dbQueue.read { connection in
             try Row.fetchAll(connection, sql: "SELECT \(Self.exportJobColumns) FROM ExportJob")
         }
         return try rows.map(Self.makeExportJob)

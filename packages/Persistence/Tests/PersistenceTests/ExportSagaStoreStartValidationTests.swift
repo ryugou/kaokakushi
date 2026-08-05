@@ -204,7 +204,7 @@ struct ExportSagaStoreStartValidationTests {
             try insertBatchRow(connection, batchID: batchID.rawValue, kind: 2, trialCreditCount: 3)
             try insertUsageLedgerRow(connection, trialConsumedCount: 3)
         }
-        let trialConsumedExportIDsBefore = try await database.dbQueue.read { connection in
+        let trialConsumedExportIDsBefore: Data? = try await database.dbQueue.read { connection in
             try Data.fetchOne(connection, sql: "SELECT trialConsumedExportIDs FROM UsageLedger")
         }
         let store = makeExportSagaStore(database: database)
@@ -218,7 +218,7 @@ struct ExportSagaStoreStartValidationTests {
             return
         }
         #expect(job.authorization.accountingMode == .paidUnlimited)
-        let trialConsumedExportIDsAfter = try await database.dbQueue.read { connection in
+        let trialConsumedExportIDsAfter: Data? = try await database.dbQueue.read { connection in
             try Data.fetchOne(connection, sql: "SELECT trialConsumedExportIDs FROM UsageLedger")
         }
         #expect(trialConsumedExportIDsAfter == trialConsumedExportIDsBefore)

@@ -8,7 +8,7 @@ import GRDB
 extension StampStoreLive {
     /// スタンプ一覧。sortOrder昇順で返す。
     public func loadCustomStamps() async throws -> [CustomStamp] {
-        let rows = try await database.dbQueue.read { connection in
+        let rows: [Row] = try await database.dbQueue.read { connection in
             try Row.fetchAll(
                 connection,
                 sql: """
@@ -22,7 +22,7 @@ extension StampStoreLive {
 
     /// 使用容量の内訳（登録中のマイスタンプ / 過去の加工履歴で使用中 / 合計）。
     public func loadStampStorageBreakdown() async throws -> StampStorageBreakdown {
-        let rows = try await database.dbQueue.read { connection in
+        let rows: [Row] = try await database.dbQueue.read { connection in
             try Row.fetchAll(
                 connection,
                 sql: """

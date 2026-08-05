@@ -105,7 +105,7 @@ struct ExportSagaStoreStartTests {
             return
         }
         #expect(block.reason == .capabilityVerificationRequired)
-        let jobCount = try await database.dbQueue.read { connection in
+        let jobCount: Int = try await database.dbQueue.read { connection in
             try Int.fetchOne(connection, sql: "SELECT count(*) FROM ExportJob") ?? -1
         }
         #expect(jobCount == 0)

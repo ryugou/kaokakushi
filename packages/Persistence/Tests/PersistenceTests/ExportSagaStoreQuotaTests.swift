@@ -35,7 +35,7 @@ struct ExportSagaStoreQuotaTests {
         }
         #expect(block.reason == .monthlyLimitReached)
         #expect(block.limit == 5)
-        let jobCount = try await database.dbQueue.read { connection in
+        let jobCount: Int = try await database.dbQueue.read { connection in
             try Int.fetchOne(connection, sql: "SELECT count(*) FROM ExportJob") ?? -1
         }
         #expect(jobCount == 0)

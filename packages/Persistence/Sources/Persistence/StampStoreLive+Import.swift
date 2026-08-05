@@ -68,9 +68,10 @@ extension StampStoreLive {
         // insertStampRows内（同一トランザクション）でPendingFileDeletionへ登録し、
         // 実削除は他Storeと同じく起動時GCに委ねる（didReuseExistingAssetはこの分岐の
         // ためだけにinsertStampRowsが返す値で、呼び出し元では使わない）。
-        let (_, sortOrder) = try await database.dbQueue.write { connection in
-            try Self.insertStampRows(connection, rows: newRows)
-        }
+        let (_, sortOrder): (didReuseExistingAsset: Bool, sortOrder: Int32) =
+            try await database.dbQueue.write { connection in
+                try Self.insertStampRows(connection, rows: newRows)
+            }
 
         let stamp = CustomStamp(
             customStampID: customStampID,

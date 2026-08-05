@@ -37,7 +37,7 @@ extension MaintenanceStoreLive {
     }
 
     private func fetchReferencedIDs(sql: String) async throws -> Set<ManagedFileID> {
-        let ids = try await database.dbQueue.read { connection in
+        let ids: [UUID] = try await database.dbQueue.read { connection in
             try UUID.fetchAll(connection, sql: sql)
         }
         return Set(ids.map(ManagedFileID.init(rawValue:)))
