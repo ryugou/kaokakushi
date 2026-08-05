@@ -16,14 +16,32 @@ import Foundation
 //
 // アクセス修飾（public）の方針は ExportSagaStore.swift と同じ。
 
-/// 出力ファイルの健全性を確認し、記録用の測定値を返す（export-saga.md 3章「手順3」を1回の
-/// 走査で賄う、本計画の新設ポート）。存在確認・サイズ0でないこと・簡易デコード成功の
-/// いずれかが不成立なら throw する（手順4 `recordGeneratedOutput` へ進めない）。
+/// 出力ファイルの健全性を確認し、記録用の測定値を返す(export-saga.md 3章「手順3」を1回の
+/// 走査で賄う、本計画の新設ポート)。存在確認・サイズ0でないこと・簡易デコード成功の
+/// いずれかが不成立なら `OutputFileVerificationError` を throw する(手順4
+/// `recordGeneratedOutput` へ進めない)。実装は上記3検査の不成立と一時的なI/O障害を
+/// 必ず区別して throw する(確定後の実体喪失検査〈export-saga.md 6章〉で、一過性の障害を
+/// 「実体喪失」と誤認して完了済み出力を削除しないため)。
 public protocol OutputFileVerifier: Sendable {
     func verify(_ file: OutputFileRef) async throws -> VerifiedOutputMeasurement
 }
 
-/// `OutputFileVerifier.verify` の測定結果（本計画の新設ポート）。
+/// `OutputFileVerifier.verify` の失敗理由。呼び出し側は `.ioFailure` を「実体喪失」として
+/// 扱ってはならない(export-saga.md 6章の削除経路の根拠は missing / emptyFile / undecodable、
+/// および呼び出し側で検出する測定値不一致のみ)。
+public enum OutputFileVerificationError: Error, Sendable, Equatable {
+    /// ファイルが存在しない
+    case missing
+    /// サイズが0
+    case emptyFile
+    /// 簡易デコードに失敗した
+    case undecodable
+    /// 読み取り中の一時的なI/O障害。実体喪失の根拠にしない(再試行または提示のみ)
+    case ioFailure
+}
+
+/// `OutputFileVerifier.verify` の測定結果（本計画の新設ポート）。`sha256` の32バイト検証は
+/// 保存側（`RecordOutputInput` を受ける Persistence）が担い、ここでは長さ不変条件を課さない。
 public struct VerifiedOutputMeasurement: Sendable {
     public let byteSize: Int64
     public let sha256: Data

@@ -23,7 +23,9 @@ public protocol ImageEffectRenderer: Sendable {
 
 /// image-pipeline.md「プロトコルのシグネチャ」節
 public protocol ImageEncoder: Sendable {
-    /// メタデータは許可リストで構築する（アーキテクチャ設計 7.5）
+    /// メタデータは許可リストで構築する（アーキテクチャ設計 7.5）。実装は保存後に読み返し、
+    /// 許可されていない namespace とキーが1つも無いことを検査する義務を負う（検査失敗は
+    /// 完成扱いにせず throw し、書き出し Saga のファイル検証失敗として扱う。同節が正本）
     func encode(
         _ image: RenderedImage,
         format: ImageFormat,

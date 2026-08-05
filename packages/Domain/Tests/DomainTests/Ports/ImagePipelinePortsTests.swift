@@ -10,17 +10,17 @@ import Foundation
 /// フィールドを保持すること、(2) ShareResult の4ケースが Equatable で区別できること、
 /// (3) 各プロトコルへの最小準拠がコンパイルでき、引数がシグネチャどおり渡ることを検証する。
 
-private func makePixelSize() -> PixelSize { PixelSize(width: 800, height: 600) }
+private func makeSourcePixelSize() -> PixelSize { PixelSize(width: 800, height: 600) }
 
 private func makeImageSource() -> ImageSource {
     let ref = ManagedFileRef(kind: .processingTemporary, fileID: ManagedFileID(rawValue: UUID()))
-    return ImageSource(file: ref, pixelSize: makePixelSize(), format: .jpeg)
+    return ImageSource(file: ref, pixelSize: makeSourcePixelSize(), format: .jpeg)
 }
 
 private func makeRenderPlan() -> RenderPlan {
     let rect = PixelRect(left: 0, top: 0, rightExclusive: 800, bottomExclusive: 600)
     let placement = SourcePlacement(sourceRect: rect, destinationRect: rect, scaleMode: .fit)
-    return RenderPlan(canvasSize: makePixelSize(), sourcePlacement: placement, background: .none, regions: [])
+    return RenderPlan(canvasSize: makeSourcePixelSize(), sourcePlacement: placement, background: .none, regions: [])
 }
 
 private func makeRasterFileRef() -> RasterFileRef {
@@ -33,7 +33,7 @@ private func makeRasterFileRef() -> RasterFileRef {
 
 private func makeRenderedImage() -> RenderedImage {
     let descriptor = RawBitmapDescriptor(
-        pixelSize: makePixelSize(),
+        pixelSize: makeSourcePixelSize(),
         rowBytes: 800 * 4,
         channelOrder: .rgba,
         alpha: .straight,
@@ -65,17 +65,17 @@ func outputMetadataHoldsAllowlistedFields() {
     )
     let icc = Data(repeating: 0x10, count: 4)
 
-    let subject = OutputMetadata(pixelSize: makePixelSize(), iccProfile: icc, capture: capture)
+    let subject = OutputMetadata(pixelSize: makeSourcePixelSize(), iccProfile: icc, capture: capture)
 
-    #expect(subject.pixelSize == makePixelSize())
+    #expect(subject.pixelSize == makeSourcePixelSize())
     #expect(subject.iccProfile == icc)
     #expect(subject.capture == capture)
 }
 
 @Test("OutputMetadataはiccProfileとcaptureがnilでも構築でき値として比較できる")
 func outputMetadataAllowsNilOptionalFieldsAndCompares() {
-    let first = OutputMetadata(pixelSize: makePixelSize(), iccProfile: nil, capture: nil)
-    let second = OutputMetadata(pixelSize: makePixelSize(), iccProfile: nil, capture: nil)
+    let first = OutputMetadata(pixelSize: makeSourcePixelSize(), iccProfile: nil, capture: nil)
+    let second = OutputMetadata(pixelSize: makeSourcePixelSize(), iccProfile: nil, capture: nil)
 
     #expect(first == second)
     #expect(first.iccProfile == nil)
@@ -100,9 +100,11 @@ func verifiedOutputMeasurementHoldsFields() {
 func shareResultFourCasesAreDistinguishableByEquatable() {
     let cases: [ShareResult] = [.completed, .canceled, .unknown, .failed]
 
-    #expect(Set(cases.indices).allSatisfy { index in
-        cases.indices.filter { cases[$0] == cases[index] } == [index]
-    })
+    for (leftIndex, left) in cases.enumerated() {
+        for (rightIndex, right) in cases.enumerated() {
+            #expect((left == right) == (leftIndex == rightIndex))
+        }
+    }
 }
 
 // MARK: - ImageEffectRenderer への最小準拠
@@ -176,7 +178,7 @@ func fakeImageEncoderForwardsArgumentsAndReturnsResult() async throws {
     let expectedRef = makeOutputFileRef()
     let encoder = FakeImageEncoder(result: expectedRef)
     let image = makeRenderedImage()
-    let metadata = OutputMetadata(pixelSize: makePixelSize(), iccProfile: nil, capture: nil)
+    let metadata = OutputMetadata(pixelSize: makeSourcePixelSize(), iccProfile: nil, capture: nil)
 
     let outputRef = try await encoder.encode(image, format: .heic, quality: 0.8, metadata: metadata)
 

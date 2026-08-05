@@ -12,12 +12,10 @@ import Foundation
 // 明記しているためここに実装する（`OriginalCaptureMetadata` を Task 4 待ちとした前回の
 // 判断は誤りだったため撤回）。
 //
-// `OutputMetadata` / `SourceRepresentation`（architecture.md 同ブロック内の他の型）と
-// `PickedPhotoLoader` プロトコルは、どのタスクにも明示割当が無い、または Task 4 の
-// 担当であるため今回は追加しない。
-//
-// `PickedPhotoLoader` / `FaceDetector` / `ImageEffectRenderer` 等のプロトコルと
-// `WorkingSourceRecord` 系（Task 4）はスコープ外（spec 参照）。
+// `OutputMetadata` と `ImageEffectRenderer` / `ImageEncoder` 等のプロトコルは
+// Ports/ImagePipeline.swift ほか Ports/ 配下へ追加済み（Issue #7 Task 1）。
+// `SourceRepresentation` は Ports/WorkingSourceStore.swift に実装済み。
+// `PickedPhotoLoader` / `FaceDetector` はサブプロジェクト5で追加する（未追加）。
 // `StampRasterizer` と `RasterizedStampAsset` は Rendering/StampRasterizer.swift に
 // 実装済み（3 章）。
 

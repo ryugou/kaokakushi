@@ -63,7 +63,7 @@
 
 **正本:** Domain の各ポート宣言の doc コメント（事前条件・冪等性・トランザクション境界）。偽実装はその契約を in-memory で忠実に再現する（例: FakeExportSagaStore は settleExport の事前条件検査・二重確定拒否・discardExport の冪等を再現し、呼び出し履歴を記録する）。
 
-- [ ] 各偽実装は「呼び出し記録」「注入可能な失敗」「in-memory 状態」を持つ。ExportSagaStore の偽実装は台帳カウンタを持ち、消費が起きたか検証できる形にする
+- [ ] 各偽実装は「呼び出し記録」「注入可能な失敗」「in-memory 状態」を持つ。ExportSagaStore の偽実装は台帳カウンタを持ち、消費が起きたか検証できる形にする。FakeOutputFileVerifier は `OutputFileVerificationError` の各ケース（`.ioFailure` 含む）を注入できること（Task 6 の削除経路の区別テストに必要）
 - [ ] reviewer 一次レビュー → コミット `test: Application の偽ストア群 (#7)`
 
 ### Task 4: ExportCoordinator — 認可と開始（export-saga.md 1章）
@@ -106,7 +106,7 @@
 **正本:** export-saga.md 3章（settleExport / settleBatch は store の単一トランザクションへ委譲。ここが唯一の確定境界）、6章（確定後の実体喪失: verify 不一致で OutputRecord を物理削除、台帳不変、自動再生成なし）、test-plan.md 3.2・3.4。
 
 - [ ] settleExport / settleBatch の呼び出し（SerialTaskQueue 経由。settledAt はバッチのみクロックから渡す）。store の throw（二重確定・0件 throw 等）を伝播
-- [ ] 実体喪失の検査経路: 完了済み出力の提示前に OutputFileVerifier で byteSize / sha256 を照合し、不一致なら deleteOutput 相当の削除（OutputDeliveryStore.deleteOutput）＋利用者へ「復元できない・新しい書き出しになる」outcome
+- [ ] 実体喪失の検査経路: 完了済み出力の提示前に OutputFileVerifier で byteSize / sha256 を照合し、不一致なら deleteOutput 相当の削除（OutputDeliveryStore.deleteOutput）＋利用者へ「復元できない・新しい書き出しになる」outcome。**catch-all で削除経路へ入れない**: 削除の根拠は `OutputFileVerificationError` の missing / emptyFile / undecodable と測定値不一致のみで、`.ioFailure` は削除せず提示のみ（Task 1 レビューでの決定）
 - [ ] テスト: 二重 settle で消費が重複しないこと（偽ストアの拒否を伝播）、実体喪失時に UsageLedger が不変であること
 - [ ] reviewer 一次レビュー → コミット `feat: ExportCoordinator の完了操作と実体喪失 (#7)`
 
