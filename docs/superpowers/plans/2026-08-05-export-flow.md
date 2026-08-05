@@ -82,6 +82,7 @@
 
 - [ ] 1.6 の順序で実装: 1.1 一致検査 → 1.2 能力（authorizeRenderSpec。免除条件は startExport 内の評価に委ねる）→ 実体確認（ManagedFileStore.withReadAccess での存在確認）→ 1.3 は startExport が評価（ExportStartDecision.blocked を outcome へ写像）
 - [ ] テスト（test-plan 3.1）: 検査順序、各不成立で startExport が呼ばれない・ExportJob が作られないこと、triage 再導出をしないこと、実体欠損で invalidateWorkingSource が呼ばれ再選択導線 outcome になること、revision 不一致の throw が伝播すること
+- [ ] **完了条件（Task 3 レビューでの追加）**: 偽ストアの失敗注入を実際に使い、**ストアが throw したエラーを Coordinator が握りつぶさず呼び出し元へ伝播すること**を検証するテストを含める（Global Constraints「エラーの握りつぶし禁止」の担保。失敗注入セッターが使われないまま追加されるのを防ぐ）
 - [ ] reviewer 一次レビュー → コミット `feat: ExportCoordinator の認可と開始 (#7)`
 
 ### Task 5: ExportCoordinator — 生成と中断後始末（export-saga.md 3〜4章）
