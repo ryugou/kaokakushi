@@ -150,7 +150,7 @@ private actor FakeExportSagaStore: ExportSagaStore {
     private(set) var recordGeneratedOutputCalls: [RecordOutputInput] = []
     private(set) var settleExportCalls: [ExportID] = []
     private(set) var settleBatchCalls: [(batchID: BatchID, settledAt: Date)] = []
-    private(set) var discardExportCalls: [ExportID] = []
+    private(set) var discardExportCalls: [(exportID: ExportID, temporaryFiles: [ManagedFileRef])] = []
     private(set) var loadRunningJobsCallCount = 0
     private(set) var deleteRunningJobsCalls: [[ExportID]] = []
 
@@ -178,8 +178,8 @@ private actor FakeExportSagaStore: ExportSagaStore {
         settleBatchCalls.append((batchID, settledAt))
     }
 
-    func discardExport(_ exportID: ExportID) async throws {
-        discardExportCalls.append(exportID)
+    func discardExport(_ exportID: ExportID, temporaryFiles: [ManagedFileRef]) async throws {
+        discardExportCalls.append((exportID, temporaryFiles))
     }
 
     func loadRunningJobs() async throws -> [ExportJob] {
@@ -255,7 +255,11 @@ func fakeExportSagaStoreForwardsJobMaintenanceArguments() async throws {
         ExportStartBlock(reason: .trialCreditsUnavailable, limit: nil)))
 
     let discardedID = ExportID(rawValue: UUID())
-    try await store.discardExport(discardedID)
+    let temporaryFiles = [
+        ManagedFileRef(kind: .processingTemporary, fileID: ManagedFileID(rawValue: UUID())),
+        ManagedFileRef(kind: .rasterTemporary, fileID: ManagedFileID(rawValue: UUID()))
+    ]
+    try await store.discardExport(discardedID, temporaryFiles: temporaryFiles)
 
     _ = try await store.loadRunningJobs()
 
@@ -263,7 +267,9 @@ func fakeExportSagaStoreForwardsJobMaintenanceArguments() async throws {
     try await store.deleteRunningJobs(deletedIDs)
 
     let discardCalls = await store.discardExportCalls
-    #expect(discardCalls == [discardedID])
+    #expect(discardCalls.count == 1)
+    #expect(discardCalls[0].exportID == discardedID)
+    #expect(discardCalls[0].temporaryFiles == temporaryFiles)
 
     let loadCallCount = await store.loadRunningJobsCallCount
     #expect(loadCallCount == 1)

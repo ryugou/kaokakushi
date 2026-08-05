@@ -1032,7 +1032,8 @@ struct CreateWorkingSourceInput: Sendable {
     let capture: OriginalCaptureMetadata      // EXIF 由来（正準スキーマ 5.1）。Project へ保存する
     let libraryCreationDate: Date?            // Project へ保存する
     let representation: SourceRepresentation  // Project へ保存する（アーキテクチャ設計 7.5）
-    let initialSpec: RenderSpec
+    let initialSpec: RenderSpec               // Application 層が EffectSetting/FaceTrack へ
+                                              // 展開する（Issue #25）。WorkingSourceStore は保存しない
 }
 
 struct ReplaceWorkingSourceInput: Sendable {
@@ -1042,6 +1043,7 @@ struct ReplaceWorkingSourceInput: Sendable {
     let capture: OriginalCaptureMetadata       // Project の値を新しい素材のもので置き換える
     let libraryCreationDate: Date?
     let representation: SourceRepresentation
+    let sourceLocator: ProjectSourceLocator    // 再選択した素材の参照で Project を更新する
     // 旧ファイルは DB トランザクション内で読む。呼び出し側から渡さない
 }
 
@@ -1052,6 +1054,7 @@ struct AttachWorkingSourceInput: Sendable {
     let capture: OriginalCaptureMetadata
     let libraryCreationDate: Date?
     let representation: SourceRepresentation
+    let sourceLocator: ProjectSourceLocator    // 再接続した素材の参照で Project を更新する
 }
 ```
 

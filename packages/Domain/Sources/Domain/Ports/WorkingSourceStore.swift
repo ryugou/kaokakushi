@@ -7,8 +7,8 @@ import Foundation
 // `OriginalCaptureMetadata` / `RenderSpec` は既に実装済み（Task 2、Rendering/Boundary.swift・
 // Rendering/RenderSpec.swift）のため再宣言しない。
 //
-// 【実装中の判断】`SourceRepresentation`（architecture.md 1969 行目、
-// `enum SourceRepresentation: Sendable, Equatable { case original, transcoded }`）は
+// 【実装中の判断】`SourceRepresentation`（architecture.md 7.5「出力メタデータは許可リストで
+// 構築する」節、`enum SourceRepresentation: Sendable, Equatable { case original, transcoded }`）は
 // spec 上「Task 2 で実装済み」とされていたが、実際には packages/Domain 全体に存在しない
 // （grep で確認済み）。Task 2 の実装コメント（Rendering/Boundary.swift 冒頭）は
 // 「`SourceRepresentation` は…Task 4 の担当であるため今回は追加しない」と明記しており、
@@ -122,6 +122,7 @@ public struct ReplaceWorkingSourceInput: Sendable {
     public let capture: OriginalCaptureMetadata       // Project の値を新しい素材のもので置き換える
     public let libraryCreationDate: Date?
     public let representation: SourceRepresentation
+    public let sourceLocator: ProjectSourceLocator    // 再選択した素材の参照で Project を更新する
     // 旧ファイルは DB トランザクション内で読む。呼び出し側から渡さない
 
     public init(
@@ -130,7 +131,8 @@ public struct ReplaceWorkingSourceInput: Sendable {
         replacedAt: Date,
         capture: OriginalCaptureMetadata,
         libraryCreationDate: Date?,
-        representation: SourceRepresentation
+        representation: SourceRepresentation,
+        sourceLocator: ProjectSourceLocator
     ) {
         self.projectID = projectID
         self.newSourceFile = newSourceFile
@@ -138,6 +140,7 @@ public struct ReplaceWorkingSourceInput: Sendable {
         self.capture = capture
         self.libraryCreationDate = libraryCreationDate
         self.representation = representation
+        self.sourceLocator = sourceLocator
     }
 }
 
@@ -149,6 +152,7 @@ public struct AttachWorkingSourceInput: Sendable {
     public let capture: OriginalCaptureMetadata
     public let libraryCreationDate: Date?
     public let representation: SourceRepresentation
+    public let sourceLocator: ProjectSourceLocator    // 再接続した素材の参照で Project を更新する
 
     public init(
         projectID: ProjectID,
@@ -156,7 +160,8 @@ public struct AttachWorkingSourceInput: Sendable {
         attachedAt: Date,
         capture: OriginalCaptureMetadata,
         libraryCreationDate: Date?,
-        representation: SourceRepresentation
+        representation: SourceRepresentation,
+        sourceLocator: ProjectSourceLocator
     ) {
         self.projectID = projectID
         self.sourceFile = sourceFile
@@ -164,5 +169,6 @@ public struct AttachWorkingSourceInput: Sendable {
         self.capture = capture
         self.libraryCreationDate = libraryCreationDate
         self.representation = representation
+        self.sourceLocator = sourceLocator
     }
 }

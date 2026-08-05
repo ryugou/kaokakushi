@@ -250,7 +250,7 @@ actor HistoryDeletionCoordinator { }   // Project / Batch 削除、編集中の�
 | `HistoryDeletionCoordinator` | `Project` / `Batch` 削除、編集中の破棄（7.5） |
 | `StartupRecoveryCoordinator` | 起動時に 1 回のみ実行し、**完了まで他のすべてを開始させない** |
 
-**整合は `canDeleteHistoryUnit` が非終端の `ExportJob` および未削除の `OutputRecord` を絶対保護として同一 DB トランザクション内で見ることで成立する**（7.5）。判定と削除を同一 DB トランザクションへ閉じることで整合する。`DatabaseQueue` がトランザクションを直列化するため判定と挿入は交差しない。
+**整合は、履歴削除の判定（7.5 の絶対保護）が同一 DB トランザクション内で成立することで実現する**（7.5）。判定と削除を同一 DB トランザクションへ閉じることで整合する。`DatabaseQueue` がトランザクションを直列化するため判定と挿入は交差しない。
 
 **`Application` が直接 `import` してはいけないもの**を明示する。
 
@@ -713,12 +713,14 @@ Free 範囲のプロジェクトとは、モザイク・ぼかし・黒塗り・
 
 **新しい `projectID` が付くため、元素材の記録をそのまま共有できない**（`WorkingSourceRecord` は `projectID` ごとの記録であり参照ではなく複製が要る。[画像処理](image-pipeline.md) が正本）。
 
+**`WorkingSourceRecord.projectID` は `Project` への外部キーであり（7.1）、`Project` より先に挿入できない。** そのため実体のコピーと DB への複製を分け、DB 側は単一トランザクションへまとめる。
+
 | 順 | 操作 | 保存先 | 失敗時 |
 | --- | --- | --- | --- |
 | 1 | 新しい `ProjectID` を発行する | — | — |
-| 2 | 元素材の実体がある場合、**存在確認を通したうえでコピー元として取得し**（[画像処理](image-pipeline.md)）、新しい `projectID` を指す `WorkingSourceRecord` を作る | ファイルシステム / DB | 手順 3 へ |
-| 3 | DB トランザクションで `Project` と設定を複製し、有料スタンプの領域を選択された方式へ置換する | DB | 手順 4 へ |
-| 4 | 手順 3 が失敗したら、作成済みの `WorkingSourceRecord` と実体を補償削除する | DB / ファイルシステム | 起動時 GC へ委ねる |
+| 2 | 元素材の実体がある場合、**存在確認を通したうえでコピー元として取得し**（[画像処理](image-pipeline.md)）、新しい実体ファイルを作成する（この時点では DB へ書き込まない） | ファイルシステム | 手順 3 へ |
+| 3 | **単一 DB トランザクション**で `Project`・設定・`WorkingSourceRecord`（手順 2 で実体を作成していればそれを指す）を複製し、有料スタンプの領域を選択された方式へ置換する | DB | 手順 4 へ |
+| 4 | 手順 3 が失敗したら、手順 2 で作成した実体ファイルを補償削除する | ファイルシステム | 起動時 GC へ委ねる |
 
 **処理用ファイルを共有しない**（同じ実体を 2 つの `Project` が指すと一方の書き出し完了/破棄が他方の素材を削除する）。**元素材の実体が無い場合は `WorkingSourceRecord` を作らずに複製する**（利用者の再選択時に通常の再接続〈[画像処理](image-pipeline.md)〉が走る）。**`ExportedSettingsEntry` は複製しない**（複製先はまだ書き出しておらず「変更せず再書き出し」の対象にならない）。この Saga も `SourceImportCoordinator` が所有する。
 
@@ -1199,8 +1201,9 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `BatchPreset` | 一括設定プリセット |
 | `DeliveryAttempt` | 写真ライブラリ保存の試行中を表す。`previousState` を持つ（[書き出し Saga](export-saga.md) が正本） |
 | `UnknownLibrarySave` | 保存結果が不明のまま `delivered` を維持したことの記録 |
-| `ExportJob` | 書き出しの進行中を表す（状態列を持たず、行の存在そのものが進行中を示す。完了操作または破棄で削除する。[書き出し Saga](export-saga.md) が正本） |
+| `ExportJob` | 書き出しの進行中を表す（状態列を持たず、行の存在そのものが進行中を示す。完了操作または破棄で削除する。[書き出し Saga](export-saga.md) が正本）。`settingsHash` 列（startExport 時点の `ProjectSettingsHash`。settle で `ExportedSettingsEntry` へコピーする Persistence 内部列）を持つ |
 | `OutputRecord` | 写真ごとの出力状態。`exportID` で書き出しと対応づける |
+| `ExportedSettingsEntry` | 「変更せず再書き出し」免除の確定記録（6.3）。`projectID` ごとに 1 件 |
 | `ExportQueueItem` | 一括処理のキュー状態（6.4） |
 | `WorkingSourceRecord` | 処理用にアプリ領域へ複製した元素材（[画像処理](image-pipeline.md)） |
 | `PendingFileDeletion` | 参照 0 になった実体の削除候補（7.5） |
@@ -1256,6 +1259,8 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `ExportQueueItem(batchID, projectID)` | **UNIQUE** |
 | `DeliveryAttempt.exportID` | **PRIMARY KEY** |
 | `UnknownLibrarySave.exportID` | **PRIMARY KEY** |
+| `ExportedSettingsEntry.projectID` | **PRIMARY KEY**（免除の確定記録は projectID ごとに 1 件。6.3） |
+| `UsageLedger` / `SubscriptionState` | **単一行キー**（`id INTEGER PRIMARY KEY CHECK(id = 1)` 相当。「台帳は 1 つ」「キャッシュは 1 つ」を DB 制約で固定する） |
 
 外部キーは `PRAGMA foreign_keys = ON` で有効化し、次を宣言します。
 
@@ -1547,6 +1552,8 @@ protocol ProtectedDataAvailability: Sendable {
 - `WorkingSourceRecord` と処理用ファイル
 - `ExportRecord`、完了済みの `ExportQueueItem`
 
+**v1 では履歴サムネイルの生成コード自体が無く、削除対象になる実体が存在しない**（7.5「履歴サムネイル」が正本。生成・削除経路・孤児 GC は Issue #26 で同時に導入する）。
+
 例外は 4 つです。
 
 - **未受け渡しの出力ファイル。** 利用者がまだ受け取っていない成果物であり、履歴とは性質が異なる。保存・共有・破棄のいずれかで解消する
@@ -1679,13 +1686,13 @@ struct DeletionContext: Sendable {
     let hasUndeliveredOutputRecord: Bool   // isUndelivered のみ（settledAt != nil の出力が対象）。delivered は保護しない
     let hasRunningExportJob: Bool
     let hasWorkingSourceRecord: Bool
+    let hasDeliveryAttemptInProgress: Bool // 対象 Project の出力に試行中の DeliveryAttempt が1件でもあるか
 }
-
-func canDeleteHistoryUnit(
-    _ unit: HistoryUnit,          // Project
-    context: DeletionContext
-) -> Bool
 ```
+
+**削除可否判定は `HistoryDeletionStore` の実装（Persistence）が `inspectDeletion` / `deleteHistoryUnit`（下記「実装の所在」）で共有する単一の内部判定として持つ。public な `Domain` 純粋関数は設けない**（両操作が同一の内部判定を共有することで、判定を 1 か所へ集約する）。判定規則そのもの（`DeletionContext` の各フィールド、下記の参照元表、`AbsoluteProtection`）はこの節の記述が正本のまま。
+
+**v1 では `Project` に `isFavorite` / `isBeingEdited` の列が無く、お気に入り・編集中の上書き可能保護は機能しない（常に非保護扱い）。** 列の追加と判定の有効化は Issue #23 で行う（`WorkingSourceRecord` による保護は列を必要としないため v1 でも機能する）。
 
 **履歴は写真アプリ型のフラットな写真グリッドであり、閲覧・削除の単位は `Project` のみとする**（バッチのグルーピングは処理の単位としてのみ存在し、閲覧・削除の単位ではない。[商品面の決定](product-decisions.md)）。`Batch` 行自体は利用者が直接削除する対象ではなく、所属する `Project` がすべて削除されたときに自動的に消える（下記「`Project` 削除 Saga」）。
 
@@ -1696,11 +1703,12 @@ func canDeleteHistoryUnit(
 | **絶対保護**（どの契機でも削除しない） | **非終端のキュー項目**（`isTerminal == false`。6.4） | 処理中のバッチが消える |
 | 同上 | **`ExportJob` の行**（[書き出し Saga](export-saga.md) の 2 章） | 進行中の書き出しが宙に浮く |
 | 同上 | **`isUndelivered` の `OutputRecord`**（`hasUndeliveredOutputRecord`） | 利用者が受け取っていない成果物が消える |
-| **利用者が上書きできる** | お気に入り | 利用者が明示的に保護した履歴が消える |
-| 同上 | 編集中のプロジェクト | 編集画面が参照先を失う |
+| 同上 | **試行中の `DeliveryAttempt`**（`hasDeliveryAttemptInProgress`。[書き出し Saga](export-saga.md) の 7.0） | 写真ライブラリ保存の試行中に出力記録が失われ、結果を追跡できなくなる |
+| **利用者が上書きできる** | お気に入り（v1 では機能しない。上記） | 利用者が明示的に保護した履歴が消える |
+| 同上 | 編集中のプロジェクト（v1 では機能しない。上記） | 編集画面が参照先を失う |
 | 同上 | `WorkingSourceRecord`（[画像処理](image-pipeline.md)） | 処理用の元素材が消え、キューを復元できない |
 
-**絶対保護は 3 つだけ**（いずれも「消すと復旧できない」か「利用者がまだ受け取っていない」ため確認を出しても意味がない）。残りは利用者の明示操作で上書きできる。**契機ごとに扱いを変える**（「閲覧と削除は常に可能」という原則〈6.2〉と自動削除の安全性を両立させるため）。
+**絶対保護は 4 つ**（「消すと復旧できない」「利用者がまだ受け取っていない」「進行中の受け渡し試行と競合する」のいずれかに該当し、確認を出しても意味がない）。残りは利用者の明示操作で上書きできる。**契機ごとに扱いを変える**（「閲覧と削除は常に可能」という原則〈6.2〉と自動削除の安全性を両立させるため）。
 
 | 契機 | 絶対保護 | 上書き可能な参照 |
 | --- | --- | --- |
@@ -1716,6 +1724,8 @@ func canDeleteHistoryUnit(
 | 編集中 | 編集内容が失われること |
 | `WorkingSourceRecord` | 処理用の素材も削除されること |
 
+**お気に入り・編集中の行は Issue #23 で判定が有効化されるまで到達しない**（v1 の決定は上記を参照）。
+
 **判定と削除は同一トランザクション内で行う**（別にすると判定と削除の間に新しい参照が生まれる。外部キーの `RESTRICT`〈7.1〉が二重防御として働く）。写真ライブラリへ保存済みの加工済み画像は削除されない（設定画面と削除確認の両方に明示する）。
 
 ##### `Project` 削除 Saga
@@ -1724,8 +1734,8 @@ func canDeleteHistoryUnit(
 
 | 順 | 操作 |
 | --- | --- |
-| 1 | `canDeleteHistoryUnit` が真であることを確認する |
-| 2 | **同一 DB トランザクション**で `Project` と関連行（`ExportRecord` / `OutputRecord` / キュー項目 / `WorkingSourceRecord` / 検出・レビュー結果 / `ProjectStampAsset` / 履歴サムネイル / `ExportedSettingsEntry`）を削除し、実体を `PendingFileDeletion` へ積む |
+| 1 | 削除可否判定（7.5）を満たすことを確認する |
+| 2 | **同一 DB トランザクション**で `Project` と関連行（`ExportRecord` / `OutputRecord` / キュー項目 / `WorkingSourceRecord` / 検出・レビュー結果 / `ProjectStampAsset` / `ExportedSettingsEntry`）を削除し、実体を `PendingFileDeletion` へ積む |
 | 3 | 削除した `Project` が `Batch` に属しており、そのトランザクション内で数えた **残り所属 `Project` 数が 0** になった場合、**同じトランザクションで `Batch` 行も削除する** |
 | 4 | `PendingFileDeletion` に従って実体を削除する |
 
@@ -1733,7 +1743,7 @@ func canDeleteHistoryUnit(
 
 ##### 編集中 `Project` の破棄
 
-書き出し前の `Project` を破棄する場合も `Project` 削除 Saga と同じ手順を使う。`beingEdited` の上書き確認を伴う（削除の可否判定）。
+書き出し前の `Project` を破棄する場合も `Project` 削除 Saga と同じ手順を使う。`beingEdited` の上書き確認を伴う（削除の可否判定）。**v1 では `isBeingEdited` が常に `false` のためこの確認は発生しない**（Issue #23 で有効化）。
 
 ##### 実装の所在
 
@@ -1749,7 +1759,7 @@ protocol HistoryDeletionStore: Sendable {
     ) async throws -> DeletionInspection
 
     /// DB トランザクション内で DeletionContext を再取得し、
-    /// canDeleteHistoryUnit を再評価してから削除する（所属 Batch が空になった場合の自動削除を含む）
+    /// 削除可否判定を再評価してから削除する（所属 Batch が空になった場合の自動削除を含む）
     func deleteHistoryUnit(
         _ unit: HistoryUnit,
         trigger: DeletionTrigger
@@ -1767,6 +1777,8 @@ enum AbsoluteProtection: Sendable, Hashable {
     case nonTerminalQueueItem
     case exportJobRunning
     case undeliveredOutput
+    /// 試行中の DeliveryAttempt（写真ライブラリ保存）が存在するため削除を拒否する
+    case deliveryAttemptInProgress
 }
 ```
 
@@ -1803,12 +1815,12 @@ enum AbsoluteProtection: Sendable, Hashable {
 | 項目 | 規約 |
 | --- | --- |
 | ディレクトリ | `thumbnails/` |
-| 参照 | ファイル名ではなく `ManagedFileRef(.historyThumbnail, ...)`（`Project` が保持） |
+| 参照 | ファイル名ではなく `ManagedFileRef(.historyThumbnail, ...)`。**v1 では `Project` に参照列が無く常に空集合として扱う**（7.5「`MaintenanceStore`」の対応表） |
 | 保護クラス | `.complete`（加工後とはいえ顔を含む画像） |
 | バックアップ | 対象外 |
-| 生成 | `ManagedFileStore` を通す |
-| 削除 | `Project` 削除と**同じ DB トランザクション**で `PendingFileDeletion` へ追加 |
-| 孤児 GC | 起動時に `Project` から参照されない実体を回収 |
+| 生成 | **v1 では生成コードを持たない**（Issue #26 で導入する。導入時も `ManagedFileStore` を通す） |
+| 削除 | **v1 では行わない**（`Project` に参照列が無く実体解放の対象にできない）。`PendingFileDeletion` への登録は履歴表示サブプロジェクト（Issue #26）で有効化する |
+| 孤児 GC | **v1 では無効**（参照集合が常に空集合のため。現用実体を誤って削除しない側へ倒す）。Issue #26 で有効化する |
 | 復元時に実体が無い | プレースホルダを表示する。**履歴自体は消さない** |
 
 `CustomStamp` の一覧サムネイルは `StampAsset` の実体から再生成できるキャッシュとして扱う（欠損時は実体から作り直す）。
@@ -1879,8 +1891,15 @@ struct CustomStamp: Sendable, Equatable {
 // Domain — 永続化ポート
 protocol StampStore: Sendable {
     /// 取り込み。body が一時ファイルへ書いた内容の SHA-256 が既存の StampAsset と一致すれば
-    /// それを再利用し、新規に書いたファイルは破棄する。一致しなければ新規 StampAsset を作る
-    func importCustomStamp(_ body: @Sendable (URL) async throws -> Void) async throws -> (stamp: CustomStamp, assetHash: StampAssetHash)
+    /// それを再利用し、新規に書いたファイルは破棄する。一致しなければ新規 StampAsset を作る。
+    /// thumbnailBody は一覧サムネイル（.stampThumbnail）を書き込む（ラスタライズは
+    /// 呼び出し元が MediaKit で行う。重複取り込みでも CustomStamp 行ごとに作る）。
+    /// sortOrder は既存の最大値 + 1 を store が採番する（呼び出し側の競合と採番漏れを防ぐ）
+    func importCustomStamp(
+        name: String,
+        body: @Sendable (URL) async throws -> Void,
+        thumbnailBody: @Sendable (URL) async throws -> Void
+    ) async throws -> (stamp: CustomStamp, assetHash: StampAssetHash)
 
     /// スタンプ一覧
     func loadCustomStamps() async throws -> [CustomStamp]
@@ -1942,7 +1961,7 @@ struct StampStorageBreakdown: Sendable {
 
 ##### 孤児ファイルの GC
 
-`PendingFileDeletion` だけでは作成手順 3 で失敗したファイルを回収できない（記録前に落ちるため）。起動時に専用ディレクトリの実体と DB 上の参照一覧を突き合わせ、どちらにも属さないファイルを削除する（対象: `StampAsset` の実体、ラスタスタンプ一時ファイル、書き出しの一時ファイル、処理用ファイル、履歴サムネイル）。**履歴削除・`CustomStamp` 削除・容量超過削除もすべてこの経路を通す**（入口ごとに別順序だと片方だけ孤児が残る）。
+`PendingFileDeletion` だけでは作成手順 3 で失敗したファイルを回収できない（記録前に落ちるため）。起動時に専用ディレクトリの実体と DB 上の参照一覧を突き合わせ、どちらにも属さないファイルを削除する（対象: `StampAsset` の実体、ラスタスタンプ一時ファイル、書き出しの一時ファイル、処理用ファイル）。**履歴サムネイルは v1 では対象外**（生成コード自体が無いため。参照列・生成の導入と同時に Issue #26 で対象へ加える）。**履歴削除・`CustomStamp` 削除・容量超過削除もすべてこの経路を通す**（入口ごとに別順序だと片方だけ孤児が残る）。
 
 ##### `MaintenanceStore`
 
@@ -1972,11 +1991,12 @@ protocol MaintenanceStore: Sendable {
 | --- | --- |
 | `.output` | `OutputRecord.outputFile` |
 | `.stampAsset` | `StampAsset` の行そのもの（内容ハッシュが主キー） |
-| `.historyThumbnail` | `Project` が保持する `ManagedFileRef` |
+| `.historyThumbnail` | **v1 では参照列が無いため常に空集合**（孤児 GC は無効。現用実体を誤って削除しない側へ倒す）。参照列の追加と GC 有効化は履歴表示サブプロジェクト（Issue #26）で行う |
 | `.processingTemporary` | `WorkingSourceRecord.sourceFile` |
-| `.stampThumbnail` / `.rasterTemporary` | **常に空集合**（DB 参照を持たない一時ファイル・再生成可能なキャッシュ。存在するものはすべて孤児候補として扱う） |
+| `.stampThumbnail` | `CustomStamp.thumbnail`（DB 列 `thumbnailFileID`。一覧サムネイルは行が参照を持つ。欠損時は実体から再生成する） |
+| `.rasterTemporary` | **常に空集合**（DB 参照を持たない一時ファイル。存在するものはすべて孤児候補として扱う） |
 
-起動時復旧の手順は、(1) `loadPendingFileDeletions` で未処理分の実体削除を再試行し成功したものを `clearPendingFileDeletion` で消す、(2) 種別ごとに `listExistingFileIDs` と `listReferencedFileIDs` の差集合を求め `registerOrphan` で削除候補へ登録する、(3) 登録した候補を（1）と同じ経路で削除する。**`.stampThumbnail` / `.rasterTemporary` は参照元が無いため、次回起動をまたいで存在するものはすべて孤児として削除してよい**（前者は実体から再生成できるキャッシュ、後者は 1 回の `render` 呼び出し内でのみ有効なため）。
+起動時復旧の手順は、(1) `loadPendingFileDeletions` で未処理分の実体削除を再試行し成功したものを `clearPendingFileDeletion` で消す、(2) 種別ごとに `listExistingFileIDs` と `listReferencedFileIDs` の差集合を求め `registerOrphan` で削除候補へ登録する、(3) 登録した候補を（1）と同じ経路で削除する。**`.rasterTemporary` は参照元が無いため、次回起動をまたいで存在するものはすべて孤児として削除してよい**（1 回の `render` 呼び出し内でのみ有効なため）。`.stampThumbnail` は `CustomStamp.thumbnail`（DB 列 `thumbnailFileID`）を参照元とし、参照されない実体のみを孤児として削除する（欠損時は実体から再生成できるキャッシュだが、行が参照を持つ以上、参照中の実体を削除しない）。
 
 ##### 使用容量の表示
 

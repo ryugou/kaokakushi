@@ -1,6 +1,6 @@
 import Foundation
 
-// 一括処理への参入可否（architecture.md 6.4「バッチ処理」節〈872-879行付近〉。Task 2,
+// 一括処理への参入可否（architecture.md 6.4「バッチ処理」節冒頭。Task 2,
 // Issue #20）。
 //
 // 一括処理の制限なし利用は canUseProBatch が必要。canUseBatchTrial だけを持つ利用者は、

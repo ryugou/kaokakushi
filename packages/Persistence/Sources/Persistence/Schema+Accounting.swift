@@ -1,0 +1,104 @@
+import GRDB
+
+// Accounting 系テーブル（architecture.md 7.1 / 6.3）。ExportJob → OutputRecord →
+// ExportRecord → UsageLedger → ExportedSettingsEntry の順で作成する。
+// いずれもProject・Batchを参照するため、この関数はSchema.swiftの呼び出し順で
+// createProjectTables / createQueueTables の後に呼ばれる必要がある。
+
+/// `ExportJob`・`OutputRecord`・`ExportRecord`・`UsageLedger`・
+/// `ExportedSettingsEntry` を作成する。
+func createAccountingTables(_ database: Database) throws {
+    try createExportProgressTables(database)
+    try createSettlementTables(database)
+}
+
+/// 書き出し進行中の状態（`ExportJob` / `OutputRecord` と部分 UNIQUE）。
+private func createExportProgressTables(_ database: Database) throws {
+    try database.create(table: "ExportJob") { tableDef in
+        tableDef.primaryKey("exportID", .blob)
+        tableDef.column("projectID", .blob).notNull().references("Project", onDelete: .restrict)
+        tableDef.column("batchID", .blob).references("Batch", onDelete: .setNull)
+        // ExportQueueItemの行そのもの（キュー経路の場合のみ）。FKは宣言しない
+        // （外部キー表に記載が無い）。
+        tableDef.column("queueItemID", .blob)
+        tableDef.column("authorizedAt", .datetime).notNull()
+        // ExportAccountingModeの判別子。raw valueの割当はStore実装タスクの担当。
+        tableDef.column("accountingMode", .integer).notNull()
+        // Plan.rawValue / PlanStatus.rawValue。
+        tableDef.column("entitlementPlan", .integer).notNull()
+        tableDef.column("entitlementStatus", .integer).notNull()
+        tableDef.column("entitlementExpiresAt", .datetime)
+        tableDef.column("entitlementLastVerifiedAt", .datetime).notNull()
+        tableDef.column("entitlementIsSandbox", .boolean).notNull()
+        // ImageFormatの判別子。raw valueの割当はStore実装タスクの担当。
+        tableDef.column("deliveryFormat", .integer).notNull()
+        tableDef.column("deliverySuggestedCreationDate", .datetime)
+        // startExport時点で計算したProjectSettingsHash（canonical-schema.md 5.2）。
+        // settle（export-saga.md 3章 手順5）はRenderSpec/ExportSettingを再構築する手段を
+        // 持たないため、平文値が手元にあるstartExport時点で計算しここへ保存し、settle時に
+        // ExportedSettingsEntryへそのままコピーする（オーケストレーター確定判断。Issue #6
+        // Task 5後半）。Domainの`ExportJob`構造体には出現しないPersistence内部専用の列。
+        tableDef.column("settingsHash", .blob).notNull()
+    }
+
+    try database.create(table: "OutputRecord") { tableDef in
+        tableDef.primaryKey("exportID", .blob)
+        tableDef.column("projectID", .blob).notNull().references("Project", onDelete: .restrict)
+        tableDef.column("batchID", .blob).references("Batch", onDelete: .setNull)
+        // ManagedFileRef(.output, fileID)のfileID。
+        tableDef.column("outputFileID", .blob).notNull()
+        tableDef.column("outputByteSize", .integer).notNull()
+        tableDef.column("outputSHA256", .blob).notNull()
+        // OutputState.rawValue（generated=1, deliveryUnknown=2, delivered=3）。
+        tableDef.column("state", .integer).notNull()
+        tableDef.column("generatedAt", .datetime).notNull()
+        tableDef.column("settledAt", .datetime)
+        tableDef.column("expiresAt", .datetime)
+        // ImageFormatの判別子。raw valueの割当はStore実装タスクの担当。
+        tableDef.column("format", .integer).notNull()
+        tableDef.column("suggestedCreationDate", .datetime)
+    }
+
+    // 「未確定の出力は1プロジェクトにつき1件」の部分UNIQUEインデックス
+    // （architecture.md 7.1）。settledAtがNULLの行だけを対象にする。
+    try database.create(
+        index: "OutputRecord_on_projectID_where_pending",
+        on: "OutputRecord",
+        columns: ["projectID"],
+        options: .unique,
+        condition: Column("settledAt") == nil
+    )
+}
+
+/// 完了操作で確定する記録（`ExportRecord` / `UsageLedger` / `ExportedSettingsEntry`）。
+private func createSettlementTables(_ database: Database) throws {
+    try database.create(table: "ExportRecord") { tableDef in
+        tableDef.primaryKey("exportID", .blob)
+        tableDef.column("projectID", .blob).notNull().references("Project", onDelete: .cascade)
+        tableDef.column("batchID", .blob).references("Batch", onDelete: .setNull)
+        tableDef.column("exportedAt", .datetime).notNull()
+        // ExportAccountingModeの判別子。raw valueの割当はStore実装タスクの担当。
+        tableDef.column("accountingMode", .integer).notNull()
+        // ImageFormatの判別子。raw valueの割当はStore実装タスクの担当。
+        tableDef.column("format", .integer).notNull()
+        tableDef.column("outputByteSize", .integer).notNull()
+    }
+
+    try database.create(table: "UsageLedger") { tableDef in
+        // 単一行キー（architecture.md 7.1: id INTEGER PRIMARY KEY CHECK(id = 1)相当）。
+        // 「台帳は1つ」をDB制約で固定する。INTEGER PRIMARY KEYは自動的にNOT NULL。
+        tableDef.primaryKey("id", .integer).check(sql: "id = 1")
+        tableDef.column("periodYear", .integer).notNull()
+        tableDef.column("periodMonth", .integer).notNull()
+        // Set<ExportID>のシリアライズ形式は未確定。シリアライズ方式はExportSagaStore
+        // 実装タスクの担当。
+        tableDef.column("consumedExportIDs", .blob).notNull()
+        tableDef.column("trialConsumedExportIDs", .blob).notNull()
+    }
+
+    try database.create(table: "ExportedSettingsEntry") { tableDef in
+        tableDef.primaryKey("projectID", .blob).references("Project", onDelete: .cascade)
+        tableDef.column("settingsHash", .blob).notNull()
+        tableDef.column("exportedAt", .datetime).notNull()
+    }
+}

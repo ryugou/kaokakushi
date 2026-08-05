@@ -59,7 +59,8 @@ func deletionContextHoldsAllFields() {
         hasNonTerminalQueueItem: true,
         hasUndeliveredOutputRecord: false,
         hasRunningExportJob: true,
-        hasWorkingSourceRecord: false
+        hasWorkingSourceRecord: false,
+        hasDeliveryAttemptInProgress: true
     )
 
     guard case .storagePressure = subject.trigger else {
@@ -72,6 +73,7 @@ func deletionContextHoldsAllFields() {
     #expect(subject.hasUndeliveredOutputRecord == false)
     #expect(subject.hasRunningExportJob == true)
     #expect(subject.hasWorkingSourceRecord == false)
+    #expect(subject.hasDeliveryAttemptInProgress == true)
 }
 
 // MARK: - DeletionInspection / AbsoluteProtection

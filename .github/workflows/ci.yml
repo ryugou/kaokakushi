@@ -57,12 +57,29 @@ jobs:
       - name: Select Xcode 26
         uses: ./.github/actions/select-xcode
 
-      # このIssue（#4）では外部SwiftPM依存を一切追加していないため、
-      # パッケージごとの .build キャッシュは導入しない。Package.resolved が
-      # 存在しない状態でキャッシュキーを組むと常に固定キーになり「一度も
-      # 更新されないキャッシュ」を生む事故につながる。外部依存が入る後続Issueで
-      # Package.resolved を基にキャッシュキーを再設計して導入する。
+      # Issue #6（Persistence への GRDB.swift 導入）で初めて外部SwiftPM依存が入った。
+      # キャッシュ対象は「依存の取得物」だけに限定する: scratch-path 配下の
+      # checkouts / repositories / artifacts と、SwiftPM の OS 共有クローンキャッシュ
+      # （macOS: ~/Library/Caches/org.swift.swiftpm）。ビルド成果物（.build/ci-shared
+      # 全体）を Package.resolved キーで丸ごとキャッシュすると、完全一致キーの保存は
+      # 初回しか走らず、ソース変更後も古いオブジェクトが凍結されたまま使われる
+      # （「一度も更新されないキャッシュ」の再来。PR #24 レビュー指摘）。
       #
+      # キーは packages/**/Package.resolved（コミット済み。GRDB は exact ピン）の
+      # ハッシュ。依存が変わらない限り完全一致し、変われば restore-keys の
+      # プレフィックスから差分取得する。
+      - name: Cache SwiftPM dependencies (package-tests)
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build/ci-shared/checkouts
+            .build/ci-shared/repositories
+            .build/ci-shared/artifacts
+            ~/Library/Caches/org.swift.swiftpm
+          key: swiftpm-package-tests-${{ runner.os }}-${{ hashFiles('packages/**/Package.resolved') }}
+          restore-keys: |
+            swiftpm-package-tests-${{ runner.os }}-
+
       # --scratch-path を全パッケージで共有し、依存先（Domain）のビルド成果物を
       # 使い回す（共有しないと Domain が依存元の数だけ再コンパイルされる）。
       - name: swift test (all packages)

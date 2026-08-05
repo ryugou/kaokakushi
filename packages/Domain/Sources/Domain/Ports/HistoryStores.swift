@@ -2,10 +2,10 @@ import Foundation
 
 // 履歴削除の永続化ポート（architecture.md「削除の可否判定」〜「出力の削除経路」節）。
 //
-// `canDeleteHistoryUnit(_:context:)` という純粋関数（1639〜1643 行目）はここに実装しない。
-// このドメイン層実装計画のどの Task にも明示的に割り当てられていないため（spec 参照。
-// 計画の欠落と思われる）。この計画では「プロトコル群と入力型」が Task 4 の対象であり、
-// 純粋関数は対象外とする。
+// 削除可否判定を public な Domain 純粋関数として実装しない（Issue #20 で対象外と確定。
+// HistoryDeletionStoreLive.swift 冒頭コメント参照）。判定ロジックは HistoryDeletionStore
+// の実装（Persistence）が inspectDeletion / deleteHistoryUnit で共有する内部判定として持つ。
+// この計画では「プロトコル群と入力型」が Task 4 の対象であり、純粋関数は対象外とする。
 //
 // アクセス修飾（public）の方針は ExportSagaStore.swift と同じ。
 
@@ -39,6 +39,7 @@ public struct DeletionContext: Sendable {
     public let hasUndeliveredOutputRecord: Bool   // isUndelivered のみ（settledAt != nil の出力が対象）。delivered は保護しない
     public let hasRunningExportJob: Bool
     public let hasWorkingSourceRecord: Bool
+    public let hasDeliveryAttemptInProgress: Bool // 対象Projectの出力に試行中のDeliveryAttemptが1件でもあるか
 
     public init(
         trigger: DeletionTrigger,
@@ -47,7 +48,8 @@ public struct DeletionContext: Sendable {
         hasNonTerminalQueueItem: Bool,
         hasUndeliveredOutputRecord: Bool,
         hasRunningExportJob: Bool,
-        hasWorkingSourceRecord: Bool
+        hasWorkingSourceRecord: Bool,
+        hasDeliveryAttemptInProgress: Bool
     ) {
         self.trigger = trigger
         self.isFavorite = isFavorite
@@ -56,6 +58,7 @@ public struct DeletionContext: Sendable {
         self.hasUndeliveredOutputRecord = hasUndeliveredOutputRecord
         self.hasRunningExportJob = hasRunningExportJob
         self.hasWorkingSourceRecord = hasWorkingSourceRecord
+        self.hasDeliveryAttemptInProgress = hasDeliveryAttemptInProgress
     }
 }
 
@@ -68,7 +71,7 @@ public protocol HistoryDeletionStore: Sendable {
     ) async throws -> DeletionInspection
 
     /// DB トランザクション内で DeletionContext を再取得し、
-    /// canDeleteHistoryUnit を再評価してから削除する（所属 Batch が空になった場合の自動削除を含む）
+    /// 削除可否判定を再評価してから削除する（所属 Batch が空になった場合の自動削除を含む）
     func deleteHistoryUnit(
         _ unit: HistoryUnit,
         trigger: DeletionTrigger
@@ -96,4 +99,6 @@ public enum AbsoluteProtection: Sendable, Hashable {
     case nonTerminalQueueItem
     case exportJobRunning
     case undeliveredOutput
+    /// 試行中のDeliveryAttempt（写真ライブラリ保存）が存在するため削除を拒否する
+    case deliveryAttemptInProgress
 }

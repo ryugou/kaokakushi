@@ -172,9 +172,8 @@
 
 - ストレージ必要量計算、`ExportQueueState` 状態機械
 - **履歴の保存期間と容量判定。容量超過時にも、完了前のやり直しは無制限のまま保たれ、完了済み未受け渡し出力（`isUndelivered`）の 24 時間保護は絶対保護として維持されること**
-- `canDeleteHistoryUnit` が列挙された全参照元を見ること（[アーキテクチャ設計](architecture.md) の 7.5。Saga 経由でも同一判定になることは 3.6 参照）
-- **絶対保護（非終端キュー項目 / 処理中の `ExportJob` / `isUndelivered` の `OutputRecord`）が、手動削除でも拒否されること**
-- **お気に入り・編集中・`WorkingSourceRecord`（`OverridableProtection` の 3 値）が、自動削除では保護され、明示確認付きの手動削除では上書きできること**
+- **絶対保護（非終端キュー項目 / 処理中の `ExportJob` / `isUndelivered` の `OutputRecord` / 試行中の `DeliveryAttempt`）が、手動削除でも拒否されること**
+- **お気に入り・編集中・`WorkingSourceRecord`（`OverridableProtection` の 3 値）が、自動削除では保護され、明示確認付きの手動削除では上書きできること**（お気に入り・編集中は v1 では `Project` に列が無く検証不能。Issue #23 で有効化。`WorkingSourceRecord` は v1 でも検証可能）
 - **上書き対象ごとに、失われるものを示す確認文言が選ばれること**
 - 未保存バッチが 1 件までに制限されること
 - 一括処理の開始が推定必要容量の 1.2 倍の空き容量を要求すること
@@ -245,7 +244,7 @@
 - 受け渡し成功後も完了画面を離れるまで出力が保持され、保存と共有を任意の順序で実行できること
 - 異常終了後の起動時、`isUndelivered` では復旧案内が出て、`delivered` では出ないこと
 - 「履歴を保存しない」設定で、未受け渡し出力・保存結果不明の注記が付いた `delivered` 出力・`UsageLedger` の消費記録・処理中の `ExportJob` とその生成済み出力の 4 つ以外が残らないこと
-- `canDeleteHistoryUnit` が**列挙された全参照元**を保護すること
+- `HistoryDeletionStore.deleteHistoryUnit` の拒否（throw）を Saga が利用者へのエラー提示まで伝播すること（判定そのものの検証は 4.2）
 - **`Project` 削除時、それが `Batch` の最後の所属 `Project` なら `Batch` 行が同一トランザクションで削除されること**
 - **所属 `Project` が残る場合は `Batch` 行が残ること**
 - **`deleteHistoryUnit` が `DeletionContext` を受け取らず、DB トランザクション内で読み直して再判定すること**
@@ -292,6 +291,7 @@
 - **完了操作の成功後にのみ `OutputRecord.settledAt` が確定していること。途中状態（消費だけ・`settledAt` だけ等）が観測されないこと**
 - `synchronous = EXTRA` と `foreign_keys = ON` が設定され、起動時に読み返して検証されること
 - スキーマ移行が単一トランザクションで確定し、途中適用が観測されないこと
+- **`HistoryDeletionStore.inspectDeletion` / `deleteHistoryUnit` が、列挙された全絶対保護（非終端キュー項目 / 処理中の `ExportJob` / `isUndelivered` の `OutputRecord` / 試行中の `DeliveryAttempt`）を見ること**（[アーキテクチャ設計](architecture.md) の 7.5「削除の可否判定」が正本）
 - **外部キー制約が有効であり、`Project` の削除が `OutputRecord`（非終端）/ 処理中の `ExportJob` の存在で RESTRICT されること**
 - **`Batch` の削除で `OutputRecord.batchID` / `ExportRecord.batchID` / `ExportJob.batchID` が SET NULL になること**
 - **`OutputRecord.projectID` の部分 UNIQUE インデックス（`settledAt IS NULL`）が未確定出力を 1 プロジェクトにつき 1 件へ制限すること**
@@ -305,13 +305,13 @@
 - `StampAsset` の作成が atomic rename を経ること
 - **インポート Saga の手順 1〜3 の途中で終了した場合、作成済みファイルが孤児として起動時 GC で回収されること**
 - **`Project` の `capture` / `sourceRepresentation` / `libraryCreationDate` が `Project` 作成（手順 3）と同一トランザクションで保存されること**
-- **DB 登録に失敗した場合、その `WorkingSourceRecord` と `Project`（`capture` / `sourceRepresentation` / `libraryCreationDate` を含む）が補償削除されること**
+- **DB 登録に失敗した場合、作成済みのファイル（取り込み・正規化の両方）が補償削除されること（`Project`〈`capture` / `sourceRepresentation` / `libraryCreationDate` を含む〉と `WorkingSourceRecord` の行は単一トランザクション内で作られるためロールバックで消える）**
 - **インポート Saga が `PickedPhotoInput.importedFile` を作り直さず、所有権を受け取ること**
 - **DB 確定（手順 3）の後に取り込みファイルが削除され、削除失敗時は `PendingFileDeletion` へ積まれること**
 - **DB 確定より前に取り込みファイルを削除しないこと**
 - **再選択・再接続の成功経路でも候補ファイル（正規化前の旧 `sourceFile`）が削除されること**
 - **「Free 版として複製」で新しい `projectID` の `WorkingSourceRecord` が作られ、処理用ファイルが元 `Project` と共有されないこと**
-- **複製の DB 失敗で新 `WorkingSourceRecord` が補償削除されること**
+- **複製の DB 失敗（手順 3）で、手順 2 で作成した実体ファイルが補償削除されること（`WorkingSourceRecord` 行は単一 DB トランザクション内で作られるためロールバックで消える）**
 - **元素材の実体が無い場合、`WorkingSourceRecord` を作らず複製すること**
 - **複製に `ExportedSettingsEntry` がコピーされないこと**
 - **`Project` 削除で DB が先に確定し、実体が `PendingFileDeletion` へ積まれること**
