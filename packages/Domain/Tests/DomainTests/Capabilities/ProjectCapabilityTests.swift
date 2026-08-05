@@ -3,7 +3,7 @@ import Testing
 import Foundation
 
 // Task 2: Project 単位の能力判定・Paywall 文言（architecture.md「解約・降格後の既存データ」
-// 節〈655-699行付近〉、Issue #20）。
+// 節、Issue #20）。
 //
 // requiredPlan は表示用の Paywall 文言だけを決め、canEdit は ResolvedCapabilities の
 // フラグを直接見て編集可否を決める（プラン名の比較にすり替わっていないことを固定する）。

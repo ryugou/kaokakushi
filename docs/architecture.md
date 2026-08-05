@@ -1818,7 +1818,7 @@ enum AbsoluteProtection: Sendable, Hashable {
 | 参照 | ファイル名ではなく `ManagedFileRef(.historyThumbnail, ...)`。**v1 では `Project` に参照列が無く常に空集合として扱う**（7.5「`MaintenanceStore`」の対応表） |
 | 保護クラス | `.complete`（加工後とはいえ顔を含む画像） |
 | バックアップ | 対象外 |
-| 生成 | `ManagedFileStore` を通す |
+| 生成 | **v1 では生成コードを持たない**（Issue #26 で導入する。導入時も `ManagedFileStore` を通す） |
 | 削除 | **v1 では行わない**（`Project` に参照列が無く実体解放の対象にできない）。`PendingFileDeletion` への登録は履歴表示サブプロジェクト（Issue #26）で有効化する |
 | 孤児 GC | **v1 では無効**（参照集合が常に空集合のため。現用実体を誤って削除しない側へ倒す）。Issue #26 で有効化する |
 | 復元時に実体が無い | プレースホルダを表示する。**履歴自体は消さない** |

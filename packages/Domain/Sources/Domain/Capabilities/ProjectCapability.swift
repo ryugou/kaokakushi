@@ -1,7 +1,7 @@
 import Foundation
 
 // 能力判定と Paywall 文言のための Project 単位の入力型・純粋関数（architecture.md
-// 「解約・降格後の既存データ」節〈655-699行付近〉、「canEdit / requiredPlan の判定規則を
+// 「解約・降格後の既存データ」節、「canEdit / requiredPlan の判定規則を
 // 正本化」コミット 0c38430 で正本化。Task 2, Issue #20）。
 //
 // StampRequirement は書き出し認可（export-saga.md 1.2）で定義済みの型を再利用する

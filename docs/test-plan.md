@@ -244,7 +244,7 @@
 - 受け渡し成功後も完了画面を離れるまで出力が保持され、保存と共有を任意の順序で実行できること
 - 異常終了後の起動時、`isUndelivered` では復旧案内が出て、`delivered` では出ないこと
 - 「履歴を保存しない」設定で、未受け渡し出力・保存結果不明の注記が付いた `delivered` 出力・`UsageLedger` の消費記録・処理中の `ExportJob` とその生成済み出力の 4 つ以外が残らないこと
-- 削除可否判定（7.5）が**列挙された全参照元**を保護すること
+- `HistoryDeletionStore.deleteHistoryUnit` の拒否（throw）を Saga が利用者へのエラー提示まで伝播すること（判定そのものの検証は 4.2）
 - **`Project` 削除時、それが `Batch` の最後の所属 `Project` なら `Batch` 行が同一トランザクションで削除されること**
 - **所属 `Project` が残る場合は `Batch` 行が残ること**
 - **`deleteHistoryUnit` が `DeletionContext` を受け取らず、DB トランザクション内で読み直して再判定すること**

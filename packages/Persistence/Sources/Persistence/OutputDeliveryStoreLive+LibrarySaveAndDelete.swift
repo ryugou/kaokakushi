@@ -3,8 +3,8 @@ import Domain
 import GRDB
 
 // loadUnknownLibrarySaves / clearUnknownLibrarySave / deleteOutput（export-saga.md 7章
-// 不変条件（422行）・7.0表「deleteOutputの行」、architecture.md「出力の削除経路」（7.5）が
-// 正本）。
+// 「利用者への受け渡し」の不変条件段落・7.0表「deleteOutputの行」、architecture.md
+// 「出力の削除経路」（7.5）が正本）。
 //
 // deleteOutputはOutputDeliveryStoreLive+Attempt.swiftのdeliveryAttemptCountヘルパーを
 // 再利用する（settledAt != nilかつDeliveryAttempt不在という事前条件は、beginDeliveryAttempt

@@ -5,7 +5,7 @@ import GRDB
 @testable import Persistence
 
 // HistoryDeletionStoreLive.deleteHistoryUnitによるBatch自動削除のテスト（architecture.md
-// 「Project削除Saga」手順3・「削除の可否判定」直後の解説（1729行目付近）が正本。Batch行の
+// 「`Project` 削除 Saga」節の手順3・直後の解説が正本。Batch行の
 // 削除は利用者操作の対象ではなくProject削除の副次的な後始末）。
 
 @Suite("HistoryDeletionStoreLive.deleteHistoryUnit Batch自動削除")

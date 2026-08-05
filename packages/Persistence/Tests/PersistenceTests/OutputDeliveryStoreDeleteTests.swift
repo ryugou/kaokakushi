@@ -4,8 +4,8 @@ import Domain
 import GRDB
 @testable import Persistence
 
-// OutputDeliveryStoreLive.deleteOutputのテスト（export-saga.md 7章 不変条件（422行）・7.0表
-// 「deleteOutputの行」、architecture.md「出力の削除経路」（7.5）が正本）。
+// OutputDeliveryStoreLive.deleteOutputのテスト（export-saga.md 7章「利用者への受け渡し」の
+// 不変条件段落・7.0表「deleteOutputの行」、architecture.md「出力の削除経路」（7.5）が正本）。
 
 @Suite("OutputDeliveryStoreLive.deleteOutput")
 struct OutputDeliveryStoreDeleteTests {

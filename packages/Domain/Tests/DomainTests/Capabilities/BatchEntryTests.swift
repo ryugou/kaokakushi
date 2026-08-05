@@ -2,7 +2,7 @@ import Testing
 @testable import Domain
 import Foundation
 
-// Task 2: 一括処理への参入可否（architecture.md 6.4「バッチ処理」節〈872-879行付近〉、
+// Task 2: 一括処理への参入可否（architecture.md 6.4「バッチ処理」節冒頭、
 // Issue #20）。
 //
 // canUseProBatch を持つ利用者は remainingCredits に関わらず常に参入できる。

@@ -7,8 +7,8 @@ import Foundation
 // `OriginalCaptureMetadata` / `RenderSpec` は既に実装済み（Task 2、Rendering/Boundary.swift・
 // Rendering/RenderSpec.swift）のため再宣言しない。
 //
-// 【実装中の判断】`SourceRepresentation`（architecture.md 1969 行目、
-// `enum SourceRepresentation: Sendable, Equatable { case original, transcoded }`）は
+// 【実装中の判断】`SourceRepresentation`（architecture.md 7.5「出力メタデータは許可リストで
+// 構築する」節、`enum SourceRepresentation: Sendable, Equatable { case original, transcoded }`）は
 // spec 上「Task 2 で実装済み」とされていたが、実際には packages/Domain 全体に存在しない
 // （grep で確認済み）。Task 2 の実装コメント（Rendering/Boundary.swift 冒頭）は
 // 「`SourceRepresentation` は…Task 4 の担当であるため今回は追加しない」と明記しており、
