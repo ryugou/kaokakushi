@@ -31,11 +31,29 @@ import Domain
 //   残したまま渡すと同じファイル参照を二重登録しうる
 // - Important 4: bitmapID 重複時に `Dictionary(uniqueKeysWithValues:)` で trap せず、
 //   Domain の不整合検出方針（Rendering/Compile.swift の throw）に揃えて throw する
+//
+// reviewer 一次レビュー fix round 2 の反映（W1〜W3。詳細は各 doc コメント参照）:
+// - W1: 外側 catch の discardExport も SerialTaskQueue 経由にする（architecture.md 4.2
+//   「変更を伴うすべての操作は単一のグローバル直列キュー1本で直列化する」からの逸脱を解消）
+// - W2: discardExport 自体が失敗しても、中断の真因（元エラー）を GenerationAbortError で
+//   保持したまま優先して throw する（真因が後始末の失敗にすり替わらないようにする）
+// - W3: queue.run 自身のキャンセルチェックで performGeneration が一度も走らない経路を
+//   ExportCoordinatorGenerateTests.swift へ追加
 
 /// `GenerateExportInput.rasterAssets` の不整合（reviewer 指摘 Important 4）。
 public enum GenerateExportInputError: Error, Sendable, Equatable {
     /// 異なる `StampRasterKey` に同一 bitmapID の `RasterizedStampAsset` が割り当てられていた
     case duplicateBitmapID(String)
+}
+
+/// 生成の中断後始末（`discardExport`）自体が失敗した場合に、中断の真因を後始末の失敗へ
+/// すり替えずに呼び出し元へ伝えるための複合エラー（reviewer 指摘 W2）。`cause` が中断の真因
+/// （レンダリング失敗・健全性確認不成立・キャンセル等）、`discardFailure` が discardExport
+/// 自体の失敗であり、どちらも失われない（Global Constraints「すべてのエラーパスに、運用者が
+/// 次のアクションを判断できる情報を含める」）。
+public struct GenerationAbortError: Error, Sendable {
+    public let cause: Error
+    public let discardFailure: Error
 }
 
 extension ExportCoordinator {
@@ -50,19 +68,30 @@ extension ExportCoordinator {
             // queue.run 自身のキャンセルチェック（投入前・取り出し直前）でキャンセルされた
             // 場合、performGeneration が一度も実行されず内側の catch も走らない
             // （Important 2）。ExportJob 行は startExport で既に作成済みのため、ここでも
-            // discardExport を呼び後始末する。discardExport は冪等なので、内側で既に
-            // discard 済みでも二重呼び出しは無害
-            try await runShieldedFromCancellation {
-                try await self.exportSagaStore.discardExport(input.job.exportID, temporaryFiles: [])
+            // discardExport を呼び後始末する（discardExport は冪等。内側で既に discard 済み
+            // でも二重呼び出しは無害）。
+            //
+            // 非対称性（W1）: ここは queue.run の op の外側にいる catch のため、後始末を
+            // queue.run 経由に通しても自己デッドロックしない（performGeneration 内側の catch
+            // は既に queue.run の op 内にいるため直接呼び出しのまま。次の読み手が「揃って
+            // いない」と誤って直さないよう明記する）。architecture.md 4.2「変更を伴うすべての
+            // 操作は単一のグローバル直列キュー1本で直列化する」を満たすため、ここは queue.run
+            // 経由にする。
+            try await abortAfterDiscarding(cause: error) {
+                try await self.runShieldedFromCancellation {
+                    try await self.queue.run {
+                        try await self.exportSagaStore.discardExport(input.job.exportID, temporaryFiles: [])
+                    }
+                }
             }
-            throw error
         }
     }
 
     /// 「やり直す」・利用者によるキャンセル用の公開 API（export-saga.md 4章）。
     /// `exportSagaStore.discardExport` は冪等なため、同じ `exportID` への複数回呼び出しは
-    /// エラーにならない。
-    public func discardExport(_ exportID: ExportID, temporaryFiles: [ManagedFileRef] = []) async throws {
+    /// エラーにならない。`temporaryFiles` は渡し忘れを型で検出できるよう既定値を持たない
+    /// （呼び出し元が明示する。reviewer 指摘 Suggestion 1）。
+    public func discardExport(_ exportID: ExportID, temporaryFiles: [ManagedFileRef]) async throws {
         try await queue.run {
             try await self.exportSagaStore.discardExport(exportID, temporaryFiles: temporaryFiles)
         }
@@ -108,17 +137,25 @@ extension ExportCoordinator {
             // OutputRecord が出力ファイルの参照を保持するようになったため、discardExport が
             // 二重登録しないよう temporaryFiles から取り除く（Important 3）
             temporaryFiles.removeAll { $0 == outputFileRef.ref }
+            // 一方 rendered.file.ref（.rasterTemporary）は成功パスでは意図的にどこにも
+            // 登録しない。参照元を持たない .rasterTemporary は次回起動をまたいでも孤児として
+            // 削除してよい（architecture.md 7.5「孤児ファイルのGC」）ため、消し忘れではない
+            // （reviewer 指摘 Suggestion 2）。
             try Task.checkCancellation()
         } catch {
             // var の temporaryFiles をそのまま @Sendable クロージャへ渡せないため、
             // 呼び出し直前に不変のスナップショットへ写す。
             let temporaryFilesSnapshot = temporaryFiles
-            try await runShieldedFromCancellation {
-                try await self.exportSagaStore.discardExport(
-                    input.job.exportID, temporaryFiles: temporaryFilesSnapshot
-                )
+            // 非対称性（W1）: ここは既に queue.run の op 内で実行されているため、
+            // discardExport を queue.run 経由で呼ぶと自己デッドロックする。直接呼び出しの
+            // ままにする（generateOutput 側の外側 catch とは対称にしない）。
+            try await abortAfterDiscarding(cause: error) {
+                try await self.runShieldedFromCancellation {
+                    try await self.exportSagaStore.discardExport(
+                        input.job.exportID, temporaryFiles: temporaryFilesSnapshot
+                    )
+                }
             }
-            throw error
         }
     }
 
@@ -130,6 +167,27 @@ extension ExportCoordinator {
         _ operation: @Sendable @escaping () async throws -> T
     ) async throws -> T {
         try await Task { try await operation() }.value
+    }
+
+    /// `error` が既に `GenerationAbortError`（外側 catch と内側 catch の両方で discardExport
+    /// が失敗した場合の二重ラップ）であれば、その `cause`（中断の真因そのもの）を取り出す。
+    /// 真因が入れ子になって埋もれないようにするための正規化（W2）。
+    private func rootCause(of error: Error) -> Error {
+        (error as? GenerationAbortError)?.cause ?? error
+    }
+
+    /// `perform`（discardExport 呼び出し）を実行し、失敗したら中断の真因 `cause` を失わずに
+    /// `GenerationAbortError` へ包んで throw する。`perform` が成功しても `cause` をそのまま
+    /// 再 throw する（W2。呼び出し元は queue.run 経由にするかどうかを `perform` の中身で選ぶ）。
+    private func abortAfterDiscarding(
+        cause: Error, perform: () async throws -> Void
+    ) async throws -> Never {
+        do {
+            try await perform()
+        } catch let discardFailure {
+            throw GenerationAbortError(cause: rootCause(of: cause), discardFailure: discardFailure)
+        }
+        throw cause
     }
 
     /// `ImageEffectRenderer.render` の `rasterAssets` 引数は bitmapID キーの辞書

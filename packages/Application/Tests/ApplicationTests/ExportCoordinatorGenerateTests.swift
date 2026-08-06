@@ -18,8 +18,17 @@ import Domain
 // 外側へ伝播した場合、外側でも discardExport が呼ばれる（discardExport は冪等なので二重
 // 呼び出し自体は無害。ExportCoordinator+Generate.swift 冒頭コメント参照）。このため、
 // 以下のテストは discardCalls の「件数」ではなく「最初の呼び出しの内容」を検証する
-// （キュー投入前後のキャンセルに特化した検証は ExportCoordinatorGenerateResilienceTests.swift
-// が担当）。
+// （queue.run 投入前後のキャンセルに特化した検証は
+// ExportCoordinatorGenerateResilienceTests.swift が担当）。
+//
+// reviewer 一次レビュー fix round 2 の反映:
+// - W1: 外側 catch の discardExport も SerialTaskQueue 経由になった
+//   （詳細は ExportCoordinator+Generate.swift 冒頭コメント）
+// - W2: discardExport 自体が失敗しても中断の真因が `GenerationAbortError.cause` として
+//   伝播することを、内側 catch について本ファイル末尾で検証する（外側 catch は
+//   ExportCoordinatorGenerateResilienceTests.swift が検証する）
+// - W3: queue.run 自身のキャンセルチェックで performGeneration が一度も走らない経路の
+//   テストを ExportCoordinatorGenerateResilienceTests.swift へ追加した
 //
 // 共有ヘルパー（makeGenerateCoordinator / makeSucceedingGenerationPipeline）は
 // TestSupport.swift に集約している（複数の Generate 系テストファイルで使うため）。
@@ -281,4 +290,40 @@ private func cancellationAfterRenderDiscardsAndPropagatesCancellationError() asy
     let discardCalls = await exportSagaStore.discardExportCalls
     #expect(!discardCalls.isEmpty)
     #expect(discardCalls.first?.exportID == exportID)
+}
+
+// MARK: - W2: discardExport自体の失敗で中断の真因を失わない（内側catch）
+
+@Test("内側catch: レンダリング失敗時にdiscardExportも失敗すると、真因がGenerationAbortError.causeとして伝播する")
+private func innerCatchPreservesOriginalCauseWhenDiscardAlsoFails() async throws {
+    struct RenderBoom: Error, Equatable {}
+    struct DiscardBoom: Error, Equatable {}
+    let pipeline = makeSucceedingGenerationPipeline()
+    await pipeline.renderer.setFailure(RenderBoom())
+
+    let exportID = makeExportID()
+    let job = makeExportJob(exportID: exportID)
+    let exportSagaStore = FakeExportSagaStore()
+    await exportSagaStore.seedRunningJob(job)
+    await exportSagaStore.setDiscardExportFailure(DiscardBoom())
+
+    let coordinator = makeGenerateCoordinator(
+        exportSagaStore: exportSagaStore,
+        imageEffectRenderer: pipeline.renderer,
+        imageEncoder: pipeline.encoder,
+        outputFileVerifier: pipeline.verifier
+    )
+
+    do {
+        try await coordinator.generateOutput(try makeGenerateExportInput(job: job))
+        Issue.record("エラーが送出されるはず")
+    } catch let error as GenerationAbortError {
+        #expect(error.cause is RenderBoom)
+        #expect(error.discardFailure is DiscardBoom)
+    } catch {
+        Issue.record("GenerationAbortErrorが期待されたが\(error)が送出された")
+    }
+
+    let discardCalls = await exportSagaStore.discardExportCalls
+    #expect(!discardCalls.isEmpty)
 }

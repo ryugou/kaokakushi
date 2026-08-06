@@ -51,20 +51,6 @@ private func discardExportDelegatesToStoreWithTemporaryFiles() async throws {
     #expect(discardCalls.first?.temporaryFiles == temporaryFiles)
 }
 
-@Test("discardExportはtemporaryFilesを省略すると空配列で呼ぶ")
-private func discardExportDefaultsToEmptyTemporaryFiles() async throws {
-    let exportID = makeExportID()
-    let job = makeExportJob(exportID: exportID)
-    let exportSagaStore = FakeExportSagaStore()
-    await exportSagaStore.seedRunningJob(job)
-    let coordinator = makeCoordinator(exportSagaStore: exportSagaStore)
-
-    try await coordinator.discardExport(exportID)
-
-    let discardCalls = await exportSagaStore.discardExportCalls
-    #expect(discardCalls.first?.temporaryFiles == [])
-}
-
 @Test("破棄の回数に制限が無く、同じexportIDへの複数回呼び出しがエラーにならない(冪等)")
 private func discardingRepeatedlyForSameExportIDDoesNotThrow() async throws {
     let exportID = makeExportID()
@@ -73,9 +59,9 @@ private func discardingRepeatedlyForSameExportIDDoesNotThrow() async throws {
     await exportSagaStore.seedRunningJob(job)
     let coordinator = makeCoordinator(exportSagaStore: exportSagaStore)
 
-    try await coordinator.discardExport(exportID)
-    try await coordinator.discardExport(exportID)
-    try await coordinator.discardExport(exportID)
+    try await coordinator.discardExport(exportID, temporaryFiles: [])
+    try await coordinator.discardExport(exportID, temporaryFiles: [])
+    try await coordinator.discardExport(exportID, temporaryFiles: [])
 
     let discardCalls = await exportSagaStore.discardExportCalls
     #expect(discardCalls.count == 3)
@@ -90,8 +76,8 @@ private func discardDoesNotChangeLedgerCounters() async throws {
     await exportSagaStore.seedRunningJob(makeExportJob(exportID: trialExportID, accountingMode: .batchTrial))
     let coordinator = makeCoordinator(exportSagaStore: exportSagaStore)
 
-    try await coordinator.discardExport(freeExportID)
-    try await coordinator.discardExport(trialExportID)
+    try await coordinator.discardExport(freeExportID, temporaryFiles: [])
+    try await coordinator.discardExport(trialExportID, temporaryFiles: [])
 
     #expect(await exportSagaStore.meteredConsumedCount == 0)
     #expect(await exportSagaStore.trialCreditConsumedCount == 0)
@@ -118,7 +104,7 @@ private func discardDoesNotTouchWorkingSourceRecord() async throws {
     )
     let coordinator = makeCoordinator(exportSagaStore: exportSagaStore, workingSourceStore: workingSourceStore)
 
-    try await coordinator.discardExport(exportID)
+    try await coordinator.discardExport(exportID, temporaryFiles: [])
 
     let deleteCalls = await workingSourceStore.deleteWorkingSourceCalls
     let invalidateCalls = await workingSourceStore.invalidateWorkingSourceCalls
@@ -137,6 +123,6 @@ private func discardExportPropagatesStoreFailure() async throws {
     let coordinator = makeCoordinator(exportSagaStore: exportSagaStore)
 
     await #expect(throws: DiscardBoom.self) {
-        try await coordinator.discardExport(exportID)
+        try await coordinator.discardExport(exportID, temporaryFiles: [])
     }
 }
