@@ -38,7 +38,7 @@ import Domain
 // - W2: discardExport 自体が失敗しても、中断の真因（元エラー）を GenerationAbortError で
 //   保持したまま優先して throw する（真因が後始末の失敗にすり替わらないようにする）
 // - W3: queue.run 自身のキャンセルチェックで performGeneration が一度も走らない経路を
-//   ExportCoordinatorGenerateTests.swift へ追加
+//   ExportCoordinatorGenerateResilienceTests.swift へ追加
 
 /// `GenerateExportInput.rasterAssets` の不整合（reviewer 指摘 Important 4）。
 public enum GenerateExportInputError: Error, Sendable, Equatable {
