@@ -149,7 +149,7 @@
 - Produces: `public struct StartupRecoveryReport: Sendable`（resolveOrphanedAttempts の OutputDeliverySnapshot 配列・UnknownLibrarySave 配列・削除した running ジョブ数。復旧案内 UI の入力）
 - Produces: 復旧完了ゲート: `public func awaitRecoveryCompleted() async` を ExportCoordinator の開始経路が待つ（復旧完了まで新規書き出しを開始させない）
 
-- [ ] 手順を順序どおり実装: loadRunningJobs → deleteRunningJobs →（孤児 GC は MaintenanceStore の担当のため呼び出しのみ。実装はサブプロジェクト3で済み）→ resolveOrphanedAttempts → loadUnknownLibrarySaves → report 生成。更新誘導（手順5）はサブプロジェクト10 の対象のため呼び出し点だけ設ける
+- [ ] 手順を順序どおり実装: loadRunningJobs → deleteRunningJobs →（**手順2 のファイル削除・孤児 GC は Task 11 で実装する。サブプロジェクト3 が用意したのは MaintenanceStore の個別プリミティブだけで、それらを順序立てて呼ぶ実行主体は存在しない**）→ resolveOrphanedAttempts → loadUnknownLibrarySaves → report 生成。更新誘導（手順5）はサブプロジェクト10 の対象のため呼び出し点だけ設ける
 - [ ] テスト（test-plan 3.5）: 実行順序（偽ストアの呼び出し記録で検証）、完了済み出力に触れないこと、previousState による解決（generated → deliveryUnknown / delivered 維持＋注記）、復旧完了までの開始ゲート、report が snapshot を使うこと
 - [ ] reviewer 一次レビュー → コミット `feat: StartupRecoveryCoordinator (#7)`
 
@@ -162,6 +162,32 @@
 - [ ] Coordinator は `authorizeRenderSpec` が `blocked` を返した場合にのみ免除を評価し、免除が成立するときだけ 1.2 のブロックを解除する（月間枠・クレジットの評価は従来どおり `startExport`）
 - [ ] テスト: 免除成立（降格後・設定一致）で開始できること／`settingsHash` 不一致ではブロックされること／確定記録が無ければブロックされること／免除が成立しても `accountingMode` の消費は通常どおり発生すること
 - [ ] reviewer 一次レビュー → コミット `feat: 変更せず再書き出しの能力免除 (#7)`
+
+### Task 11: ファイル削除経路の実行主体（起動時の再試行と孤児 GC）
+
+**Files:**
+- Modify: `packages/Application/Sources/Application/StartupRecoveryCoordinator.swift`
+- Modify: 実削除をコミット後に行う各 Coordinator（`ExportCoordinator+Settle.swift` / `+Generate.swift` / `OutputDeliveryCoordinator.swift`）
+- Test: `packages/Application/Tests/ApplicationTests/StartupRecoveryTests.swift` ほか
+
+**背景（Task 9 レビューの Critical）:** `settleExport` / `discardExport` / `deleteOutput` / `invalidateWorkingSource` はいずれも実体を `PendingFileDeletion` へ登録するだけで完了する。その登録を消化して実ファイルを削除する production コードが存在せず（`loadPendingFileDeletions` / `ManagedFileStore.delete` の呼び出し元がゼロ）、**DB 上は消えるが実体は端末に残り続ける**。顔を含む画像を扱う製品として看過できない。
+
+**正本:** architecture.md 7.5「孤児ファイルの GC」の起動時復旧手順 (1)〜(3)（`loadPendingFileDeletions` で未処理分の実体削除を再試行し成功したものを `clearPendingFileDeletion` で消す／種別ごとに `listExistingFileIDs` と `listReferencedFileIDs` の差集合を `registerOrphan` で候補登録／登録した候補を (1) と同じ経路で削除）、export-saga.md 5章 手順2。
+
+- [ ] `StartupRecoveryCoordinator` に上記 (1)〜(3) を実装し、5章の順序（`deleteRunningJobs` の後、`resolveOrphanedAttempts` の前）へ組み込む。削除の失敗は次回起動で再試行する（`clearPendingFileDeletion` は削除成功時のみ）
+- [ ] `.historyThumbnail` は v1 では参照集合が常に空のため孤児 GC の対象から外す（architecture.md 7.5 の対応表。Issue #26 で有効化）
+- [ ] 各 Coordinator の「コミット後の実削除」を実装する（正本は「実削除はコミット後、失敗すれば起動時 GC で再試行」）。失敗しても操作自体は成功として扱い、登録は残す
+- [ ] テスト: 起動時に未処理の `PendingFileDeletion` が削除され `clearPendingFileDeletion` されること／削除失敗時は登録が残り次回に再試行されること／孤児の差集合が `registerOrphan` へ登録され削除されること／`.historyThumbnail` が対象外であること
+- [ ] reviewer 一次レビュー → コミット `feat: ファイル削除経路の実行主体 (#7)`
+
+### Task 12: 復旧完了ゲートの配線と復旧手順のキュー経由
+
+**背景（Task 9 レビューの Warning・横断所見1）:** `awaitRecoveryCompleted()` は実装済みだがどこからも使われておらず、5章「復旧が完了するまで新しい書き出しを開始させない」/ architecture.md 4.3 が端から端まで満たされていない。あわせて `StartupRecoveryCoordinator` の変更系操作（`deleteRunningJobs` / `resolveOrphanedAttempts`）がグローバル直列キューを経由していない。
+
+- [ ] `ExportCoordinator` の開始経路（`startExport` / `startBatchItem`）と `OutputDeliveryCoordinator` の変更系操作の冒頭で `awaitRecoveryCompleted()` を待つ
+- [ ] 復旧手順の変更系操作を `SerialTaskQueue` 経由にする（ゲートはキュー投入前に待つため自己デッドロックしない）
+- [ ] テスト: 復旧未完了の間は書き出しが開始されないこと／復旧完了後に開始できること
+- [ ] reviewer 一次レビュー → コミット `feat: 復旧完了ゲートの配線 (#7)`
 
 ---
 
