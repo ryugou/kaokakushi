@@ -47,7 +47,11 @@ extension ExportCoordinator {
     /// undecodable、または測定値不一致）なら OutputDeliveryStore.deleteOutput で物理削除して
     /// `.lost` を返す。台帳には触れない（store の契約どおり deleteOutput は台帳を変更しない）。
     /// 読み取り専用の verify 呼び出しは queue を経由しない（SerialTaskQueue.swift「読み取りは
-    /// 経由しない」）。削除だけを queue 経由にする。
+    /// 経由しない」）。削除だけを queue 経由にする。verify（queue 外の読み取り）→ deleteOutput
+    /// （queue 内の書き込み）の間は排他が保持されない read-then-write のため、原子性は無い
+    /// （レビュー第2ラウンド D）。実害は無い: その間に別の書き出し試行が走れば store 側が
+    /// throw し、既に削除済みなら deleteOutput から outputNotFound が伝播するだけで、
+    /// 呼び出し元へは握りつぶさず伝わる。
     public func verifyOutputIntegrity(_ output: OutputRecord) async throws -> OutputIntegrityOutcome {
         switch await verifiedMeasurementResult(for: output.outputFile) {
         case .success(let measurement):

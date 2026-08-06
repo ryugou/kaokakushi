@@ -24,7 +24,8 @@ import Domain
 // reviewer 一次レビュー fix round 2 の反映:
 // - W1: 外側 catch の discardExport も SerialTaskQueue 経由になった
 //   （詳細は ExportCoordinator+Generate.swift 冒頭コメント）
-// - W2: discardExport 自体が失敗しても中断の真因が `GenerationAbortError.cause` として
+// - W2: discardExport 自体が失敗しても中断の真因が `CleanupPreservingError.cause`
+//   （レビュー第2ラウンド A で Cleanup.swift へ共通化。旧 `GenerationAbortError`）として
 //   伝播することを、内側 catch について本ファイル末尾で検証する（外側 catch は
 //   ExportCoordinatorGenerateResilienceTests.swift が検証する）
 // - W3: queue.run 自身のキャンセルチェックで performGeneration が一度も走らない経路の
@@ -294,7 +295,7 @@ private func cancellationAfterRenderDiscardsAndPropagatesCancellationError() asy
 
 // MARK: - W2: discardExport自体の失敗で中断の真因を失わない（内側catch）
 
-@Test("内側catch: レンダリング失敗時にdiscardExportも失敗すると、真因がGenerationAbortError.causeとして伝播する")
+@Test("内側catch: レンダリング失敗時にdiscardExportも失敗すると、真因がCleanupPreservingError.causeとして伝播する")
 private func innerCatchPreservesOriginalCauseWhenDiscardAlsoFails() async throws {
     struct RenderBoom: Error, Equatable {}
     struct DiscardBoom: Error, Equatable {}
@@ -317,11 +318,11 @@ private func innerCatchPreservesOriginalCauseWhenDiscardAlsoFails() async throws
     do {
         try await coordinator.generateOutput(try makeGenerateExportInput(job: job))
         Issue.record("エラーが送出されるはず")
-    } catch let error as GenerationAbortError {
+    } catch let error as CleanupPreservingError {
         #expect(error.cause is RenderBoom)
-        #expect(error.discardFailure is DiscardBoom)
+        #expect(error.cleanupFailure is DiscardBoom)
     } catch {
-        Issue.record("GenerationAbortErrorが期待されたが\(error)が送出された")
+        Issue.record("CleanupPreservingErrorが期待されたが\(error)が送出された")
     }
 
     let discardCalls = await exportSagaStore.discardExportCalls

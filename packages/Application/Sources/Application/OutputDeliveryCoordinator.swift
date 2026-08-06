@@ -13,7 +13,9 @@ import Domain
 // actor の isolation を排他の根拠にしない）。completeLibrarySave 自体が失敗した場合は
 // abandon せずそのまま伝播する（写真ライブラリへの保存は既に成功しており、DB 反映だけが
 // 不明のまま残る。7.0「保存の結果不明」と同じ状況を起動時解決に委ねるため、ここで
-// previousState へ戻してはならない）。
+// previousState へ戻してはならない）。saveToPhotoLibrary 失敗時の abandonDeliveryAttempt
+// 自体が失敗しても、保存失敗の真因を失わない（レビュー第2ラウンド A。Cleanup.swift の
+// runCleanupPreservingError を経由する）。
 //
 // 共有には DeliveryAttempt を作らない（7.0「共有には DeliveryAttempt を作らない」。結果が
 // 同期的に返るため中断点が無い）。SharePresenter.share は外部 UI 提示であり店（store）を
@@ -57,15 +59,18 @@ public actor OutputDeliveryCoordinator {
         self.queue = queue
     }
 
-    /// 写真ライブラリへ保存する（export-saga.md 7.0 表 手順1〜4）。
+    /// 写真ライブラリへ保存する（export-saga.md 7.0 表 手順1〜4）。保存が失敗した場合の
+    /// abandonDeliveryAttempt 自体の失敗で、保存失敗の真因が置き換わらないよう
+    /// `runCleanupPreservingError`（Cleanup.swift。レビュー第2ラウンド A）を経由する。
     public func saveToPhotoLibrary(_ output: OutputRecord) async throws {
         try await queue.run {
             try await self.outputDeliveryStore.beginDeliveryAttempt(output.exportID)
             do {
                 try await self.mediaSaver.saveToPhotoLibrary(self.outputFile(for: output))
             } catch {
-                try await self.outputDeliveryStore.abandonDeliveryAttempt(output.exportID)
-                throw error
+                try await runCleanupPreservingError(cause: error) {
+                    try await self.outputDeliveryStore.abandonDeliveryAttempt(output.exportID)
+                }
             }
             try await self.outputDeliveryStore.completeLibrarySave(output.exportID)
         }

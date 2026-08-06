@@ -12,7 +12,8 @@ import Domain
 // startBatchItem の帰結は BatchItemStartOutcome で表す（上記の正本の突き合わせ結果。
 // docs/superpowers/specs/2026-08-06-issue7-task7-batch-progression.md の表が正）:
 // - started: 開始した。バッチは継続する
-// - itemFailed: 1.2 の能力ブロック。この項目のみ終了。バッチは継続する
+// - itemFailed: 1.2 の能力ブロック（isExemptFromCapabilityBlock の免除が成立しない場合。
+//   レビュー第2ラウンド C）。この項目のみ終了。バッチは継続する
 // - itemPaused: 実体欠損。この項目のみ paused(.sourceReselectionRequired)。バッチは継続する
 // - confirmationMismatch: 1.1 の確認不一致。この項目のみ非開始。バッチは継続する
 // - batchPaused: 1.3 の権限・クォータブロック。バッチを停止し、以降の写真を開始しない
@@ -31,8 +32,10 @@ import Domain
 //   Application 層の入力構築の都合として BatchReviewMode を定義する）
 // - startExport（単体）と処理順序を共有するため、実体確認・store 呼び出しは
 //   ExportCoordinator.swift の authorizeAndStart(_:batchID:queueItemID:) をそのまま再利用する。
-//   authorizeAndStart は confirmationMismatch/renderSpecBlocked を返さない（呼び出し前に
-//   startBatchItem 側で判定済みのため構造的に到達しない）
+//   authorizeAndStart の戻り値は `AuthorizeAndStartOutcome`（started/workingSourceMissing/
+//   blocked の3ケースのみ）であり、confirmationMismatch/renderSpecBlocked は型として
+//   存在しない（レビュー第2ラウンド B。旧実装は `ExportStartOutcome` をそのまま返し、
+//   ここで到達不能な分岐と `preconditionFailure` を人間の推論に頼って書いていた）
 
 /// 一括処理の確認モード（architecture.md 6.4「一括処理モード」）。
 /// おまかせ一括は一覧確認（`BatchReviewState.overviewConfirmed`）で全写真の確認を代表させ、
@@ -48,7 +51,8 @@ public enum BatchReviewMode: Sendable, Equatable {
 public enum BatchItemStartOutcome: Sendable {
     /// 開始した。バッチは継続する
     case started(ExportJob)
-    /// 1.2 の能力ブロック。`queueStateAfterAuthorization` の戻り値をそのまま載せる
+    /// 1.2 の能力ブロック（isExemptFromCapabilityBlock の免除が成立しない場合）。
+    /// `queueStateAfterAuthorization` の戻り値をそのまま載せる
     /// （この Coordinator で `ExportQueueState` を組み立てない）。この項目のみ終了しバッチは継続する
     case itemFailed(ExportQueueState)
     /// 実体欠損。この項目のみ `paused(.sourceReselectionRequired)`。バッチは継続する
@@ -85,8 +89,10 @@ public struct BatchExportItemRequest: Sendable {
 extension ExportCoordinator {
     /// export-saga.md 1.6 の順序でバッチ内 1 写真を認可・開始する。1.1 のみ単体と異なり
     /// バッチ向けの一致検査（isBatchConfirmationConsistent）を使う。1.2 の能力ブロックは
-    /// `queueStateAfterAuthorization(_:occurredAt:)` の戻り値をそのまま `itemFailed` に載せる。
-    /// 1.2 以降（実体確認・startExport）は単体と共通の経路（authorizeAndStart）を再利用する。
+    /// `isExemptFromCapabilityBlock`（単体と共有）の免除評価を経てもなお成立する場合にのみ
+    /// `queueStateAfterAuthorization(_:occurredAt:)` の戻り値をそのまま `itemFailed` に載せる
+    /// （レビュー第2ラウンド C）。1.2 以降（実体確認・startExport）は単体と共通の経路
+    /// （authorizeAndStart）を再利用する。
     ///
     /// 呼び出し元は写真を順番に処理し、`batchPaused` が返った時点で残りの `waiting` を呼ばない
     /// ことで、1.5「まだ認可されていない写真は開始せず、バッチを paused にする」を実現する。
@@ -107,7 +113,15 @@ extension ExportCoordinator {
             item.request.renderSpec, stampCatalog: stampCatalog, capabilities: capabilities
         )
         if let queueState = queueStateAfterAuthorization(renderSpecAuthorization, occurredAt: now()) {
-            return .itemFailed(queueState)
+            // Task 10「変更せず再書き出し」の免除（export-saga.md 1.2）。単体側
+            // （ExportCoordinator.swift の startExport）と同じ形で、1.2 の能力ブロックの
+            // 場合にのみ評価する。免除の条件（確定記録の存在・設定の一致・同一 Project）は
+            // 単体／バッチを区別しないため、経路によって認可結果が食い違ってはならない
+            // （レビュー第2ラウンド C）。消費（accountingMode）の評価は免除せず、従来どおり
+            // authorizeAndStart 経由の startExport に委ねる。
+            guard try await isExemptFromCapabilityBlock(item.request) else {
+                return .itemFailed(queueState)
+            }
         }
 
         let outcome = try await queue.run {
@@ -120,10 +134,6 @@ extension ExportCoordinator {
             return .itemPaused(.paused(.sourceReselectionRequired))
         case .blocked(let block):
             return .batchPaused(block)
-        case .confirmationMismatch, .renderSpecBlocked:
-            preconditionFailure(
-                "authorizeAndStart は confirmationMismatch/renderSpecBlocked を返さない（呼び出し前に startBatchItem が判定済み）"
-            )
         }
     }
 

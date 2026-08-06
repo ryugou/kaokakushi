@@ -98,7 +98,7 @@ private func queueLevelCancellationBeforeGenerationStartsStillDiscardsAndPropaga
 }
 
 @Test(
-    "上記経路でdiscardExport自体も失敗すると、真因(CancellationError)がGenerationAbortError.causeとして伝播する",
+    "上記経路でdiscardExport自体も失敗すると、真因(CancellationError)がCleanupPreservingError.causeとして伝播する",
     .timeLimit(.minutes(1))
 )
 private func queueLevelCancellationPreservesCancellationCauseWhenDiscardAlsoFails() async throws {
@@ -132,10 +132,10 @@ private func queueLevelCancellationPreservesCancellationCauseWhenDiscardAlsoFail
     do {
         try await generateTask.value
         Issue.record("エラーが送出されるはず")
-    } catch let error as GenerationAbortError {
+    } catch let error as CleanupPreservingError {
         #expect(error.cause is CancellationError)
-        #expect(error.discardFailure is DiscardBoom)
+        #expect(error.cleanupFailure is DiscardBoom)
     } catch {
-        Issue.record("GenerationAbortErrorが期待されたが\(error)が送出された")
+        Issue.record("CleanupPreservingErrorが期待されたが\(error)が送出された")
     }
 }

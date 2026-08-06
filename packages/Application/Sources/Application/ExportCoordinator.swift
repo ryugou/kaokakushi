@@ -32,6 +32,16 @@ public enum ExportStartOutcome: Sendable {
     case started(ExportJob)
 }
 
+/// `authorizeAndStart` の判定結果。`confirmationMismatch` / `renderSpecBlocked` は呼び出し前に
+/// startExport / startBatchItem 側で判定済みのため、この内部 enum には実際に到達しうる
+/// 3ケースしか存在しない（レビュー第2ラウンド B。旧実装は `ExportStartOutcome` をそのまま
+/// 返し、呼び出し元の switch に到達不能な分岐と `preconditionFailure` が残っていた）。
+enum AuthorizeAndStartOutcome: Sendable {
+    case started(ExportJob)
+    case workingSourceMissing
+    case blocked(ExportStartBlock)
+}
+
 public actor ExportCoordinator {
     let exportSagaStore: ExportSagaStore
     private let workingSourceStore: WorkingSourceStore
@@ -101,8 +111,16 @@ public actor ExportCoordinator {
             }
         }
 
-        return try await queue.run {
+        let outcome = try await queue.run {
             try await self.authorizeAndStart(request)
+        }
+        switch outcome {
+        case .started(let job):
+            return .started(job)
+        case .workingSourceMissing:
+            return .workingSourceMissing
+        case .blocked(let block):
+            return .blocked(block)
         }
     }
 
@@ -128,7 +146,7 @@ public actor ExportCoordinator {
         _ request: SingleExportRequest,
         batchID: BatchID? = nil,
         queueItemID: ExportQueueItemID? = nil
-    ) async throws -> ExportStartOutcome {
+    ) async throws -> AuthorizeAndStartOutcome {
         guard try await workingSourceExists(for: request.projectID) else {
             try await workingSourceStore.invalidateWorkingSource(request.projectID)
             return .workingSourceMissing

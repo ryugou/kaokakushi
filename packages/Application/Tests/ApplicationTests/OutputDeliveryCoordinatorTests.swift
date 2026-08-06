@@ -176,6 +176,34 @@ private func completeLibrarySaveFailurePropagatesWithoutAbandon() async throws {
     #expect(await outputDeliveryStore.abandonDeliveryAttemptCalls.isEmpty)
 }
 
+@Test("保存に失敗しabandonDeliveryAttemptも失敗すると、保存失敗の真因がCleanupPreservingError.causeとして伝播する")
+private func saveFailureSurvivesAbandonFailure() async throws {
+    struct AbandonBoom: Error, Equatable {}
+    let exportID = makeExportID()
+    let output = makeOutputRecord(exportID: exportID, state: .generated)
+    let outputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock())
+    await outputDeliveryStore.seedOutput(output)
+    await outputDeliveryStore.setAbandonDeliveryAttemptFailure(AbandonBoom())
+    let mediaSaver = FakeMediaSaver()
+    await mediaSaver.setFailure(SaveBoom())
+    let sharePresenter = await FakeSharePresenter()
+    let coordinator = makeCoordinator(
+        outputDeliveryStore: outputDeliveryStore, mediaSaver: mediaSaver, sharePresenter: sharePresenter
+    )
+
+    do {
+        try await coordinator.saveToPhotoLibrary(output)
+        Issue.record("エラーが送出されるはず")
+    } catch let error as CleanupPreservingError {
+        #expect(error.cause is SaveBoom)
+        #expect(error.cleanupFailure is AbandonBoom)
+    } catch {
+        Issue.record("CleanupPreservingErrorが期待されたが\(error)が送出された")
+    }
+
+    #expect(await outputDeliveryStore.completeLibrarySaveCalls.isEmpty)
+}
+
 // MARK: - 共有
 
 @Test("共有がcompletedならcompleteShareを呼びdeliveredへ写像しattemptは作らない")
