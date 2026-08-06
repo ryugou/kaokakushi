@@ -98,7 +98,7 @@
 - `requiredPlan` が設定内容から導かれ、作成時のプランに依存しないこと
 - Free 範囲のプロジェクトが Free で編集・書き出しできること
 - 降格後の操作可否が 6.2 の表と一致すること
-- 「変更せず再書き出し」の免除条件（確定記録の存在・設定ハッシュの一致・同一 `Project` であること・適用範囲は有料スタンプの能力要件のみ）が [書き出し Saga](export-saga.md) の 1.3 と一致すること
+- 「変更せず再書き出し」の免除条件（確定記録の存在・設定ハッシュの一致・同一 `Project` であること・適用範囲は有料スタンプの能力要件のみ）が [書き出し Saga](export-saga.md) の 1.2 と一致すること
 - 追加スタンプとカスタムスタンプで、降格後の再書き出し可否が同一であること
 - 広告表示頻度の判定（表示禁止条件、初回書き出し、連続表示の抑止）
 
@@ -193,14 +193,14 @@
 - 認可が `PreviewConfirmation` の一致検査と設定内容の能力検査（`authorizeRenderSpec`）の順に行われ、いずれか不成立なら開始しないこと。**`triage` の再導出は行わないこと**（保存済みの `DetectionStatus` / `ReviewStatus` / `ReviewDecision` をそのまま信頼する。ADR 0005）
 - 単体の開始条件が現在の `projectID` / `detectionRevision` / `previewRenderHash` の一致であること。バッチはこれに加え `BatchReviewState.batchID` の一致とモード別の確認条件を満たすこと
 - `reviewRequired` かつ `unreviewed` の写真が残っていれば開始しないこと
-- `WorkingSourceRecord` の実体（ファイルの存在）だけを確認すること。無ければ無効化して再選択導線へ倒すこと
+- `WorkingSourceRecord` の実体は `ManagedFileStore.exists` で確認すること。`false`（実体無し）でのみ無効化して再選択導線へ倒し、確認自体の失敗（保護データ利用不可・I/O 障害）による `throw` は欠損として扱わないこと
 - 権限とクォータの評価で `.blocked` なら `ExportJob` を作らず、生成も開始しないこと
 - 手順 0：`startExport` が `expectedProjectRevision` と不一致なら `throw` し、一致すれば `ExportJob` を挿入すること
 - **生成の完了時点（`recordGeneratedOutput`）では `OutputRecord`（`settledAt: nil`）と出力ファイルだけが作られること。月間枠・トライアルクレジットのいずれも消費されないこと**（ADR 0006）
 - **生成の完了時点で `ExportRecord` が作成されないこと。確定記録（`ExportedSettingsEntry`）も更新されないこと**
 - **生成の完了時点でキュー項目が確定されないこと**
 - **生成の完了時点で `WorkingSourceRecord` が削除されず保持され、素材を再レンダリングできること**
-- **健全性確認**: 存在確認だけでは不足し、サイズが 0 でなく簡易デコードが成功することを確認すること。いずれか不成立なら中断として扱うこと
+- **健全性確認**: `OutputFileVerifier.verify` が存在確認・サイズが 0 でないこと・簡易デコード成功の3検査を行うこと。3検査のいずれかの不成立、または一時的な I/O 障害（`.ioFailure`）による確認失敗のいずれでも中断として扱うこと
 - 生成の失敗（レンダリング・移動・健全性確認の不成立）・利用者によるキャンセルが、`ExportJob` の削除と生成済みファイルのベストエフォート削除で後始末されること。**まだ何も消費していないため返還処理は不要であること**
 - 開始後に契約の失効・月間上限への到達が起きても、`running` の写真は開始時の権限のまま生成を完了すること。`waiting` の写真は開始しないこと
 - **直列実行キュー1本（並列数1）が、同時に処理中の `ExportJob` を 1 件までに保つこと**（ADR 0005）
@@ -226,9 +226,10 @@
 
 ### 3.4 確定後の実体喪失（[書き出し Saga](export-saga.md) の 6 章）
 
-- **実体が無い、または `outputByteSize` / `outputSHA256` と一致しないとき、`OutputRecord` を削除すること**（[書き出し Saga](export-saga.md) の 6 章。`OutputState` は `generated` / `deliveryUnknown` / `delivered` の3値であり、`discarded` という状態は存在しない。破棄は状態ではなく行の物理削除で表す）
-- **`UsageLedger` を変更しないこと**（月間枠・トライアルクレジットのいずれも戻さない）
-- 自動再生成を行わないこと。利用者へは新しい書き出しとして案内すること
+- **`OutputFileVerifier.verify` が `.missing` / `.emptyFile` / `.undecodable` を返す、または測定値（`byteSize` / `sha256`）が `outputByteSize` / `outputSHA256` と一致しないとき、`OutputRecord` を削除すること**（[書き出し Saga](export-saga.md) の 6 章。`OutputState` は `generated` / `deliveryUnknown` / `delivered` の3値であり、`discarded` という状態は存在しない。破棄は状態ではなく行の物理削除で表す）
+- **`verify` が `.ioFailure` を返すとき、`OutputRecord` を削除しないこと**（実体喪失として扱わない。再試行の余地を残す）
+- **`UsageLedger` を変更しないこと**（月間枠・トライアルクレジットのいずれも戻さない。`.ioFailure` を含むいずれの状況でも）
+- 自動再生成を行わないこと。物理削除した場合のみ、利用者へ新しい書き出しとして案内すること
 
 ### 3.5 起動時復旧
 
@@ -302,6 +303,7 @@
 
 - `ManagedFileStore` が保存のたびに `isExcludedFromBackup` と `FileProtectionType` を設定し、読み返して検証すること
 - 属性の検証に失敗したファイルが完成扱いにならないこと
+- **`ManagedFileStore.exists` が実体無しで `false` を返し、確認自体の失敗（保護データ利用不可・I/O 障害）では `throw` すること。呼び出し側が `throw` を「欠損」として扱わないこと**
 - `StampAsset` の作成が atomic rename を経ること
 - **インポート Saga の手順 1〜3 の途中で終了した場合、作成済みファイルが孤児として起動時 GC で回収されること**
 - **`Project` の `capture` / `sourceRepresentation` / `libraryCreationDate` が `Project` 作成（手順 3）と同一トランザクションで保存されること**

@@ -72,6 +72,28 @@ protocol OutputDeliveryStore: Sendable {
     func deleteOutput(_ exportID: ExportID) async throws
 }
 
+/// 「変更せず再書き出し」免除の判定に使う確定記録の読み取り（1.2）。書き込みは
+/// settleExport / settleBatch が単一トランザクション内で直接行うためこのポートには含めない。
+/// `ExportedSettingsEntry` の定義はアーキテクチャ設計 6.3
+protocol ExportedSettingsEntryStore: Sendable {
+    /// 当該 projectID の確定記録を返す（無ければ nil）
+    func loadEntry(for projectID: ProjectID) async throws -> ExportedSettingsEntry?
+}
+
+/// 出力ファイルの健全性を確認し、記録用の測定値を返す（3 章 手順3・6 章）。存在確認・
+/// サイズ 0 でないこと・簡易デコード成功の3検査を1回の走査で賄う
+protocol OutputFileVerifier: Sendable {
+    func verify(_ file: OutputFileRef) async throws(OutputFileVerificationError) -> VerifiedOutputMeasurement
+}
+/// `.ioFailure` は一時的な障害であり健全性の否定ではない。6 章の削除判定の根拠にしない
+enum OutputFileVerificationError: Error, Sendable, Equatable {
+    case missing, emptyFile, undecodable, ioFailure
+}
+struct VerifiedOutputMeasurement: Sendable {
+    let byteSize: Int64
+    let sha256: Data
+}
+
 struct ExportQueueItemID: Sendable, Hashable { let rawValue: UUID }
 /// 出力の縦横比（仕様の 元比率 / 1:1 / 4:5 / 9:16）
 enum OutputAspect: Sendable, Hashable {
@@ -200,7 +222,7 @@ enum StampRequirement: Sendable, Hashable {
 | 対象 | 同一 `Project` であること（素材の同一性は照合しない） |
 | 適用範囲 | 有料スタンプの能力要件のみ。月間枠・トライアルクレジットの消費は通常どおり発生する |
 
-確定記録は完了操作（`settleExport` / `settleBatch`。3 章）で直接書き込む。
+確定記録の書き込みは完了操作（`settleExport` / `settleBatch`。3 章）が単一トランザクション内で直接行う。読み取りは `ExportedSettingsEntryStore.loadEntry`（0 章）を使う。免除の判定自体は **Application 層**が `loadEntry` の結果と、いま組み立てた `RenderSpec` / `ExportSetting` から計算した `settingsHash` を比較して行う（`authorizeRenderSpec` 自体は免除を評価しない）。
 
 ### 1.3 権限とクォータ
 
@@ -317,7 +339,7 @@ ExportJob 作成 → レンダリング・移動・健全性確認（DB 上の�
 
 手順5で削除する `WorkingSourceRecord` の実体ファイルは、同一トランザクション内で `PendingFileDeletion` へ登録する。実際のファイル削除はトランザクションのコミット後に行い、失敗すれば起動時の GC で再試行する（削除経路の正本は [アーキテクチャ設計](architecture.md) の 7.5。「出力の削除経路」と同じ単一経路を使う）。
 
-**手順3（健全性確認）**: 存在確認だけでは不足する（0 バイトのファイル、途中まで書かれたファイル、デコードできないファイルも「存在する」ため）。ファイルが存在し、サイズが 0 でなく、簡易デコードが成功することを確認する。いずれかが不成立なら手順 4 へ進まず、中断として扱う（4 章）。
+**手順3（健全性確認）**: 存在確認だけでは不足する（0 バイトのファイル、途中まで書かれたファイル、デコードできないファイルも「存在する」ため）。`OutputFileVerifier.verify`（0 章）を1回呼び、ファイルが存在すること・サイズが 0 でないこと・簡易デコードが成功することを確認し、成功時は手順4が使う `outputByteSize` / `outputSHA256` を得る。3検査のいずれかが不成立の場合、または一時的な I/O 障害（`.ioFailure`）で確認そのものに失敗した場合のいずれでも、手順 4 へ進まず中断として扱う（4 章）。ただし `.ioFailure` は健全性の否定ではないため、6 章（確定後の実体喪失判定）では削除の根拠にしない。
 
 **手順4（生成）の内容**:
 
@@ -404,11 +426,14 @@ struct ExportRecord: Sendable {
 
 `OutputRecord` と実体が食い違うことは、外部要因（OS によるキャッシュ削除、ストレージ障害）で起こりうる。v1 では自動再生成を行わない。この章は完了済み（`settledAt != nil`）の出力だけを扱う。未確定の出力は永続保護しないため（4 章）、実体を失えば単に生成のやり直しになる。
 
+実体の健全性は `OutputFileVerifier.verify`（0 章）で確認する。
+
 | 状況 | 扱い |
 | --- | --- |
-| 実体が無い、または `outputByteSize` / `outputSHA256` と一致しない | `OutputRecord` を物理削除する（7 章の `deleteOutput` と同じ、履歴削除の唯一の経路） |
-| 台帳 | 変更しない。月間枠・トライアルクレジットのいずれも戻さない |
-| 利用者への提示 | 出力を復元できないこと、および新しい書き出しになることを示す |
+| `verify` が `.missing` / `.emptyFile` / `.undecodable` を返す、または検査に成功したが測定値（`byteSize` / `sha256`）が `OutputRecord.outputByteSize` / `outputSHA256` と一致しない | `OutputRecord` を物理削除する（7 章の `deleteOutput` と同じ、履歴削除の唯一の経路） |
+| `verify` が `.ioFailure` を返す（保護データ利用不可・一時的な I/O 障害） | **実体喪失として扱わない。** `OutputRecord` を削除せず、確認できなかった旨を提示するに留める（再試行の余地を残す） |
+| 台帳 | いずれの状況でも変更しない。月間枠・トライアルクレジットのいずれも戻さない |
+| 利用者への提示 | 物理削除した場合のみ、出力を復元できないこと・新しい書き出しになることを示す。`.ioFailure` の場合は復元不可を示さない |
 
 **自動再生成を行わない理由**: 現在保持しているデータでは再生成できない（元画像は完了時に `WorkingSourceRecord` ごと削除され、`RenderSpec` と `ExportSetting` も `OutputRecord` は保持しない）。再生成には出力の期限まで不変のスナップショットを保持する必要があり、未加工の顔画像を最大24時間追加保持することを意味する。プライバシーと容量の複雑性が v1 の利得に釣り合わない。完了済みの出力を失った場合の再生成は新規消費になる（[ADR 0006](adr/0006-accounting-per-delivered-output.md)。時間窓による免除は無い）ため、利用者の損失は消費した 1 枠と操作の手間の両方である。
 
