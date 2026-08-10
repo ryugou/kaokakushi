@@ -60,6 +60,11 @@ public actor ExportCoordinator {
     /// settingsHash 算出（Domain の正準エンコーダ）へ注入する SHA-256 実体計算
     /// （canonical-schema.md 5.2。Domain は CryptoKit を import できないため）。
     let settingsHashDigest: Sha256Digest
+    /// 起動時復旧の完了ゲート（Issue #7 Task 12）。開始経路（startExport / startBatchItem）は
+    /// キュー投入前にこれを待つ（export-saga.md 5章「復旧が完了するまで新しい書き出しを
+    /// 開始させない」）。キュー内で待つと復旧側の操作がキューを取れず自己デッドロックするため、
+    /// 必ずキュー投入より前に待つ。
+    let recoveryGate: RecoveryGate
 
     public init(
         exportSagaStore: ExportSagaStore,
@@ -73,7 +78,8 @@ public actor ExportCoordinator {
         now: @escaping @Sendable () -> Date,
         queue: SerialTaskQueue,
         exportedSettingsEntryStore: ExportedSettingsEntryStore,
-        settingsHashDigest: Sha256Digest
+        settingsHashDigest: Sha256Digest,
+        recoveryGate: RecoveryGate
     ) {
         self.exportSagaStore = exportSagaStore
         self.workingSourceStore = workingSourceStore
@@ -87,6 +93,7 @@ public actor ExportCoordinator {
         self.queue = queue
         self.exportedSettingsEntryStore = exportedSettingsEntryStore
         self.settingsHashDigest = settingsHashDigest
+        self.recoveryGate = recoveryGate
     }
 
     /// export-saga.md 1.6 の順序で認可を評価し、成立すれば `ExportJob` を挿入する。
@@ -94,6 +101,7 @@ public actor ExportCoordinator {
         _ request: SingleExportRequest,
         capabilities: ResolvedCapabilities
     ) async throws -> ExportStartOutcome {
+        await recoveryGate.awaitRecoveryCompleted()
         guard isConfirmationConsistent(request) else {
             return .confirmationMismatch
         }

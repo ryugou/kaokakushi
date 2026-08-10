@@ -247,3 +247,27 @@ private func awaitRecoveryCompletedBlocksUntilRecoveryFinishes() async throws {
     _ = try await recovery.value
     await waiter.value
 }
+
+@Test("復旧がthrowした場合、ゲートは開かないまま残る", .timeLimit(.minutes(1)))
+private func recoveryFailureLeavesGateClosed() async throws {
+    let exportSagaStore = FakeExportSagaStore()
+    await exportSagaStore.setLoadRunningJobsFailure(Boom())
+    let outputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock())
+    let coordinator = makeCoordinator(exportSagaStore: exportSagaStore, outputDeliveryStore: outputDeliveryStore)
+
+    await #expect(throws: Boom.self) {
+        try await coordinator.runStartupRecovery()
+    }
+
+    let (waiterSignal, waiterContinuation) = AsyncStream<Void>.makeStream()
+    var waiterIterator = waiterSignal.makeAsyncIterator()
+    let waiter = Task {
+        await coordinator.awaitRecoveryCompleted()
+        waiterContinuation.yield(())
+    }
+    for _ in 0..<5 { await Task.yield() }
+    waiterContinuation.finish()
+    #expect(await waiterIterator.next() == nil)
+
+    waiter.cancel()
+}

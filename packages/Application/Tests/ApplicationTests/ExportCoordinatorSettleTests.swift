@@ -34,7 +34,8 @@ private func makeCoordinator(
         now: now,
         queue: SerialTaskQueue(),
         exportedSettingsEntryStore: FakeExportedSettingsEntryStore(),
-        settingsHashDigest: FakeSha256Digest()
+        settingsHashDigest: FakeSha256Digest(),
+        recoveryGate: FakeRecoveryGate()
     )
 }
 

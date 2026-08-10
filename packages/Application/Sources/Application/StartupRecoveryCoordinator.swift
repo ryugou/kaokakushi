@@ -116,6 +116,11 @@ public actor StartupRecoveryCoordinator {
     let outputDeliveryStore: OutputDeliveryStore
     let maintenanceStore: MaintenanceStore
     let managedFileStore: ManagedFileStore
+    /// 復旧手順の変更系操作（deleteRunningJobs・resolveOrphanedAttempts・孤児ファイルGCの
+    /// 削除・登録）が経由する共有直列キュー（Issue #7 Task 12。architecture.md 4.2「すべての
+    /// 変更系 Coordinator が単一のグローバル直列キューを共有する」）。ExportCoordinator /
+    /// OutputDeliveryCoordinator と同じインスタンスを注入する。
+    let queue: SerialTaskQueue
     private let updateGuidanceHook: @Sendable () async -> Void
 
     private var recoveryTask: Task<StartupRecoveryReport, Error>?
@@ -127,12 +132,14 @@ public actor StartupRecoveryCoordinator {
         outputDeliveryStore: OutputDeliveryStore,
         maintenanceStore: MaintenanceStore,
         managedFileStore: ManagedFileStore,
+        queue: SerialTaskQueue,
         updateGuidanceHook: @escaping @Sendable () async -> Void = {}
     ) {
         self.exportSagaStore = exportSagaStore
         self.outputDeliveryStore = outputDeliveryStore
         self.maintenanceStore = maintenanceStore
         self.managedFileStore = managedFileStore
+        self.queue = queue
         self.updateGuidanceHook = updateGuidanceHook
     }
 
@@ -143,11 +150,18 @@ public actor StartupRecoveryCoordinator {
         if let recoveryTask {
             return try await recoveryTask.value
         }
-        let task = Task { try await self.performRecovery() }
+        // ゲート開放（completeGate）を復旧 Task の内側へ置き、performRecovery の完了と
+        // 同一 Task 内で原子的に行う。runStartupRecovery を呼び出した側（呼び出し元の
+        // コンテキスト）が後で `task.value` を待つ間にキャンセルされても、この Task 自体は
+        // 独立して完走するため、ゲート開放が呼び出し元の都合に左右されない（Issue #7
+        // Task 12）。
+        let task = Task {
+            let report = try await self.performRecovery()
+            self.completeGate()
+            return report
+        }
         recoveryTask = task
-        let report = try await task.value
-        completeGate()
-        return report
+        return try await task.value
     }
 
     /// 復旧が完了するまで呼び出し元を保留する（architecture.md 4.3「完了まで他のすべてを
@@ -165,11 +179,14 @@ public actor StartupRecoveryCoordinator {
     /// report へ落として後続の手順へ進む（W-3。ファイル冒頭コメント参照）。
     private func performRecovery() async throws -> StartupRecoveryReport {
         let runningJobs = try await exportSagaStore.loadRunningJobs()
-        try await exportSagaStore.deleteRunningJobs(runningJobs.map(\.exportID))
+        let runningExportIDs = runningJobs.map(\.exportID)
+        try await queue.run { try await self.exportSagaStore.deleteRunningJobs(runningExportIDs) }
 
         let fileGC = await runOrphanFileGC()
 
-        let outputDeliverySnapshots = try await outputDeliveryStore.resolveOrphanedAttempts()
+        let outputDeliverySnapshots = try await queue.run {
+            try await self.outputDeliveryStore.resolveOrphanedAttempts()
+        }
         let unknownLibrarySaves = try await outputDeliveryStore.loadUnknownLibrarySaves()
 
         await updateGuidanceHook()

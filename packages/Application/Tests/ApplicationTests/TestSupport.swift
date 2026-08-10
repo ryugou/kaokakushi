@@ -228,7 +228,8 @@ func makeGenerateCoordinator(
         now: makeFixedClock(),
         queue: SerialTaskQueue(),
         exportedSettingsEntryStore: FakeExportedSettingsEntryStore(),
-        settingsHashDigest: FakeSha256Digest()
+        settingsHashDigest: FakeSha256Digest(),
+        recoveryGate: FakeRecoveryGate()
     )
 }
 
@@ -262,6 +263,7 @@ func makeCoordinator(
     outputDeliveryStore: FakeOutputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock()),
     maintenanceStore: FakeMaintenanceStore? = nil,
     managedFileStore: FakeManagedFileStore = FakeManagedFileStore(),
+    queue: SerialTaskQueue = SerialTaskQueue(),
     updateGuidanceHook: @escaping @Sendable () async -> Void = {}
 ) -> StartupRecoveryCoordinator {
     // FakeMaintenanceStore は managedFileStore から listExistingFileIDs を導出する
@@ -273,6 +275,7 @@ func makeCoordinator(
         outputDeliveryStore: outputDeliveryStore,
         maintenanceStore: resolvedMaintenanceStore,
         managedFileStore: managedFileStore,
+        queue: queue,
         updateGuidanceHook: updateGuidanceHook
     )
 }

@@ -24,7 +24,8 @@ private func makeCoordinator(
         outputDeliveryStore: outputDeliveryStore,
         mediaSaver: mediaSaver,
         sharePresenter: sharePresenter,
-        queue: SerialTaskQueue()
+        queue: SerialTaskQueue(),
+        recoveryGate: FakeRecoveryGate()
     )
 }
 

@@ -46,23 +46,30 @@ public actor OutputDeliveryCoordinator {
     private let mediaSaver: MediaSaver
     private let sharePresenterBox: UncheckedSendableBox<SharePresenter>
     private let queue: SerialTaskQueue
+    /// 起動時復旧の完了ゲート（Issue #7 Task 12）。変更系操作はキュー投入前にこれを待つ
+    /// （export-saga.md 5章「復旧が完了するまで新しい書き出しを開始させない」。キュー内で
+    /// 待つと復旧側の操作がキューを取れず自己デッドロックするため、必ずキュー投入より前に待つ）。
+    private let recoveryGate: RecoveryGate
 
     public init(
         outputDeliveryStore: OutputDeliveryStore,
         mediaSaver: MediaSaver,
         sharePresenter: SharePresenter,
-        queue: SerialTaskQueue
+        queue: SerialTaskQueue,
+        recoveryGate: RecoveryGate
     ) {
         self.outputDeliveryStore = outputDeliveryStore
         self.mediaSaver = mediaSaver
         self.sharePresenterBox = UncheckedSendableBox(value: sharePresenter)
         self.queue = queue
+        self.recoveryGate = recoveryGate
     }
 
     /// 写真ライブラリへ保存する（export-saga.md 7.0 表 手順1〜4）。保存が失敗した場合の
     /// abandonDeliveryAttempt 自体の失敗で、保存失敗の真因が置き換わらないよう
     /// `runCleanupPreservingError`（Cleanup.swift。レビュー第2ラウンド A）を経由する。
     public func saveToPhotoLibrary(_ output: OutputRecord) async throws {
+        await recoveryGate.awaitRecoveryCompleted()
         try await queue.run {
             try await self.outputDeliveryStore.beginDeliveryAttempt(output.exportID)
             do {
@@ -82,6 +89,7 @@ public actor OutputDeliveryCoordinator {
         guard result == .completed else {
             return result
         }
+        await recoveryGate.awaitRecoveryCompleted()
         try await queue.run {
             try await self.outputDeliveryStore.completeShare(output.exportID)
         }
@@ -97,6 +105,7 @@ public actor OutputDeliveryCoordinator {
 
     /// 完了後の出力を利用者が明示的に破棄する（export-saga.md 7.0 表。状態遷移ではない）。
     public func deleteOutput(_ exportID: ExportID) async throws {
+        await recoveryGate.awaitRecoveryCompleted()
         try await queue.run {
             try await self.outputDeliveryStore.deleteOutput(exportID)
         }

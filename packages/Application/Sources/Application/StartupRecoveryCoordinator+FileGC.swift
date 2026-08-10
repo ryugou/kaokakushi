@@ -69,13 +69,13 @@ extension StartupRecoveryCoordinator {
         var tally = FileDeletionTally()
         for ref in refs {
             do {
-                try await managedFileStore.delete(ref)
+                try await queue.run { try await self.managedFileStore.delete(ref) }
             } catch {
                 tally.failedFileDeletions.append(FileDeletionFailure(kind: ref.kind, cause: error))
                 continue
             }
             do {
-                try await maintenanceStore.clearPendingFileDeletion(ref)
+                try await queue.run { try await self.maintenanceStore.clearPendingFileDeletion(ref) }
                 tally.deletedCount += 1
             } catch {
                 tally.pendingRecordClearFailures.append(FileDeletionFailure(kind: ref.kind, cause: error))
@@ -98,7 +98,7 @@ extension StartupRecoveryCoordinator {
             for fileID in orphanFileIDs {
                 let ref = ManagedFileRef(kind: kind, fileID: fileID)
                 guard !attemptedRefs.contains(ref) else { continue }
-                try await maintenanceStore.registerOrphan(ref)
+                try await queue.run { try await self.maintenanceStore.registerOrphan(ref) }
                 registeredRefs.append(ref)
             }
         }

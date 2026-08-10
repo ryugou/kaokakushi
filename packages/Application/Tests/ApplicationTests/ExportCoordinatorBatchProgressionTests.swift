@@ -57,7 +57,8 @@ private func makeCoordinator(
         now: makeFixedClock(),
         queue: SerialTaskQueue(),
         exportedSettingsEntryStore: FakeExportedSettingsEntryStore(),
-        settingsHashDigest: FakeSha256Digest()
+        settingsHashDigest: FakeSha256Digest(),
+        recoveryGate: FakeRecoveryGate()
     )
 }
 
