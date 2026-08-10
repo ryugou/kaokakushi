@@ -108,6 +108,32 @@ private func startExportWaitsForRecoveryGateThenProceeds() async throws {
     #expect(startedJob(outcome)?.exportID == exportID)
 }
 
+// S-3（Task 12 再レビュー）: FakeRecoveryGate は withCheckedContinuation（非 throwing・
+// キャンセルハンドラ無し）のままで、キャンセルにも失敗確定にも応答しなかった。そのため
+// 「ゲート待ち中にタスクがキャンセルされたとき、変更系操作が CancellationError で正しく抜けるか」
+// がどのテストでも検証されていなかった。本物の StartupRecoveryCoordinator と同じ契約に
+// 合わせた FakeRecoveryGate（withCheckedThrowingContinuation + withTaskCancellationHandler）を
+// 使い、startExport 経路で最低限この挙動を固定する。
+@Test(
+    "ゲート待ち中にstartExportがキャンセルされると、待たされたままにならずCancellationErrorで抜ける",
+    .timeLimit(.minutes(1))
+)
+private func startExportCancelledWhileWaitingForGateThrowsCancellationError() async throws {
+    let (request, capabilities) = try makeFullyConsistentRequest()
+    let exportSagaStore = FakeExportSagaStore()
+    let gate = FakeRecoveryGate(isOpen: false)
+    let coordinator = makeCoordinator(exportSagaStore: exportSagaStore, recoveryGate: gate)
+
+    let task = Task { try await coordinator.startExport(request, capabilities: capabilities) }
+    for _ in 0..<5 { await Task.yield() }
+    task.cancel()
+
+    await #expect(throws: CancellationError.self) {
+        try await task.value
+    }
+    #expect(await exportSagaStore.startExportCalls.isEmpty)
+}
+
 @Test("復旧未完了の間はstartBatchItemがstoreへ進まず、完了後に開始できる", .timeLimit(.minutes(1)))
 private func startBatchItemWaitsForRecoveryGateThenProceeds() async throws {
     let batchID = makeBatchID()

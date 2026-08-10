@@ -168,9 +168,9 @@ private func clearPendingFileDeletionFailureIsNotCountedAsEntityDeletionFailure(
 }
 
 // S-2（Task 12 レビュー）: architecture.md「CancellationError は業務エラーとして扱わない」に
-// 従い、孤児GCの削除失敗の計上から CancellationError を除外する。C-1 で awaitRecoveryCompleted()
-// をキャンセル可能にすると、共有 SerialTaskQueue 経由のこの削除経路にも CancellationError が
-// 到達しうるようになる。
+// 従い、孤児GCの削除失敗の計上から CancellationError を除外する。これは防御的な対応であり、
+// ストア実装が CancellationError を投げた場合に備える（復旧は非構造化 Task の中で走るため、
+// ゲート待機者のキャンセルはこの GC 側に伝播しない。Task 12 再レビュー S-1）。
 
 @Test("実体削除でCancellationErrorが投げられても、failedFileDeletionCountへ計上されないこと")
 private func cancellationErrorDuringDeleteIsExcludedFromFailureTally() async throws {
@@ -203,6 +203,25 @@ private func cancellationErrorDuringClearIsExcludedFromFailureTally() async thro
     let report = try await coordinator.runStartupRecovery()
 
     #expect(report.pendingRecordClearFailures.isEmpty)
+    #expect(report.deletedFileCount == 0)
+}
+
+// S-2（Task 12 再レビュー）: registerOrphanFiles（手順(2)の registerOrphan の queue.run）が
+// 投げた CancellationError は、deleteManagedFiles とは別の catch 節（runOrphanFileGC 自身）を
+// 通るため、対称にするには runOrphanFileGC 側でも除外が必要だった。
+
+@Test("registerOrphanでCancellationErrorが投げられても、fileGCFailureへ計上されないこと")
+private func cancellationErrorDuringRegisterOrphanIsExcludedFromGCFailure() async throws {
+    let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
+    let orphanRef = ManagedFileRef(kind: .output, fileID: ManagedFileID(rawValue: UUID()))
+    await managedFileStore.seedExistingFile(orphanRef)
+    await maintenanceStore.setRegisterOrphanFailure(CancellationError())
+    let coordinator = makeCoordinator(maintenanceStore: maintenanceStore, managedFileStore: managedFileStore)
+
+    let report = try await coordinator.runStartupRecovery()
+
+    #expect(report.fileGCFailure == nil)
     #expect(report.deletedFileCount == 0)
 }
 

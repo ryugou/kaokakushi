@@ -105,8 +105,13 @@ private func makeExportRequest(projectID: ProjectID) throws -> SingleExportReque
 
 /// 実体ファイルまで揃った WorkingSourceRecord を作り、指定した偽ストアへ seed する
 /// （ExportCoordinatorBatchTests.swift の seedWorkingSource と同じ定義）。
+/// maintenanceStore を渡すと参照済みIDとしても登録する（C-1: 孤児GCがまだ完了していない
+/// タイミングでこの実体を seed しても、孤児として拾われて削除されないようにするため）。
 private func seedWorkingSource(
-    projectID: ProjectID, workingSourceStore: FakeWorkingSourceStore, managedFileStore: FakeManagedFileStore
+    projectID: ProjectID,
+    workingSourceStore: FakeWorkingSourceStore,
+    managedFileStore: FakeManagedFileStore,
+    maintenanceStore: FakeMaintenanceStore? = nil
 ) async throws {
     let sourceFileRef = ManagedFileRef(kind: .processingTemporary, fileID: ManagedFileID(rawValue: UUID()))
     let workingSourceFileRef = try #require(WorkingSourceFileRef(sourceFileRef))
@@ -118,6 +123,9 @@ private func seedWorkingSource(
         )
     )
     await managedFileStore.seedExistingFile(sourceFileRef)
+    if let maintenanceStore {
+        await maintenanceStore.seedReferencedFileIDs(kind: .processingTemporary, ids: [sourceFileRef.fileID])
+    }
 }
 
 /// makeExportCoordinatorSharingQueue へ渡す store 一式（function_parameter_count 回避のため
@@ -198,20 +206,59 @@ private func gcFailureStillOpensGateForSubsequentExports() async throws {
     #expect(job.exportID == expectedJob.exportID)
 }
 
-// W-2（Task 12 レビュー）: 復旧用と書き出し用が別インスタンスのキューを使うテストだけでは、
-// awaitRecoveryCompleted() の呼び出しを将来 queue.run の中へ移す改変が入っても検出できない。
-// StartupRecoveryCoordinator と ExportCoordinator に同一の SerialTaskQueue を注入し、
-// updateGuidanceHook で復旧を保留したまま startExport を呼んでも自己デッドロックせず、
-// フック解放後に両者が完走することを固定する。
-@Test(
-    "共有SerialTaskQueue上でupdateGuidanceHookが復旧を保留している間もstartExportはゲートを待ち、フック解放後に両方完走する",
-    .timeLimit(.minutes(1))
-)
-private func sharedQueueAvoidsSelfDeadlockBetweenRecoveryAndExportStart() async throws {
+// C-1（Task 12 再レビュー）: 復旧の最後（updateGuidanceHook）で保留するだけの旧テストは、
+// フック到達時点で復旧側のキュー操作（deleteRunningJobs・GC・resolveOrphanedAttempts）が
+// すべて完了済みのため共有キューが空であり、ExportCoordinator.startExport のゲート待ちを
+// queue.run の中へ移す改変を加えても即座にキューを取得できてデッドロックしなかった
+// （再レビュー実測: 116 tests が 0.038 秒で green のまま通過）。守るべき回帰を検出するには、
+// 「復旧がまだキュー操作を残している状態」で startExport を投入する必要がある。
+//
+// 手順（recoveryMutationsGoThroughSharedQueueAndWaitTheirTurn と同じ手法）:
+// 1. 外部の op に共有キューを占有させる
+// 2. その状態で runStartupRecovery() を開始する（loadRunningJobs 完了を確認し、後続の
+//    deleteRunningJobs の queue.run が占有中のキューへ連結されたことを確定させる）
+// 3. 続けて startExport を投入する
+// 4. 占有を解放する
+//
+// 現行コード（ゲート待ちがキュー投入前）ではこの後 startExport 側の queue.run 呼び出し自体が
+// 復旧完了まで発生しないため、キューには復旧側の操作だけが並び、両者は完走する。ゲート待ちを
+// queue.run の中へ移す改変が入ると、startExport の op が復旧の後続 queue.run（GC・
+// resolveOrphanedAttempts）より先にキューへ連結され、その内部でゲートが開くのを待ってしまう。
+// ゲートは復旧の後続 queue.run が完了しないと開かないため、真のデッドロックになる
+// （再レビュー実測: この形のテストでは現行コードが 117 tests 0.040s、改変コードは
+// 600 秒経過後も終了せずプロセスを kill）。
+/// デッドロック検出テストに必要な非構造化 `Task` 一式（関数長を50行以内に収めるための分割）。
+private struct SelfDeadlockCheckFixture: Sendable {
+    let blocking: Task<Void, Error>
+    let occupancyGate: OneShotGate
+    let recovery: Task<StartupRecoveryReport, Error>
+    let startTask: Task<ExportStartOutcome, Error>
+    let exportSagaStore: FakeExportSagaStore
+    let expectedJob: ExportJob
+}
+
+/// 指定した queue を外部opが占有した状態にし、占有解放用の Task とゲートを返す
+/// （recoveryMutationsGoThroughSharedQueueAndWaitTheirTurn と同じ手法の共通化）。
+private func occupySharedQueue(_ queue: SerialTaskQueue) async -> (blocking: Task<Void, Error>, gate: OneShotGate) {
+    let gate = OneShotGate()
+    let (occupiedStream, occupiedContinuation) = AsyncStream<Void>.makeStream()
+    var occupiedIterator = occupiedStream.makeAsyncIterator()
+
+    let blocking = Task<Void, Error> {
+        try await queue.run {
+            occupiedContinuation.yield(())
+            await gate.wait()
+        }
+    }
+    _ = await occupiedIterator.next()
+    return (blocking, gate)
+}
+
+/// 外部opによる共有キュー占有→復旧開始→startExport投入までを行い、占有解放前の状態まで
+/// 整えたフィクスチャを返す。
+private func setUpSelfDeadlockCheckFixture() async throws -> SelfDeadlockCheckFixture {
     let sharedQueue = SerialTaskQueue()
-    let hookGate = OneShotGate()
-    let (reachedHookStream, reachedHookContinuation) = AsyncStream<Void>.makeStream()
-    var reachedHookIterator = reachedHookStream.makeAsyncIterator()
+    let (blocking, occupancyGate) = await occupySharedQueue(sharedQueue)
 
     let projectID = makeProjectID()
     let expectedJob = makeExportJob(exportID: makeExportID(), projectID: projectID)
@@ -224,14 +271,22 @@ private func sharedQueueAvoidsSelfDeadlockBetweenRecoveryAndExportStart() async 
         outputDeliveryStore: outputDeliveryStore,
         maintenanceStore: maintenanceStore,
         managedFileStore: managedFileStore,
-        queue: sharedQueue,
-        updateGuidanceHook: {
-            reachedHookContinuation.yield(())
-            await hookGate.wait()
-        }
+        queue: sharedQueue
     )
 
+    let recovery = Task { try await recoveryCoordinator.runStartupRecovery() }
+    for _ in 0..<5 { await Task.yield() }
+    // loadRunningJobsはキュー外の読み取りのため占有中でも即座に呼ばれ、続くdeleteRunningJobsの
+    // queue.runがこの時点で外部opの後ろへ連結されている。
+    #expect(await exportSagaStore.loadRunningJobsCallCount == 1)
+
     let workingSourceStore = FakeWorkingSourceStore()
+    try await seedWorkingSource(
+        projectID: projectID,
+        workingSourceStore: workingSourceStore,
+        managedFileStore: managedFileStore,
+        maintenanceStore: maintenanceStore
+    )
     let request = try makeExportRequest(projectID: projectID)
     let stores = SharedQueueStores(
         exportSagaStore: exportSagaStore,
@@ -243,30 +298,43 @@ private func sharedQueueAvoidsSelfDeadlockBetweenRecoveryAndExportStart() async 
         stores, queue: sharedQueue, recoveryGate: recoveryCoordinator
     )
 
-    let recovery = Task { try await recoveryCoordinator.runStartupRecovery() }
-    _ = await reachedHookIterator.next()
-    // GC（孤児ファイルの差集合判定）は updateGuidanceHook より前の手順のため、hook到達後に
-    // 実体を seed すれば GC に孤児として拾われず削除されない（recoveryCoordinator と
-    // exportCoordinator は managedFileStore を共有しているため、先に seed すると GC 対象に
-    // なってしまう）。
-    try await seedWorkingSource(
-        projectID: projectID, workingSourceStore: workingSourceStore, managedFileStore: managedFileStore
-    )
-
     let startTask = Task { try await exportCoordinator.startExport(request, capabilities: makeResolvedCapabilities()) }
     for _ in 0..<5 { await Task.yield() }
     #expect(await exportSagaStore.startExportCalls.isEmpty)
 
-    await hookGate.open()
-    let report = try await recovery.value
-    let outcome = try await startTask.value
+    return SelfDeadlockCheckFixture(
+        blocking: blocking, occupancyGate: occupancyGate, recovery: recovery,
+        startTask: startTask, exportSagaStore: exportSagaStore, expectedJob: expectedJob
+    )
+}
 
-    guard case .started(let job) = outcome else {
-        Issue.record("expected .started but got \(outcome)")
-        return
-    }
-    #expect(job.exportID == expectedJob.exportID)
-    #expect(report.deletedRunningJobCount == 0)
+@Test(
+    "共有キューを外部opが占有し復旧がキュー操作を残した状態でstartExportを投入しても占有解放後に両方完走する",
+    .timeLimit(.minutes(1))
+)
+private func sharedQueueAvoidsSelfDeadlockWhenRecoveryStillHasQueuedWork() async throws {
+    let fixture = try await setUpSelfDeadlockCheckFixture()
+
+    await fixture.occupancyGate.open()
+
+    try await awaitOrRecordDeadlock(
+        cancelOnTimeout: {
+            fixture.blocking.cancel()
+            fixture.recovery.cancel()
+            fixture.startTask.cancel()
+        },
+        operation: {
+            _ = try await fixture.blocking.value
+            let report = try await fixture.recovery.value
+            let outcome = try await fixture.startTask.value
+            guard case .started(let job) = outcome else {
+                Issue.record("expected .started but got \(outcome)")
+                return
+            }
+            #expect(job.exportID == fixture.expectedJob.exportID)
+            #expect(report.deletedRunningJobCount == 0)
+        }
+    )
 }
 
 // C-1（Task 12 レビュー）: 復旧が失敗で確定した後は、以後の変更系操作を待たせたままにせず

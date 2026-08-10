@@ -1,4 +1,5 @@
 import Foundation
+import Testing
 import Domain
 @testable import Application
 
@@ -278,6 +279,38 @@ func makeCoordinator(
         queue: queue,
         updateGuidanceHook: updateGuidanceHook
     )
+}
+
+/// デッドロック検出付きで非同期処理を実行する（Task 12 再レビュー C-1）。`.timeLimit` は
+/// デッドロックした処理を止められない（デッドロックが非構造化 `Task` の中で起こり、
+/// `await task.value` はテスト task のキャンセルでは抜けないため）。`withThrowingTaskGroup` で
+/// `Task.sleep` と競わせ、タイムアウト側が先に完了したら `cancelOnTimeout` で関係する `Task` を
+/// cancel してから `Issue.record` し、テストを確実に終了させる。
+func awaitOrRecordDeadlock(
+    timeoutSeconds: Double = 10,
+    cancelOnTimeout: @Sendable @escaping () -> Void,
+    sourceLocation: SourceLocation = #_sourceLocation,
+    operation: @Sendable @escaping () async throws -> Void
+) async throws {
+    try await withThrowingTaskGroup(of: Bool.self) { group in
+        group.addTask {
+            try await operation()
+            return true
+        }
+        group.addTask {
+            try await Task.sleep(for: .seconds(timeoutSeconds))
+            return false
+        }
+        let finishedInTime = try await group.next()
+        group.cancelAll()
+        if finishedInTime != true {
+            cancelOnTimeout()
+            Issue.record(
+                "デッドロックの疑いでタイムアウトした（\(timeoutSeconds)秒）",
+                sourceLocation: sourceLocation
+            )
+        }
+    }
 }
 
 /// 単体トライアル可・広告表示ありの標準的な ResolvedCapabilities フィクスチャ。

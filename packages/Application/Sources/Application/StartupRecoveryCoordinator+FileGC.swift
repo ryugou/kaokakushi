@@ -54,6 +54,9 @@ extension StartupRecoveryCoordinator {
 
             let orphanRefs = try await registerOrphanFiles(excluding: attemptedRefs)
             tally.merge(await deleteManagedFiles(orphanRefs))
+        } catch is CancellationError {
+            // CancellationError は業務エラーとして扱わない（Task 12 レビュー S-2）。
+            // deleteManagedFiles の CancellationError 除外と対称にする（下記 doc コメント参照）。
         } catch {
             gcFailure = error
         }
@@ -67,9 +70,11 @@ extension StartupRecoveryCoordinator {
     /// 次の項目へ進む（復旧全体を止めない。登録は次回起動で再試行される）。
     ///
     /// CancellationError はどちらの集計からも除外する（Task 12 レビュー S-2。
-    /// architecture.md「CancellationError は業務エラーとして扱わない」）。共有 SerialTaskQueue
-    /// 経由のこの queue.run は、C-1 で awaitRecoveryCompleted がキャンセル可能になったことで
-    /// CancellationError が到達しうる経路になった。登録（PendingFileDeletion）はそのまま残るため、
+    /// architecture.md「CancellationError は業務エラーとして扱わない」）。これは防御的な対応であり、
+    /// ストア実装（managedFileStore.delete / maintenanceStore.clearPendingFileDeletion）が
+    /// CancellationError を投げた場合に備える（復旧は非構造化 Task の中で走り、Task {} は親の
+    /// キャンセルを継承しないため、ゲート待機者〈awaitRecoveryCompleted の呼び出し元〉のキャンセルは
+    /// この GC 側に伝播しない。Task 12 再レビュー S-1）。登録（PendingFileDeletion）はそのまま残るため、
     /// 次回起動で再試行される（実体削除の失敗と同じ扱い。運用者へ知らせるべき失敗ではないため
     /// report には計上しない）。
     private func deleteManagedFiles(_ refs: [ManagedFileRef]) async -> FileDeletionTally {
