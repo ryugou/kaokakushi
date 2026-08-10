@@ -57,6 +57,11 @@ extension StartupRecoveryCoordinator {
         } catch is CancellationError {
             // CancellationError は業務エラーとして扱わない（Task 12 レビュー S-2）。
             // deleteManagedFiles の CancellationError 除外と対称にする（下記 doc コメント参照）。
+            // ただし deleteManagedFiles 内の continue と異なり、ここは GC 手順(1)〜(3)全体を
+            // 打ち切る（残りの kind を処理しない）。gcFailure も設定されないため report にも
+            // 痕跡が残らないが、正本ルール上正しい扱いである。未処理分（登録済み
+            // PendingFileDeletion・まだ登録していない孤児候補）は次回起動の GC で再試行される
+            // （項目5）。
         } catch {
             gcFailure = error
         }

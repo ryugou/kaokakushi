@@ -29,6 +29,11 @@ public enum OutputIntegrityOutcome: Sendable, Equatable {
 extension ExportCoordinator {
     /// 単体書き出しの完了操作（export-saga.md 3章 手順5）。exportSagaStore.settleExport への
     /// 薄い委譲。二重確定等の事前条件違反は握りつぶさず呼び出し元へ伝播する。
+    ///
+    /// ゲートを待たない: 開始経路（startExport / startBatchItem）が既にゲート済みのため、
+    /// settle は認可済み ExportJob の存在を前提にする時点で復旧完了後にしか到達しえない
+    /// （項目4。新しい非ゲート経路のコピー元として本メソッドを使わないこと。deleteLostOutput の
+    /// W-1 説明も参照）。
     public func settleExport(_ exportID: ExportID) async throws {
         try await queue.run {
             try await self.exportSagaStore.settleExport(exportID)
@@ -36,7 +41,8 @@ extension ExportCoordinator {
     }
 
     /// バッチの完了操作（export-saga.md 3章 手順5）。settledAt は注入されたクロックから取得し、
-    /// 対象バッチ内の確定対象全件へ同一の値で渡す。
+    /// 対象バッチ内の確定対象全件へ同一の値で渡す。ゲートを待たない理由は settleExport と同じ
+    /// （開始経路が既にゲート済みのため起動直後には到達しえない）。
     public func settleBatch(_ batchID: BatchID) async throws {
         try await queue.run {
             try await self.exportSagaStore.settleBatch(batchID, settledAt: self.now())

@@ -154,6 +154,11 @@ private struct DeliveryRouteDeadlockFixture: Sendable {
 
 /// 外部opによる共有キュー占有→復旧開始→route投入までを行い、占有解放前の状態まで
 /// 整えたフィクスチャを返す。
+///
+/// 検出は `for _ in 0..<5 { await Task.yield() }` という経験則に依存する。「対象 op が
+/// キューへ連結済み」であることを直接固定する assert は無いため、スケジューラ特性が変わると
+/// 検出力が静かに落ちうる（false-green。とくに `.share` は `SharePresenter`（`@MainActor`）への
+/// ホップを挟むぶん猶予が短い）。現状は3経路とも検出できている。
 private func setUpDeliveryRouteFixture(route: DeliveryRoute) async throws -> DeliveryRouteDeadlockFixture {
     let sharedQueue = SerialTaskQueue()
     let occupancyGate = OneShotGate()
@@ -210,6 +215,7 @@ private func setUpDeliveryRouteFixture(route: DeliveryRoute) async throws -> Del
 
 @Test(
     "共有キューを外部opが占有し復旧がキュー操作を残した状態で変更系操作を投入しても占有解放後に両方完走する",
+    .timeLimit(.minutes(1)),
     arguments: DeliveryRoute.allCases
 )
 private func sharedQueueAvoidsSelfDeadlockForDeliveryRoutes(_ route: DeliveryRoute) async throws {

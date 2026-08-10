@@ -5,7 +5,8 @@ import Domain
 
 // StartupRecoveryCoordinator と RecoveryGate の統合（Issue #7 Task 12）。
 //
-// 正本: docs/superpowers/specs/2026-08-10-issue7-task12.md。
+// 正本: export-saga.md 5章「起動時復旧」、architecture.md 4.3「Application 層」
+// （起動時に1回のみ実行し、完了まで他のすべてを開始させない）。
 // - 復旧手順の変更系操作（deleteRunningJobs・孤児ファイルGCの削除）が共有 SerialTaskQueue を
 //   経由すること（キューが外部の操作で埋まっていれば、その完了まで足止めされることで示す。
 //   SerialTaskQueueTests.swift の FIFO 検証と同じ手法）。

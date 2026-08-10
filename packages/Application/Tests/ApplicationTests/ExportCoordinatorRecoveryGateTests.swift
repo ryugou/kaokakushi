@@ -9,7 +9,9 @@ import Domain
 // 正本: export-saga.md 5章「復旧が完了するまで新しい書き出しを開始させない」、
 // architecture.md 4.3「起動時に1回のみ実行し、完了まで他のすべてを開始させない」。
 // ゲート待機は SerialTaskQueue へ投入する前に行う（キュー内で待つと復旧側の操作がキューを
-// 取れず自己デッドロックするため。docs/superpowers/specs/2026-08-10-issue7-task12.md 警告1）。
+// 取れず自己デッドロックするため。architecture.md 4.2「変更を伴うすべての操作は単一の
+// グローバル直列キュー1本で直列化する」ため、キュー内で待つと自分自身の完了に必要な
+// 後続操作をそのキューから取得できない）。
 // FakeRecoveryGate で復旧未完了を模し、start系メソッドが store 呼び出しへ進まないことを
 // 検証する（StartupRecoveryTests.swift の awaitRecoveryCompletedBlocksUntilRecoveryFinishes と
 // 同じ「Task.yield で進行猶予を与えて未達を確認する」方針）。
@@ -130,6 +132,38 @@ private func startExportCancelledWhileWaitingForGateThrowsCancellationError() as
 
     await #expect(throws: CancellationError.self) {
         try await task.value
+    }
+    #expect(await exportSagaStore.startExportCalls.isEmpty)
+}
+
+// 項目3（Task 12 最終レビュー）: FakeRecoveryGate.fail(_:) はどのテストからも呼ばれておらず、
+// fake の意図（ゲート待ち中に失敗確定されたら StartupRecoveryFailedError で抜ける）が
+// 曖昧だった。上のキャンセルテストと対になる形で fail() 経由の契約を固定する
+// （本物の失敗確定経路は StartupRecoveryGateIntegrationTests.swift の
+// startExportAfterRecoveryFailureReturnsErrorWithoutWaiting が別途担保する）。
+private struct Boom: Error, Equatable {}
+
+@Test(
+    "ゲート待ち中にstartExportがfail()されると、待たされたままにならずStartupRecoveryFailedErrorで抜ける",
+    .timeLimit(.minutes(1))
+)
+private func startExportFailedWhileWaitingForGateThrowsStartupRecoveryFailedError() async throws {
+    let (request, capabilities) = try makeFullyConsistentRequest()
+    let exportSagaStore = FakeExportSagaStore()
+    let gate = FakeRecoveryGate(isOpen: false)
+    let coordinator = makeCoordinator(exportSagaStore: exportSagaStore, recoveryGate: gate)
+
+    let task = Task { try await coordinator.startExport(request, capabilities: capabilities) }
+    for _ in 0..<5 { await Task.yield() }
+    await gate.fail(Boom())
+
+    do {
+        _ = try await task.value
+        Issue.record("StartupRecoveryFailedErrorが投げられるはずだった")
+    } catch let error as StartupRecoveryFailedError {
+        #expect(error.cause is Boom)
+    } catch {
+        Issue.record("想定外のエラー: \(error)")
     }
     #expect(await exportSagaStore.startExportCalls.isEmpty)
 }
