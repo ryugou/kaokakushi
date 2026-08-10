@@ -33,17 +33,8 @@ private actor OneShotGate {
     }
 }
 
-private func makeCoordinator(
-    exportSagaStore: FakeExportSagaStore = FakeExportSagaStore(),
-    outputDeliveryStore: FakeOutputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock()),
-    updateGuidanceHook: @escaping @Sendable () async -> Void = {}
-) -> StartupRecoveryCoordinator {
-    StartupRecoveryCoordinator(
-        exportSagaStore: exportSagaStore,
-        outputDeliveryStore: outputDeliveryStore,
-        updateGuidanceHook: updateGuidanceHook
-    )
-}
+// makeCoordinator は TestSupport.swift の共有ヘルパーを使う（Task 11 で maintenanceStore /
+// managedFileStore を追加し、StartupRecoveryFileGCTests.swift と共有するため一本化した）。
 
 // MARK: - 実行順序とreport生成
 

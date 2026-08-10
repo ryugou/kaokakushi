@@ -254,6 +254,25 @@ func makeSucceedingGenerationPipeline() -> SucceedingGenerationPipeline {
     )
 }
 
+/// 標準構成の StartupRecoveryCoordinator を組み立てる（Issue #7 Task 9 で導入、Task 11 で
+/// maintenanceStore / managedFileStore を追加。StartupRecoveryTests.swift と
+/// StartupRecoveryFileGCTests.swift の両方で共有するため TestSupport.swift へ集約する）。
+func makeCoordinator(
+    exportSagaStore: FakeExportSagaStore = FakeExportSagaStore(),
+    outputDeliveryStore: FakeOutputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock()),
+    maintenanceStore: FakeMaintenanceStore = FakeMaintenanceStore(),
+    managedFileStore: FakeManagedFileStore = FakeManagedFileStore(),
+    updateGuidanceHook: @escaping @Sendable () async -> Void = {}
+) -> StartupRecoveryCoordinator {
+    StartupRecoveryCoordinator(
+        exportSagaStore: exportSagaStore,
+        outputDeliveryStore: outputDeliveryStore,
+        maintenanceStore: maintenanceStore,
+        managedFileStore: managedFileStore,
+        updateGuidanceHook: updateGuidanceHook
+    )
+}
+
 /// 単体トライアル可・広告表示ありの標準的な ResolvedCapabilities フィクスチャ。
 func makeResolvedCapabilities(
     canUsePremiumStamps: Bool = true,

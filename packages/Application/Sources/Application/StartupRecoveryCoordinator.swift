@@ -1,10 +1,11 @@
 import Foundation
 import Domain
 
-// StartupRecoveryCoordinator — 起動時復旧（Issue #7 Task 9）。
+// StartupRecoveryCoordinator — 起動時復旧（Issue #7 Task 9・Task 11）。
 //
 // 正本: export-saga.md 5章「起動時復旧」（復旧手順1〜5の順序）、architecture.md 4.3
-// （「起動時に1回のみ実行し、完了まで他のすべてを開始させない」）、test-plan.md 3.5
+// （「起動時に1回のみ実行し、完了まで他のすべてを開始させない」）、architecture.md 7.5
+// 「孤児ファイルの GC」（`MaintenanceStore` 節。手順(1)〜(3)）、test-plan.md 3.5
 // 「起動時復旧」・3.6「出力の寿命と履歴」の復旧案内項目。
 //
 // 手順1「running の ExportJob 削除」と、それに伴う未確定（settledAt IS NULL）出力の削除は
@@ -12,15 +13,21 @@ import Domain
 // loadRunningJobs → deleteRunningJobs の順で呼ぶ。完了済み（settledAt != nil）の出力には
 // この手順で一切触れない（deleteRunningJobs の対象は running な ExportJob 行のみ）。
 //
-// 手順2「孤児ファイルのGC」はこの Coordinator が呼び出さない。MaintenanceStore
-// （Domain/Ports/MaintenanceStore.swift）が公開するのは listExistingFileIDs /
-// listReferencedFileIDs / registerOrphan / loadPendingFileDeletions /
-// clearPendingFileDeletion という個別のプリミティブのみで、それらを kind ごとの参照ポリシー
-// （architecture.md 7.5 の対応表）で束ねて実行するオーケストレーションはまだ存在しない。
-// Task 9 の正本（上記3点）と計画の Interfaces 節は MaintenanceStore を Consumes に含めず、
-// StartupRecoveryReport の構成要素にも孤児GCの結果は現れない。対象kindの列挙・物理削除
-// 失敗時の再試行方針は正本に定義が無く非自明な判断を要するため、本タスクでは実装しない
-// （計画外の判断は実装せず差し戻す。プロジェクトの Global Constraints）。
+// 手順2「孤児ファイルのGC」は architecture.md 7.5 の手順(1)〜(3)をそのまま実行する（Task 11）。
+// (1) loadPendingFileDeletions で未処理分の実体削除を再試行し、成功したものだけ
+// clearPendingFileDeletion で消す。(2) 孤児GC対象の種別ごとに listExistingFileIDs と
+// listReferencedFileIDs の差集合を求め registerOrphan で削除候補へ登録する。(3) 登録した候補を
+// (1)と同じ経路（drainPendingFileDeletions）で削除する。5章の順序に従い deleteRunningJobs の
+// 後、resolveOrphanedAttempts の前に実行する。
+//
+// `.historyThumbnail` は孤児GC対象の種別（orphanGCKinds）に含めない（architecture.md 7.5 の
+// MaintenanceStore 対応表が根拠）。v1 では参照列が無く listReferencedFileIDs が常に空集合を
+// 返すため、対象へ含めると現用中の実体まで孤児として削除してしまう。Issue #26 で参照列の追加と
+// 同時に有効化する。
+//
+// 個々のファイル削除・登録解除の失敗は復旧全体を止めない（登録を残し次回起動で再試行する）。
+// 失敗を握りつぶさないため、件数を StartupRecoveryReport へ含める（Global Constraints
+// 「エラーの握りつぶし禁止」。運用者が次のアクションを判断できる情報）。
 //
 // 手順5「更新誘導」もこの Coordinator が判定ロジックを持たない（architecture.md 6.6 が正本、
 // 実装はサブプロジェクト10）。呼び出し点だけを updateGuidanceHook として設け、既定は no-op
@@ -40,21 +47,42 @@ public struct StartupRecoveryReport: Sendable {
     public let outputDeliverySnapshots: [OutputDeliverySnapshot]
     public let unknownLibrarySaves: [UnknownLibrarySave]
     public let deletedRunningJobCount: Int
+    /// 孤児ファイル GC（architecture.md 7.5 手順(1)〜(3)）で実削除に成功した件数。
+    public let deletedFileCount: Int
+    /// 孤児ファイル GC で実削除に失敗した件数（登録は残り次回起動で再試行する）。
+    public let failedFileDeletionCount: Int
 
     public init(
         outputDeliverySnapshots: [OutputDeliverySnapshot],
         unknownLibrarySaves: [UnknownLibrarySave],
-        deletedRunningJobCount: Int
+        deletedRunningJobCount: Int,
+        deletedFileCount: Int,
+        failedFileDeletionCount: Int
     ) {
         self.outputDeliverySnapshots = outputDeliverySnapshots
         self.unknownLibrarySaves = unknownLibrarySaves
         self.deletedRunningJobCount = deletedRunningJobCount
+        self.deletedFileCount = deletedFileCount
+        self.failedFileDeletionCount = failedFileDeletionCount
     }
 }
 
+/// 孤児ファイル GC 1 回分の集計（削除件数・失敗件数）。
+private struct FileDeletionTally {
+    var deletedCount = 0
+    var failedCount = 0
+}
+
 public actor StartupRecoveryCoordinator {
+    /// 孤児GC対象の種別。`.historyThumbnail` は含めない（ファイル冒頭コメント参照）。
+    private static let orphanGCKinds: [ManagedFileKind] = [
+        .output, .stampAsset, .processingTemporary, .stampThumbnail, .rasterTemporary
+    ]
+
     private let exportSagaStore: ExportSagaStore
     private let outputDeliveryStore: OutputDeliveryStore
+    private let maintenanceStore: MaintenanceStore
+    private let managedFileStore: ManagedFileStore
     private let updateGuidanceHook: @Sendable () async -> Void
 
     private var recoveryTask: Task<StartupRecoveryReport, Error>?
@@ -64,10 +92,14 @@ public actor StartupRecoveryCoordinator {
     public init(
         exportSagaStore: ExportSagaStore,
         outputDeliveryStore: OutputDeliveryStore,
+        maintenanceStore: MaintenanceStore,
+        managedFileStore: ManagedFileStore,
         updateGuidanceHook: @escaping @Sendable () async -> Void = {}
     ) {
         self.exportSagaStore = exportSagaStore
         self.outputDeliveryStore = outputDeliveryStore
+        self.maintenanceStore = maintenanceStore
+        self.managedFileStore = managedFileStore
         self.updateGuidanceHook = updateGuidanceHook
     }
 
@@ -100,6 +132,8 @@ public actor StartupRecoveryCoordinator {
         let runningJobs = try await exportSagaStore.loadRunningJobs()
         try await exportSagaStore.deleteRunningJobs(runningJobs.map(\.exportID))
 
+        let fileGCTally = try await runOrphanFileGC()
+
         let outputDeliverySnapshots = try await outputDeliveryStore.resolveOrphanedAttempts()
         let unknownLibrarySaves = try await outputDeliveryStore.loadUnknownLibrarySaves()
 
@@ -108,8 +142,51 @@ public actor StartupRecoveryCoordinator {
         return StartupRecoveryReport(
             outputDeliverySnapshots: outputDeliverySnapshots,
             unknownLibrarySaves: unknownLibrarySaves,
-            deletedRunningJobCount: runningJobs.count
+            deletedRunningJobCount: runningJobs.count,
+            deletedFileCount: fileGCTally.deletedCount,
+            failedFileDeletionCount: fileGCTally.failedCount
         )
+    }
+
+    /// architecture.md 7.5 手順(1)〜(3)。(1)と(3)はどちらも drainPendingFileDeletions を使う。
+    private func runOrphanFileGC() async throws -> FileDeletionTally {
+        let firstPass = try await drainPendingFileDeletions()
+        try await registerOrphanFiles()
+        let secondPass = try await drainPendingFileDeletions()
+        return FileDeletionTally(
+            deletedCount: firstPass.deletedCount + secondPass.deletedCount,
+            failedCount: firstPass.failedCount + secondPass.failedCount
+        )
+    }
+
+    /// 未処理の PendingFileDeletion をすべて実削除する。個々の失敗は catch して件数へ積み、
+    /// 登録を残したまま次の項目へ進む（復旧全体を止めない。登録は次回起動で再試行される）。
+    private func drainPendingFileDeletions() async throws -> FileDeletionTally {
+        let pending = try await maintenanceStore.loadPendingFileDeletions()
+        var tally = FileDeletionTally()
+        for pendingDeletion in pending {
+            do {
+                try await managedFileStore.delete(pendingDeletion.file)
+                try await maintenanceStore.clearPendingFileDeletion(pendingDeletion.file)
+                tally.deletedCount += 1
+            } catch {
+                tally.failedCount += 1
+            }
+        }
+        return tally
+    }
+
+    /// 孤児GC対象の種別ごとに listExistingFileIDs と listReferencedFileIDs の差集合を求め、
+    /// registerOrphan で削除候補へ登録する（`.historyThumbnail` は orphanGCKinds に含めない）。
+    private func registerOrphanFiles() async throws {
+        for kind in Self.orphanGCKinds {
+            let existingFileIDs = try await maintenanceStore.listExistingFileIDs(kind: kind)
+            let referencedFileIDs = try await maintenanceStore.listReferencedFileIDs(kind: kind)
+            let orphanFileIDs = existingFileIDs.subtracting(referencedFileIDs)
+            for fileID in orphanFileIDs {
+                try await maintenanceStore.registerOrphan(ManagedFileRef(kind: kind, fileID: fileID))
+            }
+        }
     }
 
     private func completeGate() {
