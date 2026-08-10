@@ -14,8 +14,8 @@ private struct Boom: Error, Equatable {}
 
 @Test("起動時に未処理のPendingFileDeletionが削除されclearPendingFileDeletionされること")
 private func pendingFileDeletionIsDeletedAndCleared() async throws {
-    let maintenanceStore = FakeMaintenanceStore()
     let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
     let ref = ManagedFileRef(kind: .output, fileID: ManagedFileID(rawValue: UUID()))
     await maintenanceStore.seedPendingFileDeletion(ref)
     await managedFileStore.seedExistingFile(ref)
@@ -32,8 +32,8 @@ private func pendingFileDeletionIsDeletedAndCleared() async throws {
 
 @Test("削除に失敗した項目はclearPendingFileDeletionされず、登録が残ること（次回再試行できること）")
 private func failedDeletionLeavesRegistrationForRetry() async throws {
-    let maintenanceStore = FakeMaintenanceStore()
     let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
     let ref = ManagedFileRef(kind: .output, fileID: ManagedFileID(rawValue: UUID()))
     await maintenanceStore.seedPendingFileDeletion(ref)
     await managedFileStore.setDeleteFailure(Boom())
@@ -46,18 +46,21 @@ private func failedDeletionLeavesRegistrationForRetry() async throws {
     #expect(await maintenanceStore.containsPendingFileDeletion(ref) == true)
     #expect(report.deletedFileCount == 0)
     #expect(report.failedFileDeletionCount == 1)
+    // 削除失敗の原因がkind付きでreportへ運ばれること（Task 11 レビュー W-1）。
+    #expect(report.failedFileDeletions.map(\.kind) == [.output])
 }
 
 @Test("種別ごとの差集合がregisterOrphanへ登録され、その後削除されること")
 private func orphanFilesAreRegisteredThenDeleted() async throws {
-    let maintenanceStore = FakeMaintenanceStore()
     let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
     let referencedID = ManagedFileID(rawValue: UUID())
     let orphanID = ManagedFileID(rawValue: UUID())
+    let referencedRef = ManagedFileRef(kind: .output, fileID: referencedID)
     let orphanRef = ManagedFileRef(kind: .output, fileID: orphanID)
-    await maintenanceStore.seedExistingFileIDs(kind: .output, ids: [referencedID, orphanID])
-    await maintenanceStore.seedReferencedFileIDs(kind: .output, ids: [referencedID])
+    await managedFileStore.seedExistingFile(referencedRef)
     await managedFileStore.seedExistingFile(orphanRef)
+    await maintenanceStore.seedReferencedFileIDs(kind: .output, ids: [referencedID])
     let coordinator = makeCoordinator(maintenanceStore: maintenanceStore, managedFileStore: managedFileStore)
 
     let report = try await coordinator.runStartupRecovery()
@@ -70,10 +73,11 @@ private func orphanFilesAreRegisteredThenDeleted() async throws {
 
 @Test(".historyThumbnailが孤児GCの対象外であること")
 private func historyThumbnailIsExcludedFromOrphanGC() async throws {
-    let maintenanceStore = FakeMaintenanceStore()
-    let orphanID = ManagedFileID(rawValue: UUID())
-    await maintenanceStore.seedExistingFileIDs(kind: .historyThumbnail, ids: [orphanID])
-    let coordinator = makeCoordinator(maintenanceStore: maintenanceStore)
+    let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
+    let orphanRef = ManagedFileRef(kind: .historyThumbnail, fileID: ManagedFileID(rawValue: UUID()))
+    await managedFileStore.seedExistingFile(orphanRef)
+    let coordinator = makeCoordinator(maintenanceStore: maintenanceStore, managedFileStore: managedFileStore)
 
     _ = try await coordinator.runStartupRecovery()
 
@@ -85,10 +89,14 @@ private func historyThumbnailIsExcludedFromOrphanGC() async throws {
 
 @Test("削除に失敗したrefが同一起動内で再度deleteされないこと（deleteCallsに重複が現れない）")
 private func failedDeletionIsNotRetriedWithinSameStartup() async throws {
-    let maintenanceStore = FakeMaintenanceStore()
     let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
     let ref = ManagedFileRef(kind: .output, fileID: ManagedFileID(rawValue: UUID()))
     await maintenanceStore.seedPendingFileDeletion(ref)
+    // refは端末に実体として存在する状態を模す（実削除が失敗した以上、実体は残り続ける。
+    // C-1: これが無いと registerOrphanFiles() がこの ref を孤児として再検出できず、
+    // 二重削除試行のバグを検出できない）。
+    await managedFileStore.seedExistingFile(ref)
     await managedFileStore.setDeleteFailure(Boom())
     let coordinator = makeCoordinator(maintenanceStore: maintenanceStore, managedFileStore: managedFileStore)
 
@@ -102,8 +110,8 @@ private func failedDeletionIsNotRetriedWithinSameStartup() async throws {
 
 @Test("削除失敗が復旧全体を止めないこと（後続のresolveOrphanedAttemptsまで到達すること）")
 private func deletionFailureDoesNotStopRecovery() async throws {
-    let maintenanceStore = FakeMaintenanceStore()
     let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
     let outputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock())
     let ref = ManagedFileRef(kind: .output, fileID: ManagedFileID(rawValue: UUID()))
     await maintenanceStore.seedPendingFileDeletion(ref)
@@ -117,6 +125,64 @@ private func deletionFailureDoesNotStopRecovery() async throws {
     let report = try await coordinator.runStartupRecovery()
 
     #expect(report.failedFileDeletionCount == 1)
+    #expect(await outputDeliveryStore.resolveOrphanedAttemptsCallCount == 1)
+    #expect(await outputDeliveryStore.loadUnknownLibrarySavesCallCount == 1)
+}
+
+@Test("pending登録と実在ファイルの両方へ同一refをseedし削除に失敗しても、deleteCallsとfailedFileDeletionCountが二重にならないこと")
+private func sameRefInPendingAndExistingFileIsCountedOnce() async throws {
+    let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
+    let ref = ManagedFileRef(kind: .output, fileID: ManagedFileID(rawValue: UUID()))
+    await maintenanceStore.seedPendingFileDeletion(ref)
+    await managedFileStore.seedExistingFile(ref)
+    await managedFileStore.setDeleteFailure(Boom())
+    let coordinator = makeCoordinator(maintenanceStore: maintenanceStore, managedFileStore: managedFileStore)
+
+    let report = try await coordinator.runStartupRecovery()
+
+    #expect(await managedFileStore.deleteCalls.count == 1)
+    #expect(report.failedFileDeletionCount == 1)
+}
+
+@Test("clearPendingFileDeletionの失敗は実体削除の失敗と区別され、failedFileDeletionCountに含まれないこと")
+private func clearPendingFileDeletionFailureIsNotCountedAsEntityDeletionFailure() async throws {
+    let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
+    let ref = ManagedFileRef(kind: .output, fileID: ManagedFileID(rawValue: UUID()))
+    await maintenanceStore.seedPendingFileDeletion(ref)
+    await managedFileStore.seedExistingFile(ref)
+    await maintenanceStore.setClearPendingFileDeletionFailure(Boom())
+    let coordinator = makeCoordinator(maintenanceStore: maintenanceStore, managedFileStore: managedFileStore)
+
+    let report = try await coordinator.runStartupRecovery()
+
+    // 実体の削除自体は成功しているため、端末に実体が残っている件数（failedFileDeletionCount）
+    // には含めない（Task 11 レビュー W-2）。登録行を消せなかった件は別の理由種別で表現する。
+    #expect(await managedFileStore.deleteCalls == [ref])
+    #expect(report.failedFileDeletionCount == 0)
+    #expect(report.pendingRecordClearFailures.map(\.kind) == [.output])
+}
+
+@Test("孤児ファイルGC手順自体の失敗は復旧全体を止めず、reportのfileGCFailureへ記録されること")
+private func fileGCFailureDoesNotStopRecoveryAndIsRecordedInReport() async throws {
+    let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
+    let outputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock())
+    await maintenanceStore.setLoadPendingFileDeletionsFailure(Boom())
+    let coordinator = makeCoordinator(
+        outputDeliveryStore: outputDeliveryStore,
+        maintenanceStore: maintenanceStore,
+        managedFileStore: managedFileStore
+    )
+
+    // GC起因のthrowは復旧全体を止めない（Task 11 レビュー W-3）。resolveOrphanedAttempts
+    // 以降まで到達し、throwではなく正常な report が返ること自体がその検証になる。
+    let report = try await coordinator.runStartupRecovery()
+
+    #expect((report.fileGCFailure as? Boom) == Boom())
+    #expect(report.deletedFileCount == 0)
+    #expect(report.failedFileDeletionCount == 0)
     #expect(await outputDeliveryStore.resolveOrphanedAttemptsCallCount == 1)
     #expect(await outputDeliveryStore.loadUnknownLibrarySavesCallCount == 1)
 }

@@ -58,6 +58,14 @@ actor FakeManagedFileStore: ManagedFileStore {
         existingFiles.contains(ref)
     }
 
+    /// 種別ごとに実在するファイルIDの集合を返す。FakeMaintenanceStore.listExistingFileIDs が
+    /// 導出に使う（Issue #7 Task 11 レビュー W-5）。production の
+    /// MaintenanceStoreLive.listExistingFileIDs が管理ディレクトリを実走査するのと同じ実体を
+    /// 指すのが FakeManagedFileStore の existingFiles であるため、これを単一の真実にする。
+    func existingFileIDs(kind: ManagedFileKind) -> Set<ManagedFileID> {
+        Set(existingFiles.filter { $0.kind == kind }.map(\.fileID))
+    }
+
     // MARK: - ManagedFileStore
 
     func withReadAccess<R: Sendable>(

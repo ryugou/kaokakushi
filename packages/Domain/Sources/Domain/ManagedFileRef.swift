@@ -5,7 +5,7 @@ import Foundation
 // CustomStringConvertible には適合させない（architecture.md 6.5 の指示を全識別子・
 // 値型へ適用する。文字列補間で自動的にログや診断へ流れる経路を作らないため）。
 
-public enum ManagedFileKind: UInt32, Sendable, Hashable {
+public enum ManagedFileKind: UInt32, Sendable, Hashable, CaseIterable {
     case output = 1
     case stampAsset = 2
     case historyThumbnail = 3

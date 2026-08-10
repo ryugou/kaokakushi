@@ -13,14 +13,13 @@ import Domain
 // loadRunningJobs → deleteRunningJobs の順で呼ぶ。完了済み（settledAt != nil）の出力には
 // この手順で一切触れない（deleteRunningJobs の対象は running な ExportJob 行のみ）。
 //
-// 手順2「孤児ファイルのGC」は architecture.md 7.5 の手順(1)〜(3)をそのまま実行する（Task 11）。
-// (1) loadPendingFileDeletions で未処理分の実体削除を再試行し、成功したものだけ
-// clearPendingFileDeletion で消す。(2) 孤児GC対象の種別ごとに listExistingFileIDs と
-// listReferencedFileIDs の差集合を求め registerOrphan で削除候補へ登録し、登録した ref を返す。
-// (3) (2) が返した ref だけを (1)と同じ削除経路（deleteManagedFiles）へ渡して削除する。
-// loadPendingFileDeletions を呼び直さない（(1) で失敗した項目を同一起動内で再度読み直すと
-// 同じ失敗を繰り返すだけで復旧を遅らせ、失敗件数も実体の倍になるため）。5章の順序に従い
-// deleteRunningJobs の後、resolveOrphanedAttempts の前に実行する。
+// 手順2「孤児ファイルのGC」は architecture.md 7.5 の手順(1)〜(3)をそのまま実行する
+// （Task 11。実装は StartupRecoveryCoordinator+FileGC.swift）。手順(1)で削除を試みた ref の
+// 集合を、手順(3)（(2)が登録した ref の削除）の対象から除外する。これが無いと、(1)で
+// 削除に失敗した ref の実体はディスクに残ったままのため、(2)の差集合が同じ ref を孤児として
+// 再登録し、(3)が同一起動内で同じ ref を2回目の削除試行にかけてしまう
+// （Task 11 レビュー C-1）。5章の順序に従い deleteRunningJobs の後、resolveOrphanedAttempts の
+// 前に実行する。
 //
 // `.historyThumbnail` は孤児GC対象の種別（orphanGCKinds）に含めない（architecture.md 7.5 の
 // MaintenanceStore 対応表が根拠）。v1 では参照列が無く listReferencedFileIDs が常に空集合を
@@ -28,8 +27,11 @@ import Domain
 // 同時に有効化する。
 //
 // 個々のファイル削除・登録解除の失敗は復旧全体を止めない（登録を残し次回起動で再試行する）。
-// 失敗を握りつぶさないため、件数を StartupRecoveryReport へ含める（Global Constraints
-// 「エラーの握りつぶし禁止」。運用者が次のアクションを判断できる情報）。
+// 失敗を握りつぶさないため、種別・原因エラーを StartupRecoveryReport へ含める（Global
+// Constraints「エラーの握りつぶし禁止」。運用者が次のアクションを判断できる情報。Task 11
+// レビュー W-1〜W-3）。孤児ファイルGC手順(1)〜(3)自体がストア操作の失敗で完走できなかった
+// 場合も、GC 以外の復旧手順を止めない（個々のファイル削除の失敗を復旧全体から隔離している
+// のと非対称にしない設計。Task 11 レビュー W-3）。
 //
 // 手順5「更新誘導」もこの Coordinator が判定ロジックを持たない（architecture.md 6.6 が正本、
 // 実装はサブプロジェクト10）。呼び出し点だけを updateGuidanceHook として設け、既定は no-op
@@ -51,40 +53,62 @@ public struct StartupRecoveryReport: Sendable {
     public let deletedRunningJobCount: Int
     /// 孤児ファイル GC（architecture.md 7.5 手順(1)〜(3)）で実削除に成功した件数。
     public let deletedFileCount: Int
-    /// 孤児ファイル GC で実削除に失敗した件数（登録は残り次回起動で再試行する）。
-    public let failedFileDeletionCount: Int
+    /// 孤児ファイル GC で実体の削除自体に失敗した内訳（Task 11 レビュー W-1）。
+    /// 端末に実体が残り続ける件数（failedFileDeletionCount）と一致する。登録は残り
+    /// 次回起動で再試行される。
+    public let failedFileDeletions: [FileDeletionFailure]
+    /// 実体の削除には成功したが PendingFileDeletion の登録行を消せなかった内訳
+    /// （Task 11 レビュー W-2）。実体は既に消えているため failedFileDeletionCount には
+    /// 含めない（登録行だけが残り続けるケースを削除失敗と区別する）。
+    public let pendingRecordClearFailures: [FileDeletionFailure]
+    /// 孤児ファイルGC手順(1)〜(3)自体がストア操作の失敗で完走できなかった場合の原因
+    /// （Task 11 レビュー W-3）。GC 以外の復旧手順は継続するため、この場合
+    /// deletedFileCount・failedFileDeletions 等は完走できた範囲のみを反映する。
+    public let fileGCFailure: Error?
+
+    /// 孤児ファイル GC で実体の削除自体に失敗した件数（端末に実体が残っている件数）。
+    public var failedFileDeletionCount: Int { failedFileDeletions.count }
 
     public init(
         outputDeliverySnapshots: [OutputDeliverySnapshot],
         unknownLibrarySaves: [UnknownLibrarySave],
         deletedRunningJobCount: Int,
         deletedFileCount: Int,
-        failedFileDeletionCount: Int
+        failedFileDeletions: [FileDeletionFailure],
+        pendingRecordClearFailures: [FileDeletionFailure],
+        fileGCFailure: Error?
     ) {
         self.outputDeliverySnapshots = outputDeliverySnapshots
         self.unknownLibrarySaves = unknownLibrarySaves
         self.deletedRunningJobCount = deletedRunningJobCount
         self.deletedFileCount = deletedFileCount
-        self.failedFileDeletionCount = failedFileDeletionCount
+        self.failedFileDeletions = failedFileDeletions
+        self.pendingRecordClearFailures = pendingRecordClearFailures
+        self.fileGCFailure = fileGCFailure
     }
 }
 
-/// 孤児ファイル GC 1 回分の集計（削除件数・失敗件数）。
-private struct FileDeletionTally {
-    var deletedCount = 0
-    var failedCount = 0
+/// 孤児ファイルGCの個別失敗1件の理由（Task 11 レビュー W-1）。`ManagedFileID` は
+/// 文字列化して載せない（ManagedFileRef.swift 冒頭コメント「識別子を文字列補間で診断へ
+/// 流す経路を作らない」＝architecture.md 6.5）。
+public struct FileDeletionFailure: Sendable {
+    public let kind: ManagedFileKind
+    public let cause: Error
+
+    public init(kind: ManagedFileKind, cause: Error) {
+        self.kind = kind
+        self.cause = cause
+    }
 }
 
 public actor StartupRecoveryCoordinator {
     /// 孤児GC対象の種別。`.historyThumbnail` は含めない（ファイル冒頭コメント参照）。
-    private static let orphanGCKinds: [ManagedFileKind] = [
-        .output, .stampAsset, .processingTemporary, .stampThumbnail, .rasterTemporary
-    ]
+    static let orphanGCKinds: [ManagedFileKind] = ManagedFileKind.allCases.filter(isOrphanGCTarget)
 
-    private let exportSagaStore: ExportSagaStore
-    private let outputDeliveryStore: OutputDeliveryStore
-    private let maintenanceStore: MaintenanceStore
-    private let managedFileStore: ManagedFileStore
+    let exportSagaStore: ExportSagaStore
+    let outputDeliveryStore: OutputDeliveryStore
+    let maintenanceStore: MaintenanceStore
+    let managedFileStore: ManagedFileStore
     private let updateGuidanceHook: @Sendable () async -> Void
 
     private var recoveryTask: Task<StartupRecoveryReport, Error>?
@@ -130,11 +154,13 @@ public actor StartupRecoveryCoordinator {
 
     /// ストアの throw は握りつぶさずそのまま伝播する（Global Constraints「エラーの
     /// 握りつぶし禁止」）。伝播した場合 completeGate は呼ばれず、ゲートは開かないまま残る。
+    /// 孤児ファイルGC（runOrphanFileGC）だけは例外で、GC 起因の失敗を throw させず
+    /// report へ落として後続の手順へ進む（W-3。ファイル冒頭コメント参照）。
     private func performRecovery() async throws -> StartupRecoveryReport {
         let runningJobs = try await exportSagaStore.loadRunningJobs()
         try await exportSagaStore.deleteRunningJobs(runningJobs.map(\.exportID))
 
-        let fileGCTally = try await runOrphanFileGC()
+        let fileGC = await runOrphanFileGC()
 
         let outputDeliverySnapshots = try await outputDeliveryStore.resolveOrphanedAttempts()
         let unknownLibrarySaves = try await outputDeliveryStore.loadUnknownLibrarySaves()
@@ -145,57 +171,11 @@ public actor StartupRecoveryCoordinator {
             outputDeliverySnapshots: outputDeliverySnapshots,
             unknownLibrarySaves: unknownLibrarySaves,
             deletedRunningJobCount: runningJobs.count,
-            deletedFileCount: fileGCTally.deletedCount,
-            failedFileDeletionCount: fileGCTally.failedCount
+            deletedFileCount: fileGC.deletedCount,
+            failedFileDeletions: fileGC.failedFileDeletions,
+            pendingRecordClearFailures: fileGC.pendingRecordClearFailures,
+            fileGCFailure: fileGC.gcFailure
         )
-    }
-
-    /// architecture.md 7.5 手順(1)〜(3)。(1)と(3)はどちらも deleteManagedFiles を使うが、
-    /// (3) の対象は (2) が登録した ref のみで、loadPendingFileDeletions は呼び直さない
-    /// （(1) の失敗項目を同一起動内で再試行しないため。ファイル冒頭コメント参照）。
-    private func runOrphanFileGC() async throws -> FileDeletionTally {
-        let pending = try await maintenanceStore.loadPendingFileDeletions()
-        let firstPass = try await deleteManagedFiles(pending.map(\.file))
-        let registeredRefs = try await registerOrphanFiles()
-        let secondPass = try await deleteManagedFiles(registeredRefs)
-        return FileDeletionTally(
-            deletedCount: firstPass.deletedCount + secondPass.deletedCount,
-            failedCount: firstPass.failedCount + secondPass.failedCount
-        )
-    }
-
-    /// 与えられた ref を順に実削除する。個々の失敗は catch して件数へ積み、登録を残したまま
-    /// 次の項目へ進む（復旧全体を止めない。登録は次回起動で再試行される）。
-    private func deleteManagedFiles(_ refs: [ManagedFileRef]) async throws -> FileDeletionTally {
-        var tally = FileDeletionTally()
-        for ref in refs {
-            do {
-                try await managedFileStore.delete(ref)
-                try await maintenanceStore.clearPendingFileDeletion(ref)
-                tally.deletedCount += 1
-            } catch {
-                tally.failedCount += 1
-            }
-        }
-        return tally
-    }
-
-    /// 孤児GC対象の種別ごとに listExistingFileIDs と listReferencedFileIDs の差集合を求め、
-    /// registerOrphan で削除候補へ登録し、登録した ref を呼び出し元へ返す
-    /// （`.historyThumbnail` は orphanGCKinds に含めない）。
-    private func registerOrphanFiles() async throws -> [ManagedFileRef] {
-        var registeredRefs: [ManagedFileRef] = []
-        for kind in Self.orphanGCKinds {
-            let existingFileIDs = try await maintenanceStore.listExistingFileIDs(kind: kind)
-            let referencedFileIDs = try await maintenanceStore.listReferencedFileIDs(kind: kind)
-            let orphanFileIDs = existingFileIDs.subtracting(referencedFileIDs)
-            for fileID in orphanFileIDs {
-                let ref = ManagedFileRef(kind: kind, fileID: fileID)
-                try await maintenanceStore.registerOrphan(ref)
-                registeredRefs.append(ref)
-            }
-        }
-        return registeredRefs
     }
 
     private func completeGate() {
@@ -206,5 +186,17 @@ public actor StartupRecoveryCoordinator {
         for continuation in pendingWaiters {
             continuation.resume()
         }
+    }
+}
+
+/// `.historyThumbnail` を孤児GC対象外にする判定（Task 11 レビュー S-1）。網羅 `switch` に
+/// することで、`ManagedFileKind` に case が増えた際にコンパイルエラーで対応判断を強制する
+/// （配列リテラルのベタ書きだと無言で GC 対象外になってしまうため）。
+private func isOrphanGCTarget(_ kind: ManagedFileKind) -> Bool {
+    switch kind {
+    case .output, .stampAsset, .processingTemporary, .stampThumbnail, .rasterTemporary:
+        return true
+    case .historyThumbnail:
+        return false
     }
 }

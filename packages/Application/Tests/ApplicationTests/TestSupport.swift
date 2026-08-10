@@ -260,14 +260,18 @@ func makeSucceedingGenerationPipeline() -> SucceedingGenerationPipeline {
 func makeCoordinator(
     exportSagaStore: FakeExportSagaStore = FakeExportSagaStore(),
     outputDeliveryStore: FakeOutputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock()),
-    maintenanceStore: FakeMaintenanceStore = FakeMaintenanceStore(),
+    maintenanceStore: FakeMaintenanceStore? = nil,
     managedFileStore: FakeManagedFileStore = FakeManagedFileStore(),
     updateGuidanceHook: @escaping @Sendable () async -> Void = {}
 ) -> StartupRecoveryCoordinator {
-    StartupRecoveryCoordinator(
+    // FakeMaintenanceStore は managedFileStore から listExistingFileIDs を導出する
+    // ため（W-5）、デフォルト引数同士では組み立てられない。maintenanceStore 省略時は
+    // ここで managedFileStore と紐づけて構築する。
+    let resolvedMaintenanceStore = maintenanceStore ?? FakeMaintenanceStore(managedFileStore: managedFileStore)
+    return StartupRecoveryCoordinator(
         exportSagaStore: exportSagaStore,
         outputDeliveryStore: outputDeliveryStore,
-        maintenanceStore: maintenanceStore,
+        maintenanceStore: resolvedMaintenanceStore,
         managedFileStore: managedFileStore,
         updateGuidanceHook: updateGuidanceHook
     )

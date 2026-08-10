@@ -5,12 +5,16 @@ import Domain
 // 偽実装（Issue #7 Task 11）。
 //
 // 正本は `MaintenanceStore` の各メソッドの doc コメント（architecture.md「MaintenanceStore」節）。
-// 実 Persistence には依存しない。`registerOrphan(_:)` は登録した参照を内部の pending 集合へ
-// 追加し、以後の `loadPendingFileDeletions()` の一覧に反映する（本物の DB の挙動を模す。
-// これが無いと起動時 GC の (3) 回目の drain が孤児登録済みファイルを拾えず、
-// StartupRecoveryCoordinator+FileGC.swift のアルゴリズムのテストが成立しない）。
-// `listExistingFileIDs(kind:)` / `listReferencedFileIDs(kind:)` は kind ごとに事前に seed した
-// 集合を返し、未 seed の kind は空集合を返す。
+// 実 Persistence には依存しない。`listExistingFileIDs(kind:)` は注入された `FakeManagedFileStore`
+// の実在ファイル集合から導出する（Task 11 レビュー W-5）。production では
+// `MaintenanceStoreLive.listExistingFileIDs` が管理ディレクトリを実走査し、
+// `ManagedFileStoreLive.delete` が指す実体と同じ場所を見ているのに対応させるため、
+// 別々に seed する集合を持たせず実体の所在を単一の真実にする。
+// `registerOrphan(_:)` は登録した参照を内部の pending 集合へ追加し、以後の
+// `loadPendingFileDeletions()` の一覧に反映する（本物の DB の INSERT を模す。
+// `containsPendingFileDeletion(_:)` で登録・解除の検証に使う）。
+// `listReferencedFileIDs(kind:)` は kind ごとに事前に seed した集合を返し、
+// 未 seed の kind は空集合を返す。
 //
 // Fakes 配下の型はテストターゲット外から参照されないため internal で足りる
 // （FakeExportSagaStore.swift と同じ方針）。
@@ -34,12 +38,15 @@ actor FakeMaintenanceStore: MaintenanceStore {
 
     // MARK: - in-memory 状態
 
+    /// 実体の所在の単一の真実（W-5）。listExistingFileIDs はここから導出する。
+    private let managedFileStore: FakeManagedFileStore
     /// 未処理の PendingFileDeletion 相当の集合（registerOrphan で追加される）
     private var pendingDeletions: Set<ManagedFileRef> = []
-    private var existingFileIDsByKind: [ManagedFileKind: Set<ManagedFileID>] = [:]
     private var referencedFileIDsByKind: [ManagedFileKind: Set<ManagedFileID>] = [:]
 
-    init() {}
+    init(managedFileStore: FakeManagedFileStore) {
+        self.managedFileStore = managedFileStore
+    }
 
     // MARK: - 失敗注入セッター（actor 隔離のため外部から直接代入できない）
 
@@ -52,12 +59,6 @@ actor FakeMaintenanceStore: MaintenanceStore {
     /// テストが未処理の PendingFileDeletion をあらかじめ登録する
     func seedPendingFileDeletion(_ file: ManagedFileRef) {
         pendingDeletions.insert(file)
-    }
-
-    /// テストが種別ごとの「管理ディレクトリ内に実在するファイルID」を注入する
-    /// （未 seed の kind は空集合を返す）
-    func seedExistingFileIDs(kind: ManagedFileKind, ids: Set<ManagedFileID>) {
-        existingFileIDsByKind[kind] = ids
     }
 
     /// テストが種別ごとの「DB上で参照されているファイルID」を注入する
@@ -89,7 +90,7 @@ actor FakeMaintenanceStore: MaintenanceStore {
     func listExistingFileIDs(kind: ManagedFileKind) async throws -> Set<ManagedFileID> {
         listExistingFileIDsCalls.append(kind)
         if let failure = listExistingFileIDsFailure { throw failure }
-        return existingFileIDsByKind[kind] ?? []
+        return await managedFileStore.existingFileIDs(kind: kind)
     }
 
     func listReferencedFileIDs(kind: ManagedFileKind) async throws -> Set<ManagedFileID> {

@@ -10,9 +10,10 @@ import Domain
 // 履歴」の復旧案内項目。
 //
 // 偽ストア（FakeExportSagaStore / FakeOutputDeliveryStore）だけを注入し、手順の実行順序・
-// throw の伝播・previousState による解決・「1回のみ実行」・完了ゲートを検証する
-// （孤児ファイルGCはこの Coordinator が呼び出さない設計のため対象外。
-// StartupRecoveryCoordinator.swift 冒頭コメント参照）。
+// throw の伝播・previousState による解決・「1回のみ実行」・完了ゲートを検証する。
+// 孤児ファイルGCの詳細（削除経路・登録経路・失敗時の扱い）は StartupRecoveryFileGCTests.swift
+// が担当し、本ファイルは deleteRunningJobs → GC → resolveOrphanedAttempts の順序と
+// throw の伝播だけを担当する（Task 11 レビュー W-6）。
 
 private struct Boom: Error, Equatable {}
 
@@ -76,32 +77,53 @@ private func loadRunningJobsFailurePropagatesAndStopsSubsequentSteps() async thr
     #expect(await outputDeliveryStore.loadUnknownLibrarySavesCallCount == 0)
 }
 
-@Test("deleteRunningJobsのthrowは以降の手順を実行させずそのまま伝播する")
+@Test("deleteRunningJobsのthrowは以降の手順を実行させずそのまま伝播する（孤児ファイルGCも呼ばれない）")
 private func deleteRunningJobsFailurePropagatesAndStopsSubsequentSteps() async throws {
     let exportSagaStore = FakeExportSagaStore()
     await exportSagaStore.setDeleteRunningJobsFailure(Boom())
     let outputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock())
-    let coordinator = makeCoordinator(exportSagaStore: exportSagaStore, outputDeliveryStore: outputDeliveryStore)
+    let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
+    let coordinator = makeCoordinator(
+        exportSagaStore: exportSagaStore,
+        outputDeliveryStore: outputDeliveryStore,
+        maintenanceStore: maintenanceStore,
+        managedFileStore: managedFileStore
+    )
 
     await #expect(throws: Boom.self) {
         try await coordinator.runStartupRecovery()
     }
 
+    // export-saga.md 5章の順序では孤児ファイルGCはdeleteRunningJobsの後に実行される
+    // ため、deleteRunningJobsが伝播した時点でGCはまだ呼ばれていない（Task 11 レビュー W-4）。
+    #expect(await maintenanceStore.loadPendingFileDeletionsCallCount == 0)
     #expect(await outputDeliveryStore.resolveOrphanedAttemptsCallCount == 0)
     #expect(await outputDeliveryStore.loadUnknownLibrarySavesCallCount == 0)
 }
 
-@Test("resolveOrphanedAttemptsのthrowは以降の手順を実行させずそのまま伝播する")
+@Test("resolveOrphanedAttemptsのthrowは以降の手順を実行させずそのまま伝播する（孤児ファイルGCは既に呼ばれている）")
 private func resolveOrphanedAttemptsFailurePropagatesAndStopsSubsequentSteps() async throws {
     let exportSagaStore = FakeExportSagaStore()
     let outputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock())
     await outputDeliveryStore.setResolveOrphanedAttemptsFailure(Boom())
-    let coordinator = makeCoordinator(exportSagaStore: exportSagaStore, outputDeliveryStore: outputDeliveryStore)
+    let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
+    let coordinator = makeCoordinator(
+        exportSagaStore: exportSagaStore,
+        outputDeliveryStore: outputDeliveryStore,
+        maintenanceStore: maintenanceStore,
+        managedFileStore: managedFileStore
+    )
 
     await #expect(throws: Boom.self) {
         try await coordinator.runStartupRecovery()
     }
 
+    // 孤児ファイルGCはresolveOrphanedAttemptsより前に実行される設計のため、
+    // resolveOrphanedAttemptsが伝播した時点でGCは既に呼ばれている（Task 11 レビュー W-4。
+    // runOrphanFileGC()をresolveOrphanedAttemptsの後ろへ移動する回帰をこちらが検出する）。
+    #expect(await maintenanceStore.loadPendingFileDeletionsCallCount == 1)
     #expect(await outputDeliveryStore.loadUnknownLibrarySavesCallCount == 0)
 }
 
