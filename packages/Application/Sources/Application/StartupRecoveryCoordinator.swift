@@ -16,9 +16,11 @@ import Domain
 // 手順2「孤児ファイルのGC」は architecture.md 7.5 の手順(1)〜(3)をそのまま実行する（Task 11）。
 // (1) loadPendingFileDeletions で未処理分の実体削除を再試行し、成功したものだけ
 // clearPendingFileDeletion で消す。(2) 孤児GC対象の種別ごとに listExistingFileIDs と
-// listReferencedFileIDs の差集合を求め registerOrphan で削除候補へ登録する。(3) 登録した候補を
-// (1)と同じ経路（drainPendingFileDeletions）で削除する。5章の順序に従い deleteRunningJobs の
-// 後、resolveOrphanedAttempts の前に実行する。
+// listReferencedFileIDs の差集合を求め registerOrphan で削除候補へ登録し、登録した ref を返す。
+// (3) (2) が返した ref だけを (1)と同じ削除経路（deleteManagedFiles）へ渡して削除する。
+// loadPendingFileDeletions を呼び直さない（(1) で失敗した項目を同一起動内で再度読み直すと
+// 同じ失敗を繰り返すだけで復旧を遅らせ、失敗件数も実体の倍になるため）。5章の順序に従い
+// deleteRunningJobs の後、resolveOrphanedAttempts の前に実行する。
 //
 // `.historyThumbnail` は孤児GC対象の種別（orphanGCKinds）に含めない（architecture.md 7.5 の
 // MaintenanceStore 対応表が根拠）。v1 では参照列が無く listReferencedFileIDs が常に空集合を
@@ -148,26 +150,28 @@ public actor StartupRecoveryCoordinator {
         )
     }
 
-    /// architecture.md 7.5 手順(1)〜(3)。(1)と(3)はどちらも drainPendingFileDeletions を使う。
+    /// architecture.md 7.5 手順(1)〜(3)。(1)と(3)はどちらも deleteManagedFiles を使うが、
+    /// (3) の対象は (2) が登録した ref のみで、loadPendingFileDeletions は呼び直さない
+    /// （(1) の失敗項目を同一起動内で再試行しないため。ファイル冒頭コメント参照）。
     private func runOrphanFileGC() async throws -> FileDeletionTally {
-        let firstPass = try await drainPendingFileDeletions()
-        try await registerOrphanFiles()
-        let secondPass = try await drainPendingFileDeletions()
+        let pending = try await maintenanceStore.loadPendingFileDeletions()
+        let firstPass = try await deleteManagedFiles(pending.map(\.file))
+        let registeredRefs = try await registerOrphanFiles()
+        let secondPass = try await deleteManagedFiles(registeredRefs)
         return FileDeletionTally(
             deletedCount: firstPass.deletedCount + secondPass.deletedCount,
             failedCount: firstPass.failedCount + secondPass.failedCount
         )
     }
 
-    /// 未処理の PendingFileDeletion をすべて実削除する。個々の失敗は catch して件数へ積み、
-    /// 登録を残したまま次の項目へ進む（復旧全体を止めない。登録は次回起動で再試行される）。
-    private func drainPendingFileDeletions() async throws -> FileDeletionTally {
-        let pending = try await maintenanceStore.loadPendingFileDeletions()
+    /// 与えられた ref を順に実削除する。個々の失敗は catch して件数へ積み、登録を残したまま
+    /// 次の項目へ進む（復旧全体を止めない。登録は次回起動で再試行される）。
+    private func deleteManagedFiles(_ refs: [ManagedFileRef]) async throws -> FileDeletionTally {
         var tally = FileDeletionTally()
-        for pendingDeletion in pending {
+        for ref in refs {
             do {
-                try await managedFileStore.delete(pendingDeletion.file)
-                try await maintenanceStore.clearPendingFileDeletion(pendingDeletion.file)
+                try await managedFileStore.delete(ref)
+                try await maintenanceStore.clearPendingFileDeletion(ref)
                 tally.deletedCount += 1
             } catch {
                 tally.failedCount += 1
@@ -177,16 +181,21 @@ public actor StartupRecoveryCoordinator {
     }
 
     /// 孤児GC対象の種別ごとに listExistingFileIDs と listReferencedFileIDs の差集合を求め、
-    /// registerOrphan で削除候補へ登録する（`.historyThumbnail` は orphanGCKinds に含めない）。
-    private func registerOrphanFiles() async throws {
+    /// registerOrphan で削除候補へ登録し、登録した ref を呼び出し元へ返す
+    /// （`.historyThumbnail` は orphanGCKinds に含めない）。
+    private func registerOrphanFiles() async throws -> [ManagedFileRef] {
+        var registeredRefs: [ManagedFileRef] = []
         for kind in Self.orphanGCKinds {
             let existingFileIDs = try await maintenanceStore.listExistingFileIDs(kind: kind)
             let referencedFileIDs = try await maintenanceStore.listReferencedFileIDs(kind: kind)
             let orphanFileIDs = existingFileIDs.subtracting(referencedFileIDs)
             for fileID in orphanFileIDs {
-                try await maintenanceStore.registerOrphan(ManagedFileRef(kind: kind, fileID: fileID))
+                let ref = ManagedFileRef(kind: kind, fileID: fileID)
+                try await maintenanceStore.registerOrphan(ref)
+                registeredRefs.append(ref)
             }
         }
+        return registeredRefs
     }
 
     private func completeGate() {

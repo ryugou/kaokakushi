@@ -83,6 +83,23 @@ private func historyThumbnailIsExcludedFromOrphanGC() async throws {
     #expect(registeredKinds.contains(.historyThumbnail) == false)
 }
 
+@Test("削除に失敗したrefが同一起動内で再度deleteされないこと（deleteCallsに重複が現れない）")
+private func failedDeletionIsNotRetriedWithinSameStartup() async throws {
+    let maintenanceStore = FakeMaintenanceStore()
+    let managedFileStore = FakeManagedFileStore()
+    let ref = ManagedFileRef(kind: .output, fileID: ManagedFileID(rawValue: UUID()))
+    await maintenanceStore.seedPendingFileDeletion(ref)
+    await managedFileStore.setDeleteFailure(Boom())
+    let coordinator = makeCoordinator(maintenanceStore: maintenanceStore, managedFileStore: managedFileStore)
+
+    _ = try await coordinator.runStartupRecovery()
+
+    let deleteCalls = await managedFileStore.deleteCalls
+    #expect(deleteCalls.count == 1)
+    #expect(deleteCalls.filter { $0 == ref }.count == 1)
+    #expect(await maintenanceStore.loadPendingFileDeletionsCallCount == 1)
+}
+
 @Test("削除失敗が復旧全体を止めないこと（後続のresolveOrphanedAttemptsまで到達すること）")
 private func deletionFailureDoesNotStopRecovery() async throws {
     let maintenanceStore = FakeMaintenanceStore()
