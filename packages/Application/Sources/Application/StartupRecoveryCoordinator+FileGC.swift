@@ -65,11 +65,20 @@ extension StartupRecoveryCoordinator {
     /// （failedFileDeletions に計上）。後者は実体は既に消えているが登録行だけが残るケースで、
     /// 意味が異なるため pendingRecordClearFailures へ分ける。個々の失敗は catch して
     /// 次の項目へ進む（復旧全体を止めない。登録は次回起動で再試行される）。
+    ///
+    /// CancellationError はどちらの集計からも除外する（Task 12 レビュー S-2。
+    /// architecture.md「CancellationError は業務エラーとして扱わない」）。共有 SerialTaskQueue
+    /// 経由のこの queue.run は、C-1 で awaitRecoveryCompleted がキャンセル可能になったことで
+    /// CancellationError が到達しうる経路になった。登録（PendingFileDeletion）はそのまま残るため、
+    /// 次回起動で再試行される（実体削除の失敗と同じ扱い。運用者へ知らせるべき失敗ではないため
+    /// report には計上しない）。
     private func deleteManagedFiles(_ refs: [ManagedFileRef]) async -> FileDeletionTally {
         var tally = FileDeletionTally()
         for ref in refs {
             do {
                 try await queue.run { try await self.managedFileStore.delete(ref) }
+            } catch is CancellationError {
+                continue
             } catch {
                 tally.failedFileDeletions.append(FileDeletionFailure(kind: ref.kind, cause: error))
                 continue
@@ -77,6 +86,8 @@ extension StartupRecoveryCoordinator {
             do {
                 try await queue.run { try await self.maintenanceStore.clearPendingFileDeletion(ref) }
                 tally.deletedCount += 1
+            } catch is CancellationError {
+                continue
             } catch {
                 tally.pendingRecordClearFailures.append(FileDeletionFailure(kind: ref.kind, cause: error))
             }

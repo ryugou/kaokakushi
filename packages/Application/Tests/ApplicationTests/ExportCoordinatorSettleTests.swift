@@ -20,7 +20,8 @@ private func makeCoordinator(
     outputFileVerifier: FakeOutputFileVerifier = FakeOutputFileVerifier(
         defaultOutcome: .success(makeVerifiedOutputMeasurement())
     ),
-    now: @escaping @Sendable () -> Date = makeFixedClock()
+    now: @escaping @Sendable () -> Date = makeFixedClock(),
+    recoveryGate: RecoveryGate = FakeRecoveryGate()
 ) -> ExportCoordinator {
     ExportCoordinator(
         exportSagaStore: exportSagaStore,
@@ -35,7 +36,7 @@ private func makeCoordinator(
         queue: SerialTaskQueue(),
         exportedSettingsEntryStore: FakeExportedSettingsEntryStore(),
         settingsHashDigest: FakeSha256Digest(),
-        recoveryGate: FakeRecoveryGate()
+        recoveryGate: recoveryGate
     )
 }
 
@@ -184,6 +185,33 @@ private func ioFailureDoesNotDeleteAndReturnsVerificationUnavailable() async thr
     #expect(outcome == .verificationUnavailable)
     let deleteCalls = await outputDeliveryStore.deleteOutputCalls
     #expect(deleteCalls.isEmpty)
+}
+
+// W-1（Task 12 レビュー）: OutputDeliveryCoordinator.deleteOutput はゲートを待つが、同じ
+// outputDeliveryStore.deleteOutput を呼ぶ verifyOutputIntegrity 経由の deleteLostOutput は
+// 待っていなかった（起動直後・復旧完了前に到達しうる唯一の未ゲート経路）。verify自体（読み取り）
+// はゲートを待たず、削除（deleteLostOutput）だけがキュー投入前にゲートを待つことを固定する。
+@Test("実体喪失時のdeleteLostOutputは復旧ゲートを待ち、完了後に削除される", .timeLimit(.minutes(1)))
+private func verifyOutputIntegrityDeleteLostOutputWaitsForRecoveryGate() async throws {
+    let exportID = makeExportID()
+    let output = makeOutputRecord(exportID: exportID, state: .generated)
+    let outputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock())
+    await outputDeliveryStore.seedOutput(output)
+    let verifier = FakeOutputFileVerifier(defaultOutcome: .verificationFailure(.missing))
+    let gate = FakeRecoveryGate(isOpen: false)
+    let coordinator = makeCoordinator(
+        outputDeliveryStore: outputDeliveryStore, outputFileVerifier: verifier, recoveryGate: gate
+    )
+
+    let task = Task { try await coordinator.verifyOutputIntegrity(output) }
+    for _ in 0..<5 { await Task.yield() }
+    #expect(await outputDeliveryStore.deleteOutputCalls.isEmpty)
+
+    await gate.open()
+    let outcome = try await task.value
+
+    #expect(outcome == .lost)
+    #expect(await outputDeliveryStore.deleteOutputCalls == [exportID])
 }
 
 @Test("測定値が一致すればintactを返し削除しない")

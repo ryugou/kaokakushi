@@ -236,7 +236,7 @@ private func awaitRecoveryCompletedBlocksUntilRecoveryFinishes() async throws {
     let (waiterSignal, waiterContinuation) = AsyncStream<Void>.makeStream()
     var waiterIterator = waiterSignal.makeAsyncIterator()
     let waiter = Task {
-        await coordinator.awaitRecoveryCompleted()
+        try await coordinator.awaitRecoveryCompleted()
         waiterContinuation.yield(())
     }
     for _ in 0..<5 { await Task.yield() }
@@ -245,10 +245,13 @@ private func awaitRecoveryCompletedBlocksUntilRecoveryFinishes() async throws {
 
     await gate.open()
     _ = try await recovery.value
-    await waiter.value
+    try await waiter.value
 }
 
-@Test("復旧がthrowした場合、ゲートは開かないまま残る", .timeLimit(.minutes(1)))
+// C-1（Task 12 レビュー）: 復旧が失敗で確定した後、awaitRecoveryCompleted は待たせず
+// StartupRecoveryFailedError で即座に返る。「復旧が失敗したら書き出しを開始させない」という
+// 本質（ゲートが開かないこと）は、この専用エラーで throw することで維持する。
+@Test("復旧がthrowした場合、以後のawaitRecoveryCompletedは待たずStartupRecoveryFailedErrorで返る", .timeLimit(.minutes(1)))
 private func recoveryFailureLeavesGateClosed() async throws {
     let exportSagaStore = FakeExportSagaStore()
     await exportSagaStore.setLoadRunningJobsFailure(Boom())
@@ -259,15 +262,52 @@ private func recoveryFailureLeavesGateClosed() async throws {
         try await coordinator.runStartupRecovery()
     }
 
-    let (waiterSignal, waiterContinuation) = AsyncStream<Void>.makeStream()
-    var waiterIterator = waiterSignal.makeAsyncIterator()
-    let waiter = Task {
-        await coordinator.awaitRecoveryCompleted()
-        waiterContinuation.yield(())
+    do {
+        try await coordinator.awaitRecoveryCompleted()
+        Issue.record("StartupRecoveryFailedErrorが投げられるはずだった")
+    } catch let error as StartupRecoveryFailedError {
+        #expect(error.cause is Boom)
+    } catch {
+        Issue.record("想定外のエラー: \(error)")
     }
-    for _ in 0..<5 { await Task.yield() }
-    waiterContinuation.finish()
-    #expect(await waiterIterator.next() == nil)
+}
 
-    waiter.cancel()
+// C-1: ゲート待ち中にキャンセルされた呼び出しはCancellationErrorで抜け、waitersから除去される。
+// 除去されずに残ると、後で復旧が完了した際にcompleteGateがそのCheckedContinuationを二重resume
+// しようとしクラッシュする（CheckedContinuationは二重resumeで停止する）。他の待機者（キャンセル
+// されていないもの）が正常に完了することも合わせて確認し、除去が他の待機者へ影響しないことを示す。
+@Test(
+    "ゲート待ち中にキャンセルされた呼び出しはCancellationErrorで抜け、他の待機者には影響しない",
+    .timeLimit(.minutes(1))
+)
+private func awaitRecoveryCompletedCancellationDoesNotAffectOtherWaiters() async throws {
+    let exportSagaStore = FakeExportSagaStore()
+    let outputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock())
+    let gate = OneShotGate()
+    let (reachedHookStream, reachedHookContinuation) = AsyncStream<Void>.makeStream()
+    var reachedHookIterator = reachedHookStream.makeAsyncIterator()
+    let coordinator = makeCoordinator(
+        exportSagaStore: exportSagaStore,
+        outputDeliveryStore: outputDeliveryStore,
+        updateGuidanceHook: {
+            reachedHookContinuation.yield(())
+            await gate.wait()
+        }
+    )
+
+    let recovery = Task { try await coordinator.runStartupRecovery() }
+    _ = await reachedHookIterator.next()
+
+    let cancelledWaiter = Task { try await coordinator.awaitRecoveryCompleted() }
+    let survivingWaiter = Task { try await coordinator.awaitRecoveryCompleted() }
+    for _ in 0..<5 { await Task.yield() }
+    cancelledWaiter.cancel()
+
+    await #expect(throws: CancellationError.self) {
+        try await cancelledWaiter.value
+    }
+
+    await gate.open()
+    _ = try await recovery.value
+    try await survivingWaiter.value
 }

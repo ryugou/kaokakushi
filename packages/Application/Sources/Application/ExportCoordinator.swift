@@ -101,7 +101,7 @@ public actor ExportCoordinator {
         _ request: SingleExportRequest,
         capabilities: ResolvedCapabilities
     ) async throws -> ExportStartOutcome {
-        await recoveryGate.awaitRecoveryCompleted()
+        try await recoveryGate.awaitRecoveryCompleted()
         guard isConfirmationConsistent(request) else {
             return .confirmationMismatch
         }

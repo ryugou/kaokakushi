@@ -167,6 +167,45 @@ private func clearPendingFileDeletionFailureIsNotCountedAsEntityDeletionFailure(
     #expect(report.pendingRecordClearFailures.map(\.kind) == [.output])
 }
 
+// S-2（Task 12 レビュー）: architecture.md「CancellationError は業務エラーとして扱わない」に
+// 従い、孤児GCの削除失敗の計上から CancellationError を除外する。C-1 で awaitRecoveryCompleted()
+// をキャンセル可能にすると、共有 SerialTaskQueue 経由のこの削除経路にも CancellationError が
+// 到達しうるようになる。
+
+@Test("実体削除でCancellationErrorが投げられても、failedFileDeletionCountへ計上されないこと")
+private func cancellationErrorDuringDeleteIsExcludedFromFailureTally() async throws {
+    let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
+    let ref = ManagedFileRef(kind: .output, fileID: ManagedFileID(rawValue: UUID()))
+    await maintenanceStore.seedPendingFileDeletion(ref)
+    await managedFileStore.seedExistingFile(ref)
+    await managedFileStore.setDeleteFailure(CancellationError())
+    let coordinator = makeCoordinator(maintenanceStore: maintenanceStore, managedFileStore: managedFileStore)
+
+    let report = try await coordinator.runStartupRecovery()
+
+    #expect(report.failedFileDeletionCount == 0)
+    #expect(report.failedFileDeletions.isEmpty)
+    // 実削除は完了していないため、登録は次回起動での再試行に残る。
+    #expect(await maintenanceStore.containsPendingFileDeletion(ref) == true)
+}
+
+@Test("clearPendingFileDeletionでCancellationErrorが投げられても、pendingRecordClearFailuresへ計上されないこと")
+private func cancellationErrorDuringClearIsExcludedFromFailureTally() async throws {
+    let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
+    let ref = ManagedFileRef(kind: .output, fileID: ManagedFileID(rawValue: UUID()))
+    await maintenanceStore.seedPendingFileDeletion(ref)
+    await managedFileStore.seedExistingFile(ref)
+    await maintenanceStore.setClearPendingFileDeletionFailure(CancellationError())
+    let coordinator = makeCoordinator(maintenanceStore: maintenanceStore, managedFileStore: managedFileStore)
+
+    let report = try await coordinator.runStartupRecovery()
+
+    #expect(report.pendingRecordClearFailures.isEmpty)
+    #expect(report.deletedFileCount == 0)
+}
+
 @Test("孤児ファイルGC手順自体の失敗は復旧全体を止めず、reportのfileGCFailureへ記録されること")
 private func fileGCFailureDoesNotStopRecoveryAndIsRecordedInReport() async throws {
     let managedFileStore = FakeManagedFileStore()

@@ -80,7 +80,14 @@ extension ExportCoordinator {
         }
     }
 
+    /// W-1（Task 12 レビュー）: OutputDeliveryCoordinator.deleteOutput と同じ store 操作を
+    /// 呼ぶが、こちらはゲートを待っていなかった（verifyOutputIntegrity は完了済み出力の履歴
+    /// 表示前に呼ばれる想定であり、起動直後・復旧完了前に到達しうる唯一の未ゲート経路だった）。
+    /// 復旧の resolveOrphanedAttempts より先に走ると、残存する DeliveryAttempt により store が
+    /// throw し、履歴の実体喪失表示が誤って失敗する。verify自体（読み取り。上の
+    /// verifyOutputIntegrity 冒頭コメント参照）はゲートを待たず、削除だけをキュー投入前で待つ。
     private func deleteLostOutput(_ exportID: ExportID) async throws {
+        try await recoveryGate.awaitRecoveryCompleted()
         try await queue.run {
             try await self.outputDeliveryStore.deleteOutput(exportID)
         }

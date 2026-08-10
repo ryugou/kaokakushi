@@ -15,7 +15,7 @@ actor FakeRecoveryGate: RecoveryGate {
         self.isOpen = isOpen
     }
 
-    func awaitRecoveryCompleted() async {
+    func awaitRecoveryCompleted() async throws {
         if isOpen { return }
         await withCheckedContinuation { continuations.append($0) }
     }

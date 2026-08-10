@@ -69,7 +69,7 @@ public actor OutputDeliveryCoordinator {
     /// abandonDeliveryAttempt 自体の失敗で、保存失敗の真因が置き換わらないよう
     /// `runCleanupPreservingError`（Cleanup.swift。レビュー第2ラウンド A）を経由する。
     public func saveToPhotoLibrary(_ output: OutputRecord) async throws {
-        await recoveryGate.awaitRecoveryCompleted()
+        try await recoveryGate.awaitRecoveryCompleted()
         try await queue.run {
             try await self.outputDeliveryStore.beginDeliveryAttempt(output.exportID)
             do {
@@ -89,7 +89,7 @@ public actor OutputDeliveryCoordinator {
         guard result == .completed else {
             return result
         }
-        await recoveryGate.awaitRecoveryCompleted()
+        try await recoveryGate.awaitRecoveryCompleted()
         try await queue.run {
             try await self.outputDeliveryStore.completeShare(output.exportID)
         }
@@ -105,7 +105,7 @@ public actor OutputDeliveryCoordinator {
 
     /// 完了後の出力を利用者が明示的に破棄する（export-saga.md 7.0 表。状態遷移ではない）。
     public func deleteOutput(_ exportID: ExportID) async throws {
-        await recoveryGate.awaitRecoveryCompleted()
+        try await recoveryGate.awaitRecoveryCompleted()
         try await queue.run {
             try await self.outputDeliveryStore.deleteOutput(exportID)
         }

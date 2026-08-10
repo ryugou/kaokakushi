@@ -120,6 +120,37 @@ private func seedWorkingSource(
     await managedFileStore.seedExistingFile(sourceFileRef)
 }
 
+/// makeExportCoordinatorSharingQueue へ渡す store 一式（function_parameter_count 回避のため
+/// struct にまとめる。TestSupport.swift の SucceedingGenerationPipeline と同じ方針）。
+private struct SharedQueueStores {
+    let exportSagaStore: ExportSagaStore
+    let workingSourceStore: WorkingSourceStore
+    let managedFileStore: ManagedFileStore
+    let outputDeliveryStore: OutputDeliveryStore
+}
+
+/// 指定した queue / recoveryGate を共有する ExportCoordinator を組み立てる
+/// （W-2: StartupRecoveryCoordinator と同一の SerialTaskQueue を注入するテスト用）。
+private func makeExportCoordinatorSharingQueue(
+    _ stores: SharedQueueStores, queue: SerialTaskQueue, recoveryGate: RecoveryGate
+) -> ExportCoordinator {
+    ExportCoordinator(
+        exportSagaStore: stores.exportSagaStore,
+        workingSourceStore: stores.workingSourceStore,
+        managedFileStore: stores.managedFileStore,
+        stampCatalog: FakeStampCatalog(),
+        imageEffectRenderer: FakeImageEffectRenderer(),
+        imageEncoder: FakeImageEncoder(),
+        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
+        outputDeliveryStore: stores.outputDeliveryStore,
+        now: makeFixedClock(),
+        queue: queue,
+        exportedSettingsEntryStore: FakeExportedSettingsEntryStore(),
+        settingsHashDigest: FakeSha256Digest(),
+        recoveryGate: recoveryGate
+    )
+}
+
 @Test(
     "GCが失敗してもゲートが開き、RecoveryGateとして注入したExportCoordinator.startExportが後続で開始できる",
     .timeLimit(.minutes(1))
@@ -148,20 +179,14 @@ private func gcFailureStillOpensGateForSubsequentExports() async throws {
         projectID: projectID, workingSourceStore: workingSourceStore, managedFileStore: managedFileStore
     )
     let request = try makeExportRequest(projectID: projectID)
-    let exportCoordinator = ExportCoordinator(
+    let stores = SharedQueueStores(
         exportSagaStore: exportSagaStore,
         workingSourceStore: workingSourceStore,
         managedFileStore: managedFileStore,
-        stampCatalog: FakeStampCatalog(),
-        imageEffectRenderer: FakeImageEffectRenderer(),
-        imageEncoder: FakeImageEncoder(),
-        outputFileVerifier: FakeOutputFileVerifier(defaultOutcome: .success(makeVerifiedOutputMeasurement())),
-        outputDeliveryStore: outputDeliveryStore,
-        now: makeFixedClock(),
-        queue: SerialTaskQueue(),
-        exportedSettingsEntryStore: FakeExportedSettingsEntryStore(),
-        settingsHashDigest: FakeSha256Digest(),
-        recoveryGate: recoveryCoordinator
+        outputDeliveryStore: outputDeliveryStore
+    )
+    let exportCoordinator = makeExportCoordinatorSharingQueue(
+        stores, queue: SerialTaskQueue(), recoveryGate: recoveryCoordinator
     )
 
     let outcome = try await exportCoordinator.startExport(request, capabilities: makeResolvedCapabilities())
@@ -171,4 +196,126 @@ private func gcFailureStillOpensGateForSubsequentExports() async throws {
         return
     }
     #expect(job.exportID == expectedJob.exportID)
+}
+
+// W-2（Task 12 レビュー）: 復旧用と書き出し用が別インスタンスのキューを使うテストだけでは、
+// awaitRecoveryCompleted() の呼び出しを将来 queue.run の中へ移す改変が入っても検出できない。
+// StartupRecoveryCoordinator と ExportCoordinator に同一の SerialTaskQueue を注入し、
+// updateGuidanceHook で復旧を保留したまま startExport を呼んでも自己デッドロックせず、
+// フック解放後に両者が完走することを固定する。
+@Test(
+    "共有SerialTaskQueue上でupdateGuidanceHookが復旧を保留している間もstartExportはゲートを待ち、フック解放後に両方完走する",
+    .timeLimit(.minutes(1))
+)
+private func sharedQueueAvoidsSelfDeadlockBetweenRecoveryAndExportStart() async throws {
+    let sharedQueue = SerialTaskQueue()
+    let hookGate = OneShotGate()
+    let (reachedHookStream, reachedHookContinuation) = AsyncStream<Void>.makeStream()
+    var reachedHookIterator = reachedHookStream.makeAsyncIterator()
+
+    let projectID = makeProjectID()
+    let expectedJob = makeExportJob(exportID: makeExportID(), projectID: projectID)
+    let exportSagaStore = FakeExportSagaStore(startExportHandler: { _, _ in .authorized(expectedJob) })
+    let outputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock())
+    let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
+    let recoveryCoordinator = StartupRecoveryCoordinator(
+        exportSagaStore: exportSagaStore,
+        outputDeliveryStore: outputDeliveryStore,
+        maintenanceStore: maintenanceStore,
+        managedFileStore: managedFileStore,
+        queue: sharedQueue,
+        updateGuidanceHook: {
+            reachedHookContinuation.yield(())
+            await hookGate.wait()
+        }
+    )
+
+    let workingSourceStore = FakeWorkingSourceStore()
+    let request = try makeExportRequest(projectID: projectID)
+    let stores = SharedQueueStores(
+        exportSagaStore: exportSagaStore,
+        workingSourceStore: workingSourceStore,
+        managedFileStore: managedFileStore,
+        outputDeliveryStore: outputDeliveryStore
+    )
+    let exportCoordinator = makeExportCoordinatorSharingQueue(
+        stores, queue: sharedQueue, recoveryGate: recoveryCoordinator
+    )
+
+    let recovery = Task { try await recoveryCoordinator.runStartupRecovery() }
+    _ = await reachedHookIterator.next()
+    // GC（孤児ファイルの差集合判定）は updateGuidanceHook より前の手順のため、hook到達後に
+    // 実体を seed すれば GC に孤児として拾われず削除されない（recoveryCoordinator と
+    // exportCoordinator は managedFileStore を共有しているため、先に seed すると GC 対象に
+    // なってしまう）。
+    try await seedWorkingSource(
+        projectID: projectID, workingSourceStore: workingSourceStore, managedFileStore: managedFileStore
+    )
+
+    let startTask = Task { try await exportCoordinator.startExport(request, capabilities: makeResolvedCapabilities()) }
+    for _ in 0..<5 { await Task.yield() }
+    #expect(await exportSagaStore.startExportCalls.isEmpty)
+
+    await hookGate.open()
+    let report = try await recovery.value
+    let outcome = try await startTask.value
+
+    guard case .started(let job) = outcome else {
+        Issue.record("expected .started but got \(outcome)")
+        return
+    }
+    #expect(job.exportID == expectedJob.exportID)
+    #expect(report.deletedRunningJobCount == 0)
+}
+
+// C-1（Task 12 レビュー）: 復旧が失敗で確定した後は、以後の変更系操作を待たせたままにせず
+// StartupRecoveryFailedError で即座に返す。RecoveryGate として注入した本物の
+// StartupRecoveryCoordinator が失敗したケースで、ExportCoordinator.startExport 側からも
+// 同じ挙動になることを固定する（FakeRecoveryGate では検出できない、実装同士の配線を検証する）。
+@Test(
+    "復旧が失敗で確定した後にstartExportを呼ぶと、待たずにStartupRecoveryFailedErrorで返る",
+    .timeLimit(.minutes(1))
+)
+private func startExportAfterRecoveryFailureReturnsErrorWithoutWaiting() async throws {
+    let exportSagaStore = FakeExportSagaStore()
+    await exportSagaStore.setLoadRunningJobsFailure(Boom())
+    let outputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock())
+    let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
+    let recoveryCoordinator = StartupRecoveryCoordinator(
+        exportSagaStore: exportSagaStore,
+        outputDeliveryStore: outputDeliveryStore,
+        maintenanceStore: maintenanceStore,
+        managedFileStore: managedFileStore,
+        queue: SerialTaskQueue()
+    )
+    await #expect(throws: Boom.self) {
+        try await recoveryCoordinator.runStartupRecovery()
+    }
+
+    let projectID = makeProjectID()
+    let workingSourceStore = FakeWorkingSourceStore()
+    try await seedWorkingSource(
+        projectID: projectID, workingSourceStore: workingSourceStore, managedFileStore: managedFileStore
+    )
+    let request = try makeExportRequest(projectID: projectID)
+    let stores = SharedQueueStores(
+        exportSagaStore: FakeExportSagaStore(),
+        workingSourceStore: workingSourceStore,
+        managedFileStore: managedFileStore,
+        outputDeliveryStore: outputDeliveryStore
+    )
+    let exportCoordinator = makeExportCoordinatorSharingQueue(
+        stores, queue: SerialTaskQueue(), recoveryGate: recoveryCoordinator
+    )
+
+    do {
+        _ = try await exportCoordinator.startExport(request, capabilities: makeResolvedCapabilities())
+        Issue.record("StartupRecoveryFailedErrorが投げられるはずだった")
+    } catch let error as StartupRecoveryFailedError {
+        #expect(error.cause is Boom)
+    } catch {
+        Issue.record("想定外のエラー: \(error)")
+    }
 }

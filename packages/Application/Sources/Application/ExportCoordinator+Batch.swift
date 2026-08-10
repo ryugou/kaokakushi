@@ -105,7 +105,7 @@ extension ExportCoordinator {
         _ item: BatchExportItemRequest,
         capabilities: ResolvedCapabilities
     ) async throws -> BatchItemStartOutcome {
-        await recoveryGate.awaitRecoveryCompleted()
+        try await recoveryGate.awaitRecoveryCompleted()
         guard isBatchConfirmationConsistent(item) else {
             return .confirmationMismatch
         }

@@ -42,9 +42,21 @@ import Domain
 // そのまま返すことで満たす（再実行しない。失敗時はゲートを開かないまま残る）。
 //
 // 「完了まで他のすべてを開始させない」ゲート（awaitRecoveryCompleted）は、完了前に呼ばれた
-// 場合は CheckedContinuation を waiters へ積んで保留し、runStartupRecovery() が成功で
-// 完了した瞬間にまとめて resume する。ExportCoordinator の開始経路がこれを await する配線は
-// Task 9 の Files 節に含まれないため、この Coordinator 自身の実装のみに留める。
+// 場合は CheckedContinuation を waiters（UUID キー付き）へ積んで保留し、runStartupRecovery() が
+// 成功で完了した瞬間にまとめて resume する（Task 9）。ExportCoordinator / OutputDeliveryCoordinator
+// の変更系操作がこれをキュー投入前に await する配線は Task 12 で行った（RecoveryGate.swift）。
+//
+// Task 12 レビュー C-1: awaitRecoveryCompleted は async throws にし、次の2点を満たす。
+// - 復旧が失敗で確定している場合（recoveryFailure が非 nil）は待たずに即座に
+//   StartupRecoveryFailedError を throw する。復旧は再実行されないため、以後この状態のまま
+//   プロセス生存中は変わらない（「新しい書き出しを開始させない」が要求であり無応答は不可）。
+// - 待機中にキャンセルされた場合は withTaskCancellationHandler の onCancel から自身の
+//   waiterID を waiters から除去したうえで CancellationError を resume する。actor は
+//   登録（withCheckedThrowingContinuation のクロージャ内で waiters へ追加する部分）から
+//   次の await までを中断せずに実行するため、cancelWaiter・completeGate・failGate のいずれが
+//   先に waiters からこの waiterID を取り除いても、取り除いた側だけが resume する
+//   （dictionary の removeValue が nil を返せば何もしない）。これにより
+//   CheckedContinuation の二重 resume（クラッシュする）を避ける。
 
 /// 起動時復旧の結果（export-saga.md 5章。復旧案内 UI の入力）。
 public struct StartupRecoveryReport: Sendable {
@@ -121,11 +133,20 @@ public actor StartupRecoveryCoordinator {
     /// 変更系 Coordinator が単一のグローバル直列キューを共有する」）。ExportCoordinator /
     /// OutputDeliveryCoordinator と同じインスタンスを注入する。
     let queue: SerialTaskQueue
+    /// 手順5「更新誘導」の呼び出し点（ファイル冒頭コメント参照。判定ロジックはサブプロジェクト10
+    /// が実装する）。このフックはゲート開放（completeGate）前に await されるため、ブロッキングな
+    /// I/O を行ってはならない（W-4）。ネットワークに触れると、起動直後の初回書き出しがその完了
+    /// まで待たされてしまう（サブプロジェクト10 実装時の注意）。
     private let updateGuidanceHook: @Sendable () async -> Void
 
     private var recoveryTask: Task<StartupRecoveryReport, Error>?
     private var isRecoveryCompleted = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    /// 復旧が失敗で確定した際の原因エラー（C-1）。非 nil の間、以後の awaitRecoveryCompleted
+    /// はこれを cause として StartupRecoveryFailedError を待たずに throw する。
+    private var recoveryFailure: Error?
+    /// 待機中の awaitRecoveryCompleted 呼び出し（C-1: キャンセル時に該当分だけを除去できるよう
+    /// UUID をキーにする）。
+    private var waiters: [UUID: CheckedContinuation<Void, Error>] = [:]
 
     public init(
         exportSagaStore: ExportSagaStore,
@@ -156,21 +177,43 @@ public actor StartupRecoveryCoordinator {
         // 独立して完走するため、ゲート開放が呼び出し元の都合に左右されない（Issue #7
         // Task 12）。
         let task = Task {
-            let report = try await self.performRecovery()
-            self.completeGate()
-            return report
+            do {
+                let report = try await self.performRecovery()
+                self.completeGate()
+                return report
+            } catch {
+                self.failGate(cause: error)
+                throw error
+            }
         }
         recoveryTask = task
         return try await task.value
     }
 
     /// 復旧が完了するまで呼び出し元を保留する（architecture.md 4.3「完了まで他のすべてを
-    /// 開始させない」）。既に完了していれば即座に返る。
-    public func awaitRecoveryCompleted() async {
+    /// 開始させない」）。既に完了していれば即座に返る。復旧が失敗で確定していれば待たずに
+    /// StartupRecoveryFailedError を throw する。待機中にキャンセルされた場合は waiters から
+    /// 自身を除去したうえで CancellationError を throw する（C-1。ファイル冒頭コメント参照）。
+    public func awaitRecoveryCompleted() async throws {
         if isRecoveryCompleted { return }
-        await withCheckedContinuation { continuation in
-            waiters.append(continuation)
+        if let recoveryFailure {
+            throw StartupRecoveryFailedError(cause: recoveryFailure)
         }
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                waiters[waiterID] = continuation
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(waiterID) }
+        }
+    }
+
+    /// C-1 のキャンセルハンドラ本体。既に completeGate / failGate が resume 済みなら
+    /// waiters から見つからず何もしない（二重 resume を避ける）。
+    private func cancelWaiter(_ waiterID: UUID) {
+        guard let continuation = waiters.removeValue(forKey: waiterID) else { return }
+        continuation.resume(throwing: CancellationError())
     }
 
     /// ストアの throw は握りつぶさずそのまま伝播する（Global Constraints「エラーの
@@ -178,6 +221,12 @@ public actor StartupRecoveryCoordinator {
     /// 孤児ファイルGC（runOrphanFileGC）だけは例外で、GC 起因の失敗を throw させず
     /// report へ落として後続の手順へ進む（W-3。ファイル冒頭コメント参照）。
     private func performRecovery() async throws -> StartupRecoveryReport {
+        // loadRunningJobs（queue外の読み取り）→ deleteRunningJobs（queue内の書き込み）の間隔は
+        // Task 12 で共有 SerialTaskQueue を経由するようになった分だけ広がっている
+        // （キューの順番待ちが挟まる）。この read-then-write に原子性は無いが、
+        // ExportCoordinator+Settle.swift の verifyOutputIntegrity と同種の非原子性であり実害も
+        // 同様に無い: その間に別の書き出しが running なジョブへ介入すれば store 側が検出し、
+        // 呼び出し元へは握りつぶさず伝わる（S-3）。
         let runningJobs = try await exportSagaStore.loadRunningJobs()
         let runningExportIDs = runningJobs.map(\.exportID)
         try await queue.run { try await self.exportSagaStore.deleteRunningJobs(runningExportIDs) }
@@ -207,11 +256,28 @@ public actor StartupRecoveryCoordinator {
         isRecoveryCompleted = true
         let pendingWaiters = waiters
         waiters.removeAll()
-        for continuation in pendingWaiters {
+        for continuation in pendingWaiters.values {
             continuation.resume()
         }
     }
+
+    /// 復旧が失敗で確定したことを記録し、待機中の呼び出し全員へ StartupRecoveryFailedError を
+    /// 返す（C-1）。以後の awaitRecoveryCompleted 呼び出しは recoveryFailure を見て待たずに
+    /// throw する。
+    private func failGate(cause: Error) {
+        guard !isRecoveryCompleted, recoveryFailure == nil else { return }
+        recoveryFailure = cause
+        let pendingWaiters = waiters
+        waiters.removeAll()
+        for continuation in pendingWaiters.values {
+            continuation.resume(throwing: StartupRecoveryFailedError(cause: cause))
+        }
+    }
 }
+
+// S-1（Task 12 レビュー）: 準拠は RecoveryGate.swift 側ではなくこの具象型のファイルへ置く
+// （抽象側が具象型を知る配置は依存の向きと食い違うため。RecoveryGate.swift 冒頭コメント参照）。
+extension StartupRecoveryCoordinator: RecoveryGate {}
 
 /// `.historyThumbnail` を孤児GC対象外にする判定（Task 11 レビュー S-1）。網羅 `switch` に
 /// することで、`ManagedFileKind` に case が増えた際にコンパイルエラーで対応判断を強制する
