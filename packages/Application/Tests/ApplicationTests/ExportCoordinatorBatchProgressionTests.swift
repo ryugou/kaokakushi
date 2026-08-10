@@ -4,7 +4,7 @@ import Domain
 @testable import Application
 
 // ExportCoordinator.startBatchItem — 1項目の帰結がバッチ全体を止めないことの検証
-// （Issue #7 Task 7 追補: docs/superpowers/specs/2026-08-06-issue7-task7-batch-progression.md）。
+// （Issue #7 Task 7 追補。正本は下記の architecture.md 6.4・export-saga.md 1.5 のとおり）。
 //
 // 正本: architecture.md 6.4「一枚の失敗でバッチ全体を停止しない」、export-saga.md 1.5
 // （まだ認可されていない写真は開始せず、バッチを paused にする＝1.3 のブロックのみが

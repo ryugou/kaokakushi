@@ -9,7 +9,7 @@ import Domain
 // 実体が失われた場合」（Task 6。実装は ExportCoordinator+Settle.swift）、1.2「変更せず
 // 再書き出しの免除」・architecture.md 6.2（Task 10。実装は
 // ExportCoordinator+CapabilityExemption.swift）、
-// docs/superpowers/specs/2026-08-05-issue7-task4-export-coordinator.md「実装方針」。
+// docs/test-plan.md 3.1「認可と生成」節。
 // stored property と init はこのファイルに集約する（extension は stored property を
 // 追加できないため。Task 5 の生成 `generateOutput` / `discardExport` は
 // ExportCoordinator+Generate.swift、Task 6 の `settleExport` / `settleBatch` /

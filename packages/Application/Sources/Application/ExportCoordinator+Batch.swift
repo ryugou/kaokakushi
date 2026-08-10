@@ -10,7 +10,7 @@ import Domain
 // （1.2 の能力ブロックの遷移先）。
 //
 // startBatchItem の帰結は BatchItemStartOutcome で表す（上記の正本の突き合わせ結果。
-// docs/superpowers/specs/2026-08-06-issue7-task7-batch-progression.md の表が正）:
+// export-saga.md 1.1・1.5、architecture.md 6.4 の記述が正）:
 // - started: 開始した。バッチは継続する
 // - itemFailed: 1.2 の能力ブロック（isExemptFromCapabilityBlock の免除が成立しない場合。
 //   レビュー第2ラウンド C）。この項目のみ終了。バッチは継続する
