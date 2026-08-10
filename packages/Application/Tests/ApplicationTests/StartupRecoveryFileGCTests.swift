@@ -85,6 +85,9 @@ private func historyThumbnailIsExcludedFromOrphanGC() async throws {
     #expect(await maintenanceStore.listReferencedFileIDsCalls.contains(.historyThumbnail) == false)
     let registeredKinds = await maintenanceStore.registerOrphanCalls.map(\.kind)
     #expect(registeredKinds.contains(.historyThumbnail) == false)
+    // 対象外というだけでなく、現用中の実体が実際にディスク上へ残っていることそのものを
+    // 固定する（Task 11 レビュー Suggestion。事故=現用実体の削除を直接検証する）。
+    #expect(await managedFileStore.containsFile(orphanRef) == true)
 }
 
 @Test("削除に失敗したrefが同一起動内で再度deleteされないこと（deleteCallsに重複が現れない）")
@@ -183,6 +186,30 @@ private func fileGCFailureDoesNotStopRecoveryAndIsRecordedInReport() async throw
     #expect((report.fileGCFailure as? Boom) == Boom())
     #expect(report.deletedFileCount == 0)
     #expect(report.failedFileDeletionCount == 0)
+    #expect(await outputDeliveryStore.resolveOrphanedAttemptsCallCount == 1)
+    #expect(await outputDeliveryStore.loadUnknownLibrarySavesCallCount == 1)
+}
+
+@Test("手順(2)のlistExistingFileIDs失敗時も手順(1)で完走した集計は保持され、後続手順まで到達すること")
+private func listExistingFileIDsFailureKeepsCompletedTallyAndDoesNotStopRecovery() async throws {
+    let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
+    let outputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock())
+    let ref = ManagedFileRef(kind: .output, fileID: ManagedFileID(rawValue: UUID()))
+    await maintenanceStore.seedPendingFileDeletion(ref)
+    await managedFileStore.seedExistingFile(ref)
+    await maintenanceStore.setListExistingFileIDsFailure(Boom())
+    let coordinator = makeCoordinator(
+        outputDeliveryStore: outputDeliveryStore,
+        maintenanceStore: maintenanceStore,
+        managedFileStore: managedFileStore
+    )
+
+    let report = try await coordinator.runStartupRecovery()
+
+    // 手順(1)（pendingの削除）は完走しており、その集計は手順(2)の失敗で失われない（W-3）。
+    #expect(report.deletedFileCount == 1)
+    #expect((report.fileGCFailure as? Boom) == Boom())
     #expect(await outputDeliveryStore.resolveOrphanedAttemptsCallCount == 1)
     #expect(await outputDeliveryStore.loadUnknownLibrarySavesCallCount == 1)
 }

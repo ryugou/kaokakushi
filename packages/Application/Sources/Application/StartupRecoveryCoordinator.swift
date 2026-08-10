@@ -51,15 +51,22 @@ public struct StartupRecoveryReport: Sendable {
     public let outputDeliverySnapshots: [OutputDeliverySnapshot]
     public let unknownLibrarySaves: [UnknownLibrarySave]
     public let deletedRunningJobCount: Int
-    /// 孤児ファイル GC（architecture.md 7.5 手順(1)〜(3)）で実削除に成功した件数。
+    /// 孤児ファイル GC（architecture.md 7.5 手順(1)〜(3)）で実削除と登録解除
+    /// （clearPendingFileDeletion）の両方に成功した件数。実体は消えたが登録解除だけ
+    /// 失敗した件数は含まない（pendingRecordClearFailures 側に計上する。Task 11
+    /// レビュー最終指摘）。ディスク上の実体が消えた総数は
+    /// `deletedFileCount + pendingRecordClearFailures.count` である。
     public let deletedFileCount: Int
     /// 孤児ファイル GC で実体の削除自体に失敗した内訳（Task 11 レビュー W-1）。
     /// 端末に実体が残り続ける件数（failedFileDeletionCount）と一致する。登録は残り
-    /// 次回起動で再試行される。
+    /// 次回起動で再試行される。deletedFileCount・pendingRecordClearFailures とは
+    /// 排他（実体削除に失敗した ref はどちらにも計上されない）。
     public let failedFileDeletions: [FileDeletionFailure]
     /// 実体の削除には成功したが PendingFileDeletion の登録行を消せなかった内訳
     /// （Task 11 レビュー W-2）。実体は既に消えているため failedFileDeletionCount には
-    /// 含めない（登録行だけが残り続けるケースを削除失敗と区別する）。
+    /// 含めない（登録行だけが残り続けるケースを削除失敗と区別する）。この件数の分だけ
+    /// 実体は消えているが deletedFileCount には計上されない（登録解除まで成功して
+    /// いないため）。
     public let pendingRecordClearFailures: [FileDeletionFailure]
     /// 孤児ファイルGC手順(1)〜(3)自体がストア操作の失敗で完走できなかった場合の原因
     /// （Task 11 レビュー W-3）。GC 以外の復旧手順は継続するため、この場合
