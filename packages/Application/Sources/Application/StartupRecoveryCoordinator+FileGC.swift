@@ -6,11 +6,11 @@ import Domain
 //
 // (1) loadPendingFileDeletions で未処理分の実体削除を再試行し、成功したものだけ
 // clearPendingFileDeletion で消す。(2) 孤児GC対象の種別ごとに listExistingFileIDs と
-// listReferencedFileIDs の差集合を求め registerOrphan で削除候補へ登録する。(3) (2) が
-// 登録した ref のうち、(1) で削除を試行済みの ref を除いたものだけを (1) と同じ削除経路
+// listReferencedFileIDs の差集合を求め、(1) で削除を試行済みの ref を除いたものだけを
+// registerOrphan で削除候補へ登録する。(3) (2) が登録した ref を (1) と同じ削除経路
 // （deleteManagedFiles）へ渡して削除する。(1) で失敗した ref は実体がディスクに残るため
-// (2) の差集合が必ず拾って再登録してしまうが、(3) の対象から除外することで同一起動内での
-// 二重削除試行を防ぐ（Task 11 レビュー C-1）。
+// (2) の差集合が必ず拾ってしまうが、登録前に除外することで同一起動内での二重削除試行と
+// 無駄な registerOrphan 呼び出しを防ぐ（Task 11 レビュー C-1）。
 //
 // loadPendingFileDeletions / listExistingFileIDs / listReferencedFileIDs / registerOrphan の
 // throw は GC 手順(1)〜(3)全体を中断するが、復旧全体は止めない。それまでに完走した分の
@@ -35,9 +35,7 @@ struct FileDeletionTally {
 /// runOrphanFileGC の結果（performRecovery が StartupRecoveryReport へ写す。large_tuple
 /// 回避のため struct にまとめる。TestSupport.swift の SucceedingGenerationPipeline と同じ方針）。
 struct FileGCOutcome {
-    let deletedCount: Int
-    let failedFileDeletions: [FileDeletionFailure]
-    let pendingRecordClearFailures: [FileDeletionFailure]
+    let tally: FileDeletionTally
     let gcFailure: Error?
 }
 
@@ -50,21 +48,16 @@ extension StartupRecoveryCoordinator {
         var gcFailure: Error?
         do {
             let pending = try await maintenanceStore.loadPendingFileDeletions()
-            let attemptedRefs = Set(pending.map(\.file))
-            tally.merge(await deleteManagedFiles(pending.map(\.file)))
+            let pendingRefs = pending.map(\.file)
+            let attemptedRefs = Set(pendingRefs)
+            tally.merge(await deleteManagedFiles(pendingRefs))
 
-            let registeredRefs = try await registerOrphanFiles()
-            let secondPassTargets = registeredRefs.filter { !attemptedRefs.contains($0) }
-            tally.merge(await deleteManagedFiles(secondPassTargets))
+            let orphanRefs = try await registerOrphanFiles(excluding: attemptedRefs)
+            tally.merge(await deleteManagedFiles(orphanRefs))
         } catch {
             gcFailure = error
         }
-        return FileGCOutcome(
-            deletedCount: tally.deletedCount,
-            failedFileDeletions: tally.failedFileDeletions,
-            pendingRecordClearFailures: tally.pendingRecordClearFailures,
-            gcFailure: gcFailure
-        )
+        return FileGCOutcome(tally: tally, gcFailure: gcFailure)
     }
 
     /// 与えられた ref を順に実削除する。実体削除自体の失敗と clearPendingFileDeletion の
@@ -92,9 +85,11 @@ extension StartupRecoveryCoordinator {
     }
 
     /// 孤児GC対象の種別ごとに listExistingFileIDs と listReferencedFileIDs の差集合を求め、
-    /// registerOrphan で削除候補へ登録し、登録した ref を呼び出し元へ返す
-    /// （`.historyThumbnail` は orphanGCKinds に含めない）。
-    private func registerOrphanFiles() async throws -> [ManagedFileRef] {
+    /// 手順(1) で削除を試行済みの ref（attemptedRefs）を除いたものを登録候補とする——
+    /// 「孤児候補 = ディスク上に存在し、参照されておらず、かつ手順(1) で試行済みでない」
+    /// という定義はこの1箇所のみに置く（`.historyThumbnail` は orphanGCKinds に含めない）。
+    /// 登録した ref を呼び出し元へ返す。
+    private func registerOrphanFiles(excluding attemptedRefs: Set<ManagedFileRef>) async throws -> [ManagedFileRef] {
         var registeredRefs: [ManagedFileRef] = []
         for kind in Self.orphanGCKinds {
             let existingFileIDs = try await maintenanceStore.listExistingFileIDs(kind: kind)
@@ -102,6 +97,7 @@ extension StartupRecoveryCoordinator {
             let orphanFileIDs = existingFileIDs.subtracting(referencedFileIDs)
             for fileID in orphanFileIDs {
                 let ref = ManagedFileRef(kind: kind, fileID: fileID)
+                guard !attemptedRefs.contains(ref) else { continue }
                 try await maintenanceStore.registerOrphan(ref)
                 registeredRefs.append(ref)
             }

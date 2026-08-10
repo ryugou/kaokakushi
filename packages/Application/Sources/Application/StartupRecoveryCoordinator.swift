@@ -178,9 +178,9 @@ public actor StartupRecoveryCoordinator {
             outputDeliverySnapshots: outputDeliverySnapshots,
             unknownLibrarySaves: unknownLibrarySaves,
             deletedRunningJobCount: runningJobs.count,
-            deletedFileCount: fileGC.deletedCount,
-            failedFileDeletions: fileGC.failedFileDeletions,
-            pendingRecordClearFailures: fileGC.pendingRecordClearFailures,
+            deletedFileCount: fileGC.tally.deletedCount,
+            failedFileDeletions: fileGC.tally.failedFileDeletions,
+            pendingRecordClearFailures: fileGC.tally.pendingRecordClearFailures,
             fileGCFailure: fileGC.gcFailure
         )
     }
