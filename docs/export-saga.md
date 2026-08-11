@@ -454,7 +454,7 @@ struct ExportRecord: Sendable {
 
 ### 7.0 写真ライブラリ保存の結果不明
 
-PhotoKit と `app.db` は同一トランザクションにできない。保存成功後 `OutputRecord` を `delivered` へ更新する前に、プロセスの終了またはタスクのキャンセルで中断すると、再起動後は `generated` に見え、再保存すると重複する。exactly-once は保証できないため、自動再試行で重複を作らない設計にする。
+PhotoKit と `app.db` は同一トランザクションにできない。保存成功後 `OutputRecord` を `delivered` へ更新する前に、プロセスが終了したか、その更新自体が失敗すると、再起動後は `generated` に見え、再保存すると重複する。exactly-once は保証できないため、自動再試行で重複を作らない設計にする。
 
 ```swift
 /// 保存の試行中を表す。runtime 側のテーブル
@@ -472,7 +472,7 @@ struct DeliveryAttempt: Sendable {
 | 3 | 成功したら `OutputRecord` を `delivered` へ更新し `DeliveryAttempt` を削除する（同一トランザクション） | DB |
 | 4 | 失敗したら `previousState` へ戻し `DeliveryAttempt` を削除する | DB |
 
-起動時に `DeliveryAttempt` が残っていれば、手順 2 と 3 の間でプロセスの終了またはタスクのキャンセルにより中断している。`previousState == generated` なら `deliveryUnknown` へ更新し、`deliveryUnknown` はそのまま、`delivered` は維持したうえで「保存結果が不明」を別途提示する（状態は後退させない）。自動再保存・自動削除は行わない。利用者に写真ライブラリを確認させ、保存済みなら破棄、未保存なら再試行を選ばせる。`OutputState` の定義は [アーキテクチャ設計](architecture.md) の 7.5 が正本。`deliveryUnknown` は未受け渡しとして扱う（受け取れていない可能性がある側へ倒す）。
+起動時に `DeliveryAttempt` が残っていれば、手順 2 と 3 の間でプロセスが終了したか、手順 3・4 の DB 反映自体が失敗している。タスクのキャンセルでは手順 3・4 を完走させるため、キャンセルだけを理由に試行が残ることはない。`previousState == generated` なら `deliveryUnknown` へ更新し、`deliveryUnknown` はそのまま、`delivered` は維持したうえで「保存結果が不明」を別途提示する（状態は後退させない）。自動再保存・自動削除は行わない。利用者に写真ライブラリを確認させ、保存済みなら破棄、未保存なら再試行を選ばせる。`OutputState` の定義は [アーキテクチャ設計](architecture.md) の 7.5 が正本。`deliveryUnknown` は未受け渡しとして扱う（受け取れていない可能性がある側へ倒す）。
 
 ##### `delivered` を後退させない・直列化・保存結果不明の永続化
 

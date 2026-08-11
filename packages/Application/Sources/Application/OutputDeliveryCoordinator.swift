@@ -76,6 +76,9 @@ public actor OutputDeliveryCoordinator {
     /// 写真ライブラリへ保存する（export-saga.md 7.0 表 手順1〜4）。保存が失敗した場合の
     /// abandonDeliveryAttempt 自体の失敗で、保存失敗の真因が置き換わらないよう
     /// `runCleanupPreservingError`（Cleanup.swift。レビュー第2ラウンド A）を経由する。
+    /// 保存が成立した後に呼び出し元のタスクがキャンセルされても throw せず、成功として
+    /// 正常 return する（`completeLibrarySave` へのシールドにより DB 反映を完走させるため）。
+    /// 呼び出し元はキャンセルを再保存の要求根拠にしてはならない（写真ライブラリへの重複を作る）。
     ///
     /// この catch・後続の completeLibrarySave 呼び出しは、いずれも既に `queue.run` の op の
     /// 内側で実行されている。`SerialTaskQueue.run` の `onCancel: { current.cancel() }`

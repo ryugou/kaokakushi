@@ -33,7 +33,7 @@ public struct CleanupPreservingError: Error, Sendable {
 /// 1回目の cleanupFailure は呼び出し元へ伝わらず消える。真因（rootCause）は常に保持される
 /// ため実害は小さいが、Global Constraints「エラーの握りつぶし禁止」との兼ね合いを踏まえた
 /// 意図的な設計判断である（1回目の後始末失敗そのものを追跡する用途には使えない）。
-public func runCleanupPreservingError(
+func runCleanupPreservingError(
     cause: Error, cleanup: @Sendable () async throws -> Void
 ) async throws -> Never {
     let rootCause = (cause as? CleanupPreservingError)?.cause ?? cause

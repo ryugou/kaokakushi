@@ -136,9 +136,11 @@ private func queueLevelCancellationDiscardExportIsShieldedFromCancellation() asy
     let job = makeExportJob(exportID: exportID)
     let exportSagaStore = FakeExportSagaStore()
     await exportSagaStore.seedRunningJob(job)
-    // discardExportChecksCancellationを立てて初めて、シールドを外すと
-    // discardExportCallsが空のまま失敗することを検出できる（Issue #7 レビュー第2ラウンド W-2:
-    // これまでどのテストからも呼ばれていなかったフック）。
+    // このフラグは外側catch（このテスト）の検出には不要である。シールドを外すと
+    // SerialTaskQueue.run自身のTask.checkCancellation()がキャンセル済み文脈でthrowするため、
+    // フラグの有無に関わらず既存テストも落ちる。無防備だったのは内側catch経路のみであり、
+    // このフラグはstore層のキャンセル契約を追加で固定する意義がある（Issue #7 レビュー第2
+    // ラウンド W-2: これまでどのテストからも呼ばれていなかったフック）。
     await exportSagaStore.setDiscardExportChecksCancellation(true)
 
     let coordinator = makeGenerateCoordinator(
