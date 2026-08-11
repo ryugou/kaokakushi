@@ -52,23 +52,30 @@ vibepod の Swift profile は Foundation-only の SwiftPM パッケージしか�
 （`FakeMaintenanceStore` が「削除に失敗した実体はディスクに残る」を再現しておらず、二重削除の欠陥を
 テストがすり抜けた）。
 
-したがって **適合テストスイートを Phase A で先に作り、Phase B の実装をそのスイートに通す**。
+4.1 は「adapter integration test」の節にあり、実装が存在する段階の要求である。したがって
+**契約スイートは Phase B で作り、実装と偽実装の双方へ適用する**。Phase A では偽実装を作るが、
+そのとき **「失敗したら実体が残る」「与えた全 key に対応する値を返す」といった現実を再現すること**を
+明示的な要件とする。再現しない偽実装は A2 の Saga テストを無意味にする。
 
 ---
 
 ## 3. Phase A（コンテナで完結）
 
-### A1: Domain のポート宣言と適合テストスイート
+### A1: Domain のポート宣言と偽実装
 
-- `PickedPhotoLoader` / `FaceDetector` を `image-pipeline.md` 5章から一字一句転記して宣言する
-- 戻り値型（`LoadedPhoto` / `DetectionResult` / `DetectedFace`）の過不足を正本と突き合わせ、不足を補う。
-  既存の型を変更する場合は横断確認を行う（`document-write-rule.md` 7.1）
-- **適合テストスイート**を、実装と偽実装の双方へ適用できる形で書く。スイートは
-  プロトコルの契約（`image-pipeline.md` が定める不変条件）だけを検証し、実装詳細に触れない
-- 偽実装（`FakeFaceDetector` / `FakePickedPhotoLoader` 等）を作り、スイートを通す
+境界型（`ImageSource` / `LoadedPhoto` / `DetectionResult` / `DetectedFace` / `FaceDetectorRevision`）は
+**すべて宣言済み**である（`Rendering/Boundary.swift`・`Rendering/DetectedFace.swift`）。追加は不要。
 
-**完了条件**: `swift test --package-path packages/Domain` が緑。適合テストスイートが偽実装に対して
-実行され、`image-pipeline.md` の契約項目を網羅していること。
+- `PickedPhotoLoader` / `FaceDetector` を `image-pipeline.md` 5章「プロトコルのシグネチャ」から
+  一字一句転記して宣言する。既存の `Ports/ImagePipeline.swift` と同じ様式に揃える
+- 最小準拠テストを既存パターン（`Ports/ImagePipelinePortsTests.swift`）に倣って書く
+- 偽実装（`FakeFaceDetector` / `FakePickedPhotoLoader`）を Application のテスト支援へ追加する。
+  A2 が使う
+
+**偽実装の要件**: 呼び出し引数を記録し、失敗を注入でき、**成功・失敗それぞれで現実に起こる状態を
+再現する**こと。A2 の Saga テストはこの偽実装の上に立つため、乖離すると検証が空洞化する。
+
+**完了条件**: `swift test --package-path packages/Domain` と `--package-path packages/Application` が緑。
 
 ### A2: `SourceImportCoordinator`
 
@@ -142,9 +149,17 @@ Y 軸反転の検出（画像**上端**だけに顔／**下端**だけに顔）�
 
 ---
 
+### B5: 契約スイート（実装と偽実装の双方へ適用）
+
+`test-plan.md` 4.1 が要求する「実装と偽実装の両方へ同じスイート」を、B1〜B4 の実装が揃った段階で作る。
+スイートはプロトコルの契約だけを検証し、実装詳細に触れない。**偽実装がスイートを通らない場合、
+直すのは偽実装であって、スイートを緩めてはならない**。
+
+---
+
 ## 5. 実施順序
 
-A1 → A2 → B1 → B2 → B3 → B4。
+A1 → A2 → B1 → B2 → B3 → B4 → B5。
 
 A1 は全ての前提（ポート契約と適合テストスイート）。A2 は偽実装ベースのため B を待たない。
 B1 は B3 の依存。B2 は独立。B3 が最も難度が高い（ゴールデン画像）。B4 は PhotoKit 権限が絡む。
