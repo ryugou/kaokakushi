@@ -67,8 +67,13 @@ func faceDetectorMinimalConformancePassesSourceAndReturnsResult() async throws {
     let received = await subject.receivedSources
     #expect(received.count == 1)
     #expect(received.first?.file == source.file)
+    #expect(received.first?.pixelSize == source.pixelSize)
+    #expect(received.first?.format == source.format)
 }
 ```
+
+`ImageSource` は `Equatable` に適合していないため、全フィールドをフィールド単位で比較する。
+`.file` だけの比較ではテスト名が主張する「ImageSource を記録」を裏付けられない。
 
 - [x] **Step 2: テストが失敗することを確認する**
 
@@ -187,7 +192,7 @@ func pickedPhotoLoaderMinimalConformancePassesFileAndReturnsPhoto() async throws
 | 型 | 適合 | 比較方法 |
 | --- | --- | --- |
 | `LoadedPhoto` | `Sendable` のみ | フィールド単位で比較する（全体比較は不可） |
-| `ImageSource` | `Sendable` のみ | `.file` で比較する |
+| `ImageSource` | `Sendable` のみ | 全フィールド（`file` / `pixelSize` / `format`）をフィールド単位で比較する |
 | `ManagedFileRef` | `Sendable, Hashable` | `==` と配列比較が使える |
 | `OriginalCaptureMetadata` | `Sendable, Equatable` | `==` が使える |
 | `DetectionResult` | `Sendable, Equatable` | `==` が使える（Task 1 で使用） |
