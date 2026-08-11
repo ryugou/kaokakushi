@@ -300,6 +300,8 @@ func faceDetectorMinimalConformancePassesSourceAndReturnsResult() async throws {
     let received = await subject.receivedSources
     #expect(received.count == 1)
     #expect(received.first?.file == source.file)
+    #expect(received.first?.pixelSize == source.pixelSize)
+    #expect(received.first?.format == source.format)
 }
 
 // MARK: - PickedPhotoLoader（image-pipeline.md 5章「プロトコルのシグネチャ」）
