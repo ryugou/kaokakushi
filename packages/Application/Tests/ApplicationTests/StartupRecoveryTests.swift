@@ -17,22 +17,7 @@ import Domain
 
 private struct Boom: Error, Equatable {}
 
-/// テスト専用の一回限りの非同期ゲート（SerialTaskQueueTests.swift と同じ方針の複製）。
-private actor OneShotGate {
-    private var isOpen = false
-    private var continuation: CheckedContinuation<Void, Never>?
-
-    func wait() async {
-        if isOpen { return }
-        await withCheckedContinuation { continuation = $0 }
-    }
-
-    func open() {
-        isOpen = true
-        continuation?.resume()
-        continuation = nil
-    }
-}
+// OneShotGate は TestSupport.swift へ集約した（Issue #7 レビュー第2ラウンド S-2）。
 
 // makeCoordinator は TestSupport.swift の共有ヘルパーを使う（Task 11 で maintenanceStore /
 // managedFileStore を追加し、StartupRecoveryFileGCTests.swift と共有するため一本化した）。

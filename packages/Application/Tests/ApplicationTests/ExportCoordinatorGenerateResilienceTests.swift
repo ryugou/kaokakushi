@@ -16,23 +16,7 @@ import Domain
 // 併せて W2（discardExport 自体の失敗で中断の真因を失わない）を、この外側 catch の経路
 // についても検証する（内側 catch の検証は ExportCoordinatorGenerateTests.swift の担当）。
 
-/// テスト専用の一回限りの非同期ゲート（SerialTaskQueueTests.swift の OneShotGate と同じ手法。
-/// private 型のためファイル間で共有できず、ここへ複製する）。
-private actor OneShotGate {
-    private var isOpen = false
-    private var continuation: CheckedContinuation<Void, Never>?
-
-    func wait() async {
-        if isOpen { return }
-        await withCheckedContinuation { continuation = $0 }
-    }
-
-    func open() {
-        isOpen = true
-        continuation?.resume()
-        continuation = nil
-    }
-}
+// OneShotGate は TestSupport.swift へ集約した（Issue #7 レビュー第2ラウンド S-2）。
 
 /// 先行 op でキューを占有し、`generateOutput` 内部の `queue.run` が必ず「直前 op の完了待ち」
 /// （4.2 の2つ目の `checkCancellation` の手前）を経由する状況を組み立てる。
@@ -138,4 +122,50 @@ private func queueLevelCancellationPreservesCancellationCauseWhenDiscardAlsoFail
     } catch {
         Issue.record("CleanupPreservingErrorが期待されたが\(error)が送出された")
     }
+}
+
+// MARK: - W-2: 生成経路のキャンセルシールドを守る回帰テスト（外側catch）
+
+@Test(
+    "外側catch: queue.run投入前後のキャンセルでも後始末のdiscardExportはシールドされ完走する",
+    .timeLimit(.minutes(1))
+)
+private func queueLevelCancellationDiscardExportIsShieldedFromCancellation() async throws {
+    let pipeline = makeSucceedingGenerationPipeline()
+    let exportID = makeExportID()
+    let job = makeExportJob(exportID: exportID)
+    let exportSagaStore = FakeExportSagaStore()
+    await exportSagaStore.seedRunningJob(job)
+    // discardExportChecksCancellationを立てて初めて、シールドを外すと
+    // discardExportCallsが空のまま失敗することを検出できる（Issue #7 レビュー第2ラウンド W-2:
+    // これまでどのテストからも呼ばれていなかったフック）。
+    await exportSagaStore.setDiscardExportChecksCancellation(true)
+
+    let coordinator = makeGenerateCoordinator(
+        exportSagaStore: exportSagaStore,
+        imageEffectRenderer: pipeline.renderer,
+        imageEncoder: pipeline.encoder,
+        outputFileVerifier: pipeline.verifier
+    )
+
+    let (blocking, blockingGate) = await occupyQueueWithBlockingOp(coordinator)
+
+    let input = try makeGenerateExportInput(job: job)
+    let generateTask = Task<Void, Error> {
+        try await coordinator.generateOutput(input)
+    }
+    await Task.yield()
+    generateTask.cancel()
+
+    await blockingGate.open()
+    _ = try? await blocking.value
+
+    await #expect(throws: CancellationError.self) {
+        try await generateTask.value
+    }
+
+    let discardCalls = await exportSagaStore.discardExportCalls
+    #expect(!discardCalls.isEmpty)
+    #expect(discardCalls.first?.exportID == exportID)
+    #expect(await exportSagaStore.runningJob(for: exportID) == nil)
 }

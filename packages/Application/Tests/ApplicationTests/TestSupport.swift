@@ -313,6 +313,25 @@ func awaitOrRecordDeadlock(
     }
 }
 
+/// テスト専用の一回限りの非同期ゲート。`open()` が呼ばれるまで `wait()` を確定的に足止めする
+/// （`Task.sleep` の固定時間待ちより決定的）。複数ファイルに同一定義が重複していたため
+/// ここへ集約する（Issue #7 レビュー第2ラウンド S-2）。
+actor OneShotGate {
+    private var isOpen = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func open() {
+        isOpen = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
 /// 単体トライアル可・広告表示ありの標準的な ResolvedCapabilities フィクスチャ。
 func makeResolvedCapabilities(
     canUsePremiumStamps: Bool = true,

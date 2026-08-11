@@ -328,3 +328,58 @@ private func innerCatchPreservesOriginalCauseWhenDiscardAlsoFails() async throws
     let discardCalls = await exportSagaStore.discardExportCalls
     #expect(!discardCalls.isEmpty)
 }
+
+// MARK: - W-2: 生成経路のキャンセルシールドを守る回帰テスト（内側catch）
+
+@Test(
+    "内側catch: render完了後にキャンセルされてもdiscardExportはシールドされ完走しExportJobが残らない",
+    .timeLimit(.minutes(1))
+)
+private func innerCatchDiscardExportIsShieldedFromCancellation() async throws {
+    let pipeline = makeSucceedingGenerationPipeline()
+    await pipeline.renderer.setResult(pipeline.rendered)
+    // render自体を成立させたうえで、その直後にキャンセルする猶予を作る
+    // （cancellationAfterRenderDiscardsAndPropagatesCancellationErrorと同じ手法）。
+    await pipeline.renderer.setDelayNanoseconds(20_000_000)
+    await pipeline.encoder.setResult(pipeline.encoded)
+
+    let exportID = makeExportID()
+    let job = makeExportJob(exportID: exportID)
+    let exportSagaStore = FakeExportSagaStore()
+    await exportSagaStore.seedRunningJob(job)
+    // discardExportChecksCancellationを立てて初めて、シールドを外すと
+    // discardExportの最初の呼び出しがcheckCancellationで即throwし失敗することを検出できる
+    // （Issue #7 レビュー第2ラウンド W-2: これまでどのテストからも呼ばれていなかったフック）。
+    await exportSagaStore.setDiscardExportChecksCancellation(true)
+
+    let coordinator = makeGenerateCoordinator(
+        exportSagaStore: exportSagaStore,
+        imageEffectRenderer: pipeline.renderer,
+        imageEncoder: pipeline.encoder,
+        outputFileVerifier: pipeline.verifier
+    )
+
+    let input = try makeGenerateExportInput(job: job)
+    let task = Task {
+        try await coordinator.generateOutput(input)
+    }
+    while await pipeline.renderer.calls.isEmpty {
+        await Task.yield()
+    }
+    task.cancel()
+
+    await #expect(throws: CancellationError.self) {
+        try await task.value
+    }
+
+    // generateOutput側の外側catch（安全網）は、内側catchの成否に関わらずqueue.runから漏れた
+    // 全エラーに対して冪等にdiscardExportを呼び直す（temporaryFiles: []固定）。内側catchの
+    // シールドが外れて最初の呼び出しが失敗しても、外側catchの安全網がdiscardCalls自体は
+    // 非空にしてしまうため「呼ばれたか」だけでは内側シールドの実効を検出できない。内側catchの
+    // discardExportは蓄積済みtemporaryFiles（render成功分）を添えて呼ぶため、最初の呼び出しの
+    // 引数まで見て初めて内側シールドが効いたことを区別できる。
+    let discardCalls = await exportSagaStore.discardExportCalls
+    #expect(discardCalls.first?.exportID == exportID)
+    #expect(discardCalls.first?.temporaryFiles == [pipeline.rendered.file.ref])
+    #expect(await exportSagaStore.runningJob(for: exportID) == nil)
+}

@@ -27,23 +27,7 @@ private func makeCoordinator(
     )
 }
 
-/// テスト専用の一回限りの非同期ゲート（SerialTaskQueueTests.swift と同じ方針の複製。
-/// private 型のためファイル間で共有できず、ここへ複製する）。
-private actor OneShotGate {
-    private var isOpen = false
-    private var continuation: CheckedContinuation<Void, Never>?
-
-    func wait() async {
-        if isOpen { return }
-        await withCheckedContinuation { continuation = $0 }
-    }
-
-    func open() {
-        isOpen = true
-        continuation?.resume()
-        continuation = nil
-    }
-}
+// OneShotGate は TestSupport.swift へ集約した（Issue #7 レビュー第2ラウンド S-2）。
 
 @Test("復旧未完了の間はsaveToPhotoLibraryがstoreへ進まず、完了後に保存できる", .timeLimit(.minutes(1)))
 private func saveToPhotoLibraryWaitsForRecoveryGateThenProceeds() async throws {

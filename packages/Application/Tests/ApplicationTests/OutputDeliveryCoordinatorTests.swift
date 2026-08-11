@@ -217,9 +217,11 @@ private func saveCancellationDuringMediaSaverStillAbandonsAttemptAndPropagatesSa
     await outputDeliveryStore.setAbandonDeliveryAttemptChecksCancellation(true)
     let mediaSaver = FakeMediaSaver()
     await mediaSaver.setFailure(SaveBoom())
-    // saveToPhotoLibrary呼び出し中（Task.sleepで中断している間）に外側のTaskをキャンセルする
-    // 猶予を作る（ExportCoordinatorGenerateTests.swiftのcancellationAfterRenderと同じ手法）。
-    await mediaSaver.setDelayNanoseconds(20_000_000)
+    // saveToPhotoLibrary呼び出し中（gate.wait()で中断している間）に外側のTaskをキャンセルしてから
+    // ゲートを開ける。gate.wait()はキャンセルの影響を受けないため、cancel()が必ず先に届く
+    // （Task.sleepの固定時間待ちに依存しない決定的な手法。Issue #7 レビュー第2ラウンド S-1）。
+    let gate = OneShotGate()
+    await mediaSaver.setGate(gate)
     let sharePresenter = await FakeSharePresenter()
     let coordinator = makeCoordinator(
         outputDeliveryStore: outputDeliveryStore, mediaSaver: mediaSaver, sharePresenter: sharePresenter
@@ -232,6 +234,7 @@ private func saveCancellationDuringMediaSaverStillAbandonsAttemptAndPropagatesSa
         await Task.yield()
     }
     saveTask.cancel()
+    await gate.open()
 
     await #expect(throws: SaveBoom.self) {
         try await saveTask.value
@@ -240,6 +243,43 @@ private func saveCancellationDuringMediaSaverStillAbandonsAttemptAndPropagatesSa
     #expect(await outputDeliveryStore.abandonDeliveryAttemptCalls == [exportID])
     #expect(await outputDeliveryStore.hasActiveAttempt(for: exportID) == false)
     #expect(await outputDeliveryStore.outputSnapshot(for: exportID)?.state == .generated)
+}
+
+@Test(
+    "保存成功直後に呼び出し元がキャンセルされてもcompleteLibrarySaveはシールドされ完走しdeliveredへ遷移する",
+    .timeLimit(.minutes(1))
+)
+private func saveCancellationAfterMediaSaverSuccessStillCompletesLibrarySave() async throws {
+    let exportID = makeExportID()
+    let output = makeOutputRecord(exportID: exportID, state: .generated)
+    let outputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock())
+    await outputDeliveryStore.seedOutput(output)
+    await outputDeliveryStore.setCompleteLibrarySaveChecksCancellation(true)
+    let mediaSaver = FakeMediaSaver()
+    // failureは注入しない: MediaSaver.saveToPhotoLibrary自体は成功させ、gate.open()直後の
+    // completeLibrarySaveがキャンセル済み文脈でも完走することを検証する（Issue #7 レビュー
+    // 第2ラウンド W-1）。
+    let gate = OneShotGate()
+    await mediaSaver.setGate(gate)
+    let sharePresenter = await FakeSharePresenter()
+    let coordinator = makeCoordinator(
+        outputDeliveryStore: outputDeliveryStore, mediaSaver: mediaSaver, sharePresenter: sharePresenter
+    )
+
+    let saveTask = Task<Void, Error> {
+        try await coordinator.saveToPhotoLibrary(output)
+    }
+    while await mediaSaver.calls.isEmpty {
+        await Task.yield()
+    }
+    saveTask.cancel()
+    await gate.open()
+
+    try await saveTask.value
+
+    #expect(await outputDeliveryStore.completeLibrarySaveCalls == [exportID])
+    #expect(await outputDeliveryStore.hasActiveAttempt(for: exportID) == false)
+    #expect(await outputDeliveryStore.outputSnapshot(for: exportID)?.state == .delivered)
 }
 
 // MARK: - 共有

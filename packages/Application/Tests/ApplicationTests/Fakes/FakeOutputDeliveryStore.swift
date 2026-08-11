@@ -57,6 +57,13 @@ actor FakeOutputDeliveryStore: OutputDeliveryStore {
     /// 既存の振る舞いを変えない。受け渡し後始末のキャンセルシールド横展開の回帰テスト用）。
     var abandonDeliveryAttemptChecksCancellation = false
 
+    /// true の間、completeLibrarySave は呼び出された瞬間の `Task.isCancelled` を検査し、
+    /// true なら何もせず `CancellationError` を throw する。abandonDeliveryAttemptChecksCancellation
+    /// と同型だが、こちらは「保存成功直後の完了反映」経路を検証する（Issue #7 レビュー第2
+    /// ラウンド W-1: 保存成功直後にキャンセルされても completeLibrarySave が完走することの
+    /// 回帰テスト用。既定 false では既存の振る舞いを変えない）。
+    var completeLibrarySaveChecksCancellation = false
+
     // MARK: - in-memory 状態
 
     private var outputs: [ExportID: OutputRecord] = [:]
@@ -79,6 +86,7 @@ actor FakeOutputDeliveryStore: OutputDeliveryStore {
     func setClearUnknownLibrarySaveFailure(_ value: Error?) { clearUnknownLibrarySaveFailure = value }
     func setDeleteOutputFailure(_ value: Error?) { deleteOutputFailure = value }
     func setAbandonDeliveryAttemptChecksCancellation(_ value: Bool) { abandonDeliveryAttemptChecksCancellation = value }
+    func setCompleteLibrarySaveChecksCancellation(_ value: Bool) { completeLibrarySaveChecksCancellation = value }
 
     /// テストが任意状態の OutputRecord を注入する（settledAt の有無・state を含めて呼び出し側が決める）
     func seedOutput(_ record: OutputRecord) {
@@ -110,6 +118,11 @@ actor FakeOutputDeliveryStore: OutputDeliveryStore {
     }
 
     func completeLibrarySave(_ exportID: ExportID) async throws {
+        // 呼び出し記録より前に検査する: シールドされていない実装だと、この throw により
+        // completeLibrarySaveCalls に記録すら残らない（abandonDeliveryAttempt と同型の検査順序）。
+        if completeLibrarySaveChecksCancellation {
+            try Task.checkCancellation()
+        }
         completeLibrarySaveCalls.append(exportID)
         if let failure = completeLibrarySaveFailure { throw failure }
         try consumeActiveAttempt(for: exportID)

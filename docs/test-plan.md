@@ -214,6 +214,7 @@
 - 完了操作の付近に「完了すると 1 枚として確定し、以降の作り直しは新しい 1 枚になる」旨が明示されること
 - 保存・共有が完了後にのみ行え、`beginDeliveryAttempt` / `completeLibrarySave` / `completeShare` が `settledAt != nil` を事前条件とすること（`nil` なら throw）
 - 保存・共有は何度実行しても追加消費せず、成否が枠に影響しないこと（失敗しても出力は保持され再試行できる）
+- **保存失敗時の `abandonDeliveryAttempt`・保存成功時の `completeLibrarySave` が、呼び出し元のタスクキャンセルが伝播した文脈でも完走し、`DeliveryAttempt` を残さないこと**（[書き出し Saga](export-saga.md) の 7.0）
 
 ### 3.3 完了前の破棄
 

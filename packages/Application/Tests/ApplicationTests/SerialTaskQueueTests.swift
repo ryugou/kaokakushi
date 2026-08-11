@@ -13,23 +13,8 @@ import Testing
 //    （`executesQueuedOperationsSequentiallyInSubmissionOrder` /
 //    `throwingOpDoesNotBlockQueuedSuccessor`）。
 
-/// テスト専用の一回限りの非同期ゲート。`open()` が呼ばれるまで `wait()` を保留する。
-/// `SerialTaskQueue` 本体の実装ではなく、FIFO順序を決定的に組み立てるためのテスト補助。
-private actor OneShotGate {
-    private var isOpen = false
-    private var continuation: CheckedContinuation<Void, Never>?
-
-    func wait() async {
-        if isOpen { return }
-        await withCheckedContinuation { continuation = $0 }
-    }
-
-    func open() {
-        isOpen = true
-        continuation?.resume()
-        continuation = nil
-    }
-}
+// OneShotGate（FIFO順序を決定的に組み立てるためのテスト補助）は TestSupport.swift へ集約した
+// （Issue #7 レビュー第2ラウンド S-2）。
 
 /// テスト専用の一回限りの真偽値フラグ。`op` の内部から「観測できた」ことを actor 越しに
 /// テスト本体へ伝えるために使う（`Task.isCancelled` はローカル変数へキャプチャできない

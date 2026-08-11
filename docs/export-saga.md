@@ -454,7 +454,7 @@ struct ExportRecord: Sendable {
 
 ### 7.0 写真ライブラリ保存の結果不明
 
-PhotoKit と `app.db` は同一トランザクションにできない。保存成功後 `OutputRecord` を `delivered` へ更新する前にプロセスが終了すると、再起動後は `generated` に見え、再保存すると重複する。exactly-once は保証できないため、自動再試行で重複を作らない設計にする。
+PhotoKit と `app.db` は同一トランザクションにできない。保存成功後 `OutputRecord` を `delivered` へ更新する前に、プロセスの終了またはタスクのキャンセルで中断すると、再起動後は `generated` に見え、再保存すると重複する。exactly-once は保証できないため、自動再試行で重複を作らない設計にする。
 
 ```swift
 /// 保存の試行中を表す。runtime 側のテーブル
@@ -472,13 +472,15 @@ struct DeliveryAttempt: Sendable {
 | 3 | 成功したら `OutputRecord` を `delivered` へ更新し `DeliveryAttempt` を削除する（同一トランザクション） | DB |
 | 4 | 失敗したら `previousState` へ戻し `DeliveryAttempt` を削除する | DB |
 
-起動時に `DeliveryAttempt` が残っていれば、手順 2 と 3 の間で終了している。`previousState == generated` なら `deliveryUnknown` へ更新し、`deliveryUnknown` はそのまま、`delivered` は維持したうえで「保存結果が不明」を別途提示する（状態は後退させない）。自動再保存・自動削除は行わない。利用者に写真ライブラリを確認させ、保存済みなら破棄、未保存なら再試行を選ばせる。`OutputState` の定義は [アーキテクチャ設計](architecture.md) の 7.5 が正本。`deliveryUnknown` は未受け渡しとして扱う（受け取れていない可能性がある側へ倒す）。
+起動時に `DeliveryAttempt` が残っていれば、手順 2 と 3 の間でプロセスの終了またはタスクのキャンセルにより中断している。`previousState == generated` なら `deliveryUnknown` へ更新し、`deliveryUnknown` はそのまま、`delivered` は維持したうえで「保存結果が不明」を別途提示する（状態は後退させない）。自動再保存・自動削除は行わない。利用者に写真ライブラリを確認させ、保存済みなら破棄、未保存なら再試行を選ばせる。`OutputState` の定義は [アーキテクチャ設計](architecture.md) の 7.5 が正本。`deliveryUnknown` は未受け渡しとして扱う（受け取れていない可能性がある側へ倒す）。
 
 ##### `delivered` を後退させない・直列化・保存結果不明の永続化
 
 受け渡しは複数回・任意の順序で行える（[アーキテクチャ設計](architecture.md) の 7.5）。OS 共有成功後に写真ライブラリ保存を試みて中断しても、`previousState` により直前の共有成功の事実を失わない。一度成立した `delivered` は取り消さない。
 
 `actor` であることは排他保証にならない（`await` のたびに再入可能なため）。個別の待ち行列は作らず、グローバル直列キュー1本（[アーキテクチャ設計](architecture.md) の 4.2。書き出しの手順 1〜3 と共通）で直列化する。`DeliveryAttempt` が存在する間、その出力への共有・破棄・別の保存、および**その出力を含む履歴（`Project`）の削除**はすべて拒否する（削除側の絶対保護としての扱いは [アーキテクチャ設計](architecture.md) の「削除の可否判定」が正本）。
+
+保存（PhotoKit 側）が成立した後、手順 3（`delivered` への更新・`DeliveryAttempt` の削除）をタスクのキャンセルで取りやめてはならない。手順 4（失敗時の `previousState` への復元・`DeliveryAttempt` の削除）も同様に、呼び出し元のタスクキャンセルで取りやめてはならない。実装は、呼び出し元のキャンセルが直列キューの op 内部へ伝播していても、手順 3・4 の DB 反映をキャンセル非伝播のコンテキストで完走させる。
 
 ```swift
 /// 写真ライブラリ保存の結果が不明であることの記録。runtime 側のテーブル

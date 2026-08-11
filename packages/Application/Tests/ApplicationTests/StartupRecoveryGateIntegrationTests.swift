@@ -16,22 +16,7 @@ import Domain
 
 private struct Boom: Error, Equatable {}
 
-/// テスト専用の一回限りの非同期ゲート（SerialTaskQueueTests.swift と同じ方針の複製）。
-private actor OneShotGate {
-    private var isOpen = false
-    private var continuation: CheckedContinuation<Void, Never>?
-
-    func wait() async {
-        if isOpen { return }
-        await withCheckedContinuation { continuation = $0 }
-    }
-
-    func open() {
-        isOpen = true
-        continuation?.resume()
-        continuation = nil
-    }
-}
+// OneShotGate は TestSupport.swift へ集約した（Issue #7 レビュー第2ラウンド S-2）。
 
 @Test(
     "復旧手順の変更系操作は共有SerialTaskQueue経由であり、キューが埋まっていれば完了まで足止めされる",

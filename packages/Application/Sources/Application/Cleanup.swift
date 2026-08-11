@@ -50,6 +50,12 @@ public func runCleanupPreservingError(
 /// キャンセルされていても、ここで包んだ処理はキャンセルされていない文脈で実行される。
 /// 処理自体が失敗すればそのエラーはそのまま伝播する。
 ///
+/// 内部の `Task {}` は呼び出し元の actor 隔離も継承しない。`ExportCoordinator` の private
+/// メソッドだった頃は呼び出し元 actor の隔離を継承していたが、この nonisolated なフリー関数へ
+/// 移設した現在は継承しない。呼び出し元がいずれも `@Sendable` クロージャを渡す現在の2経路
+/// （`ExportCoordinator+Generate.swift` / `OutputDeliveryCoordinator.swift`）では結果は
+/// 変わらないが、actor 上で走ると誤解しないこと。
+///
 /// 呼び出し元が既に `SerialTaskQueue.run` の op の内側にいる場合、ここで queue を
 /// 取り直してはならない（自己デッドロックする。呼び出し元がキューを保持したまま
 /// 完了を待っているため、同じキューへ新たな `run` を投入しても実行順が回ってこない）。
