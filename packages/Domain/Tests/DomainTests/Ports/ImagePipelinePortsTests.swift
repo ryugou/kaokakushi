@@ -301,3 +301,39 @@ func faceDetectorMinimalConformancePassesSourceAndReturnsResult() async throws {
     #expect(received.count == 1)
     #expect(received.first?.file == source.file)
 }
+
+// MARK: - PickedPhotoLoader（image-pipeline.md 5章「プロトコルのシグネチャ」）
+
+private actor MinimalPickedPhotoLoader: PickedPhotoLoader {
+    private(set) var receivedFiles: [ManagedFileRef] = []
+    private let photo: LoadedPhoto
+
+    init(photo: LoadedPhoto) {
+        self.photo = photo
+    }
+
+    func load(_ file: ManagedFileRef) async throws -> LoadedPhoto {
+        receivedFiles.append(file)
+        return photo
+    }
+}
+
+@Test("PickedPhotoLoaderへの最小準拠がloadへ渡されたManagedFileRefを記録し戻り値を返す")
+func pickedPhotoLoaderMinimalConformancePassesFileAndReturnsPhoto() async throws {
+    let capture = OriginalCaptureMetadata(
+        dateTimeOriginal: "2026:08:11 09:30:00",
+        subSecTimeOriginal: nil,
+        offsetTimeOriginal: "+09:00",
+        utcMillis: 1_754_872_200_000
+    )
+    let expected = LoadedPhoto(source: makeImageSource(), capture: capture)
+    let subject = MinimalPickedPhotoLoader(photo: expected)
+    let file = ManagedFileRef(kind: .processingTemporary, fileID: ManagedFileID(rawValue: UUID()))
+
+    let actual = try await subject.load(file)
+
+    #expect(actual.source.file == expected.source.file)
+    #expect(actual.capture == capture)
+    let received = await subject.receivedFiles
+    #expect(received == [file])
+}
