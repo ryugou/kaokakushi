@@ -311,3 +311,52 @@ private func awaitRecoveryCompletedCancellationDoesNotAffectOtherWaiters() async
     _ = try await recovery.value
     try await survivingWaiter.value
 }
+
+// あわせて対応（Issue #7 受け渡し後始末のキャンセルシールド横展開 spec）: 上のテストは
+// 「待機に入ってからキャンセルされた」経路しか見ていない。ここでは「awaitRecoveryCompleted
+// の呼び出し自体が既にキャンセル済みのタスクから行われた」経路を検証する。
+// withTaskCancellationHandler は、operation（withCheckedThrowingContinuation）の実行前に
+// 既にタスクがキャンセル済みなら、onCancel ハンドラを operation の前に呼びうる。この場合
+// onCancel は cancelWaiter(waiterID) を非構造化 Task で起動するが、waiters[waiterID] への
+// 登録自体はまだ行われていない可能性がある。現行実装が waiters 登録より前に cancelWaiter が
+// 先着しても安全（登録側が actor の排他により必ず後から追いつき、その後キャンセルが解決される）
+// なのは、cancelWaiter が actor-isolated であり、登録処理（withCheckedThrowingContinuation の
+// クロージャ）自体が既に actor の排他区間の中で同期的に実行されるためである。
+@Test(
+    "呼び出し時点で既にキャンセル済みならCancellationErrorで即座に抜け、他の待機者には影響しない",
+    .timeLimit(.minutes(1))
+)
+private func awaitRecoveryCompletedAlreadyCancelledAtEntryThrowsImmediately() async throws {
+    let exportSagaStore = FakeExportSagaStore()
+    let outputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock())
+    let gate = OneShotGate()
+    let (reachedHookStream, reachedHookContinuation) = AsyncStream<Void>.makeStream()
+    var reachedHookIterator = reachedHookStream.makeAsyncIterator()
+    let coordinator = makeCoordinator(
+        exportSagaStore: exportSagaStore,
+        outputDeliveryStore: outputDeliveryStore,
+        updateGuidanceHook: {
+            reachedHookContinuation.yield(())
+            await gate.wait()
+        }
+    )
+
+    let recovery = Task { try await coordinator.runStartupRecovery() }
+    _ = await reachedHookIterator.next()
+
+    // Task生成直後、本体（awaitRecoveryCompletedの呼び出し）が実行を始める前にcancel()する
+    // ことで、「呼び出し時点で既にキャンセル済み」を再現する。
+    let alreadyCancelledWaiter = Task { try await coordinator.awaitRecoveryCompleted() }
+    alreadyCancelledWaiter.cancel()
+
+    await #expect(throws: CancellationError.self) {
+        try await alreadyCancelledWaiter.value
+    }
+
+    let survivingWaiter = Task { try await coordinator.awaitRecoveryCompleted() }
+    for _ in 0..<5 { await Task.yield() }
+
+    await gate.open()
+    _ = try await recovery.value
+    try await survivingWaiter.value
+}

@@ -185,15 +185,24 @@ actor FakeMediaSaver: MediaSaver {
     /// 注入可能な失敗。設定しなければ常に成功する（MediaSaver.saveToPhotoLibrary は戻り値を
     /// 持たないため「未設定」を区別する必要が無い）
     var failure: Error?
+    /// 呼び出し中に注入する遅延（ナノ秒）。0 のままなら遅延しない。テストが呼び出しの
+    /// 実行中（`Task.sleep` で中断している間）に外側の Task をキャンセルする猶予を作るための
+    /// フック（ExportCoordinatorGenerateTests.swift の
+    /// FakeImageEffectRenderer.setDelayNanoseconds と同じ方針）。
+    var delayNanoseconds: UInt64 = 0
 
     init() {}
 
     // MARK: - 失敗注入セッター（actor 隔離のため外部から直接代入できない。Issue #7 Task 4 準備）
 
     func setFailure(_ value: Error?) { failure = value }
+    func setDelayNanoseconds(_ value: UInt64) { delayNanoseconds = value }
 
     func saveToPhotoLibrary(_ file: OutputFile) async throws {
         calls.append(file)
+        if delayNanoseconds > 0 {
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
+        }
         if let failure { throw failure }
     }
 }

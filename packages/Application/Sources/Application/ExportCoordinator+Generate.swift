@@ -69,7 +69,7 @@ extension ExportCoordinator {
             // 操作は単一のグローバル直列キュー1本で直列化する」を満たすため、ここは queue.run
             // 経由にする。
             try await runCleanupPreservingError(cause: error) {
-                try await self.runShieldedFromCancellation {
+                try await runShieldedFromCancellation {
                     try await self.queue.run {
                         try await self.exportSagaStore.discardExport(input.job.exportID, temporaryFiles: [])
                     }
@@ -141,23 +141,13 @@ extension ExportCoordinator {
             // discardExport を queue.run 経由で呼ぶと自己デッドロックする。直接呼び出しの
             // ままにする（generateOutput 側の外側 catch とは対称にしない）。
             try await runCleanupPreservingError(cause: error) {
-                try await self.runShieldedFromCancellation {
+                try await runShieldedFromCancellation {
                     try await self.exportSagaStore.discardExport(
                         input.job.exportID, temporaryFiles: temporaryFilesSnapshot
                     )
                 }
             }
         }
-    }
-
-    /// キャンセル済みのタスクコンテキストであっても、渡した処理を最後まで実行させるための
-    /// シールド（Important 1 / Important 2）。非構造化 `Task` は親のキャンセル状態を
-    /// 継承しないため、呼び出し元がキャンセルされていても、ここで包んだ処理はキャンセル
-    /// されていない文脈で実行される。処理自体が失敗すればそのエラーはそのまま伝播する。
-    private func runShieldedFromCancellation<T: Sendable>(
-        _ operation: @Sendable @escaping () async throws -> T
-    ) async throws -> T {
-        try await Task { try await operation() }.value
     }
 
     /// `ImageEffectRenderer.render` の `rasterAssets` 引数は bitmapID キーの辞書

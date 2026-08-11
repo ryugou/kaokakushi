@@ -15,7 +15,11 @@ import Domain
 // 不明のまま残る。7.0「保存の結果不明」と同じ状況を起動時解決に委ねるため、ここで
 // previousState へ戻してはならない）。saveToPhotoLibrary 失敗時の abandonDeliveryAttempt
 // 自体が失敗しても、保存失敗の真因を失わない（レビュー第2ラウンド A。Cleanup.swift の
-// runCleanupPreservingError を経由する）。
+// runCleanupPreservingError を経由する）。abandonDeliveryAttempt は
+// runShieldedFromCancellation（Cleanup.swift）で包み、呼び出し元のキャンセルが
+// SerialTaskQueue.onCancel 経由で op 内部へ伝播していても後始末の DB 書き込みを完走させる
+// （受け渡し後始末のキャンセルシールド横展開。同型の後始末は
+// ExportCoordinator+Generate.swift の discardExport に既にある）。
 //
 // 共有には DeliveryAttempt を作らない（7.0「共有には DeliveryAttempt を作らない」。結果が
 // 同期的に返るため中断点が無い）。SharePresenter.share は外部 UI 提示であり店（store）を
@@ -68,6 +72,16 @@ public actor OutputDeliveryCoordinator {
     /// 写真ライブラリへ保存する（export-saga.md 7.0 表 手順1〜4）。保存が失敗した場合の
     /// abandonDeliveryAttempt 自体の失敗で、保存失敗の真因が置き換わらないよう
     /// `runCleanupPreservingError`（Cleanup.swift。レビュー第2ラウンド A）を経由する。
+    ///
+    /// この catch は既に `queue.run` の op の内側で実行されている。`SerialTaskQueue.run` の
+    /// `onCancel: { current.cancel() }`（SerialTaskQueue.swift）が呼び出し元のキャンセルを
+    /// op 内部へ明示的に伝播させるため、ここへ来た時点で既にタスクがキャンセル済みでありうる。
+    /// `abandonDeliveryAttempt` は DB 書き込みを伴い、キャンセル済み文脈では失敗しうる
+    /// （GRDB の DatabaseWriter は task キャンセル時に CancellationError を throw する契約）ため、
+    /// `runShieldedFromCancellation`（Cleanup.swift）でキャンセル非伝播のコンテキストへ包む
+    /// （ExportCoordinator+Generate.swift の discardExport と同型。受け渡し後始末のキャンセル
+    /// シールド横展開）。ここで `queue.run` を取り直してはならない（既に op の内側にいるため
+    /// 自己デッドロックする）。
     public func saveToPhotoLibrary(_ output: OutputRecord) async throws {
         try await recoveryGate.awaitRecoveryCompleted()
         try await queue.run {
@@ -76,7 +90,9 @@ public actor OutputDeliveryCoordinator {
                 try await self.mediaSaver.saveToPhotoLibrary(self.outputFile(for: output))
             } catch {
                 try await runCleanupPreservingError(cause: error) {
-                    try await self.outputDeliveryStore.abandonDeliveryAttempt(output.exportID)
+                    try await runShieldedFromCancellation {
+                        try await self.outputDeliveryStore.abandonDeliveryAttempt(output.exportID)
+                    }
                 }
             }
             try await self.outputDeliveryStore.completeLibrarySave(output.exportID)

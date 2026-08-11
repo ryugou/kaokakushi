@@ -205,6 +205,43 @@ private func saveFailureSurvivesAbandonFailure() async throws {
     #expect(await outputDeliveryStore.completeLibrarySaveCalls.isEmpty)
 }
 
+@Test(
+    "保存中に呼び出し元がキャンセルされてもabandonDeliveryAttemptはシールドされ完走しDeliveryAttemptが残らない",
+    .timeLimit(.minutes(1))
+)
+private func saveCancellationDuringMediaSaverStillAbandonsAttemptAndPropagatesSaveFailure() async throws {
+    let exportID = makeExportID()
+    let output = makeOutputRecord(exportID: exportID, state: .generated)
+    let outputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock())
+    await outputDeliveryStore.seedOutput(output)
+    await outputDeliveryStore.setAbandonDeliveryAttemptChecksCancellation(true)
+    let mediaSaver = FakeMediaSaver()
+    await mediaSaver.setFailure(SaveBoom())
+    // saveToPhotoLibrary呼び出し中（Task.sleepで中断している間）に外側のTaskをキャンセルする
+    // 猶予を作る（ExportCoordinatorGenerateTests.swiftのcancellationAfterRenderと同じ手法）。
+    await mediaSaver.setDelayNanoseconds(20_000_000)
+    let sharePresenter = await FakeSharePresenter()
+    let coordinator = makeCoordinator(
+        outputDeliveryStore: outputDeliveryStore, mediaSaver: mediaSaver, sharePresenter: sharePresenter
+    )
+
+    let saveTask = Task<Void, Error> {
+        try await coordinator.saveToPhotoLibrary(output)
+    }
+    while await mediaSaver.calls.isEmpty {
+        await Task.yield()
+    }
+    saveTask.cancel()
+
+    await #expect(throws: SaveBoom.self) {
+        try await saveTask.value
+    }
+
+    #expect(await outputDeliveryStore.abandonDeliveryAttemptCalls == [exportID])
+    #expect(await outputDeliveryStore.hasActiveAttempt(for: exportID) == false)
+    #expect(await outputDeliveryStore.outputSnapshot(for: exportID)?.state == .generated)
+}
+
 // MARK: - 共有
 
 @Test("共有がcompletedならcompleteShareを呼びdeliveredへ写像しattemptは作らない")

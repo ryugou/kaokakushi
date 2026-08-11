@@ -48,6 +48,15 @@ actor FakeOutputDeliveryStore: OutputDeliveryStore {
     var clearUnknownLibrarySaveFailure: Error?
     var deleteOutputFailure: Error?
 
+    /// true の間、abandonDeliveryAttempt は呼び出された瞬間の `Task.isCancelled` を検査し、
+    /// true なら何もせず `CancellationError` を throw する。実ストア
+    /// （OutputDeliveryStoreLive+Attempt.swift の dbQueue.write）がキャンセル済み文脈で
+    /// 必ず失敗する実装になっているかを模し、呼び出し元（OutputDeliveryCoordinator）が
+    /// 後始末をキャンセル非伝播のコンテキストで実行しているかを検証するためのフック
+    /// （`FakeExportSagaStore.discardExportChecksCancellation` と同型。既定 false では
+    /// 既存の振る舞いを変えない。受け渡し後始末のキャンセルシールド横展開の回帰テスト用）。
+    var abandonDeliveryAttemptChecksCancellation = false
+
     // MARK: - in-memory 状態
 
     private var outputs: [ExportID: OutputRecord] = [:]
@@ -69,6 +78,7 @@ actor FakeOutputDeliveryStore: OutputDeliveryStore {
     func setLoadUnknownLibrarySavesFailure(_ value: Error?) { loadUnknownLibrarySavesFailure = value }
     func setClearUnknownLibrarySaveFailure(_ value: Error?) { clearUnknownLibrarySaveFailure = value }
     func setDeleteOutputFailure(_ value: Error?) { deleteOutputFailure = value }
+    func setAbandonDeliveryAttemptChecksCancellation(_ value: Bool) { abandonDeliveryAttemptChecksCancellation = value }
 
     /// テストが任意状態の OutputRecord を注入する（settledAt の有無・state を含めて呼び出し側が決める）
     func seedOutput(_ record: OutputRecord) {
@@ -114,6 +124,12 @@ actor FakeOutputDeliveryStore: OutputDeliveryStore {
     }
 
     func abandonDeliveryAttempt(_ exportID: ExportID) async throws {
+        // 呼び出し記録より前に検査する: シールドされていない実装だと、この throw により
+        // abandonDeliveryAttemptCalls に記録すら残らない（FakeExportSagaStore.discardExport
+        // と同型の検査順序）。
+        if abandonDeliveryAttemptChecksCancellation {
+            try Task.checkCancellation()
+        }
         abandonDeliveryAttemptCalls.append(exportID)
         if let failure = abandonDeliveryAttemptFailure { throw failure }
         let attempt = try consumeActiveAttempt(for: exportID)
