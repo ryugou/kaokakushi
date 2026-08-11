@@ -1060,7 +1060,7 @@ struct AttachWorkingSourceInput: Sendable {
 
 ##### 実体の存在確認
 
-**`WorkingSourceRecord`（`app.db` の平文行）がファイル参照とメタデータを持ち、実体を開くときはファイルの存在確認のみ行います。** 存在しなければ `WorkingSourceStore.invalidateWorkingSource(projectID)` を呼びます。**単一 DB トランザクション**で `WorkingSourceRecord` の削除・対象キュー項目の `paused(.sourceReselectionRequired)` への更新・欠損したファイル参照の `PendingFileDeletion` への登録を原子的に行い、再選択の導線を出します（起動時と書き出し開始時の 2 回確認します。呼び出し主体は `SourceImportCoordinator`）。`FaceDetector` / `ImageEffectRenderer` は通常の `ImageSource`（上記「境界型」）を受け取ります（プロトコル宣言は上記「プロトコルのシグネチャ」）。
+**`WorkingSourceRecord`（`app.db` の平文行）がファイル参照とメタデータを持ち、実体を開くときは `ManagedFileStore.exists(_:)`（[アーキテクチャ設計](architecture.md) の 7.3「スコープ付きアクセス」）で存在確認のみ行います。** `exists` が `false` を返した場合だけ `WorkingSourceStore.invalidateWorkingSource(projectID)` を呼びます。存在確認そのものが失敗した場合（保護データ利用不可・I/O 障害など）は `exists` が throw するため、欠損とは扱わず再選択導線へも倒しません。**単一 DB トランザクション**で `WorkingSourceRecord` の削除・対象キュー項目の `paused(.sourceReselectionRequired)` への更新・欠損したファイル参照の `PendingFileDeletion` への登録を原子的に行い、再選択の導線を出します（起動時と書き出し開始時の 2 回確認します。呼び出し主体は `SourceImportCoordinator`）。`FaceDetector` / `ImageEffectRenderer` は通常の `ImageSource`（上記「境界型」）を受け取ります（プロトコル宣言は上記「プロトコルのシグネチャ」）。
 
 ##### 照合に使ってよいもの・使ってはいけないもの
 

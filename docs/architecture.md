@@ -214,7 +214,7 @@ Swift 6 の strict concurrency を有効にします。
 
 ### 4.2 排他区間の実装規則
 
-**`actor` は再入可能であり、単独では「読み取りから保存完了まで」の論理的クリティカルセクションを保持できない**（`await` で中断すると同じ actor のメソッドへ別の呼び出しが入り、FIFO も保証されない）。**変更を伴うすべての操作（書き出し・受け渡し状態の更新・素材の選択替え・履歴削除）は、単一のグローバル直列キュー 1 本（v1 は並列数 1）で直列化する**（ADR 0005）。同時に処理する項目は常に 1 件とし、次の項目はキューの前が完了してから着手する。**読み取りとプレビュー描画はキューを経由しない**（変更を伴わないため直列化の対象外）。**`OutputDeliveryCoordinator` の受け渡し操作（`beginDeliveryAttempt` / `completeLibrarySave` / `completeShare` / `abandonDeliveryAttempt` 等）もこの同じグローバルキューを使う**（専用の per-exportID キューは持たない。共有シート表示など利用者操作待ちの間も、他の変更系操作はキューで待機する。v1 は並列数 1 のため許容する）。
+**`actor` は再入可能であり、単独では「読み取りから保存完了まで」の論理的クリティカルセクションを保持できない**（`await` で中断すると同じ actor のメソッドへ別の呼び出しが入り、FIFO も保証されない）。**変更を伴うすべての操作（書き出し・受け渡し状態の更新・素材の選択替え・履歴削除）は、単一のグローバル直列キュー 1 本（v1 は並列数 1）で直列化する**（ADR 0005）。同時に処理する項目は常に 1 件とし、次の項目はキューの前が完了してから着手する。**読み取りとプレビュー描画はキューを経由しない**（変更を伴わないため直列化の対象外）。**`OutputDeliveryCoordinator` の受け渡し操作（`beginDeliveryAttempt` / `completeLibrarySave` / `completeShare` / `abandonDeliveryAttempt` 等）もこの同じグローバルキューを使う**（専用の per-exportID キューは持たない。ただし `SharePresenter.share` の提示自体はキューを保持しない（利用者操作待ちの間に他の変更系操作を止めないため。共有の提示は `app.db` を変更しない）。結果を受けての `completeShare` だけがキューを経由する）。
 
 **キャンセル**は「キュー投入前」と「キューから取り出して処理を開始する直前」の 2 箇所で `Task.checkCancellation()` を確認する。**生成（書き出し）は何も消費しないため、キャンセルはどの時点でも `ExportJob` 行の削除という一律の後始末で足りる**（ADR 0006）。生成後の出力確認画面での「やり直す」「完了」は明示的な操作であり `CancellationError` としては扱わない（[書き出し Saga](export-saga.md) が正本）。`CancellationError` は業務エラーとして扱わず、Sentry へは送らない（9.1）。
 
@@ -684,12 +684,12 @@ func canEdit(
 ) -> Bool
 ```
 
-**`RenderSpec` を直接受け取らない**（判定に必要なのはスタンプの必要能力だけであり座標や強度は無関係。同じ判定規則〈`premium` は `canUsePremiumStamps`、`custom` は `canUseCustomStamps`、`unknownBuiltIn` は否〉を書き出し認可の `authorizeRenderSpec`〈同 1.3〉と共有し、UI と認可で判定を一致させる。一致は契約テストで固定する）。
+**`RenderSpec` を直接受け取らない**（判定に必要なのはスタンプの必要能力だけであり座標や強度は無関係。同じ判定規則〈`premium` は `canUsePremiumStamps`、`custom` は `canUseCustomStamps`、`unknownBuiltIn` は否〉を書き出し認可の `authorizeRenderSpec`〈同 1.2〉と共有し、UI と認可で判定を一致させる。一致は契約テストで固定する）。
 
 判定規則（要求能力の対応は [書き出し Saga](export-saga.md) 1.2 の表、プランごとの能力は 6.2 の能力導出表が正本）。
 
 - `canEdit`: `premium` は `canUsePremiumStamps`、`custom` は `canUseCustomStamps` で判定する。**`unknownBuiltIn` を含む場合は常に否**（どの能力でも解消しない。認可側の `unknownBuiltInStampCode` と同じ安全側）
-- `requiredPlan`: `premium` または `custom` を含めば `standard`、いずれも無ければ `free`（スタンプ能力は `standard` と `pro` で同一のため `pro` を要求する組み合わせは存在しない）。`unknownBuiltIn` は課金で解消しないため対象外（Paywall を提示しない。同 1.3）
+- `requiredPlan`: `premium` または `custom` を含めば `standard`、いずれも無ければ `free`（スタンプ能力は `standard` と `pro` で同一のため `pro` を要求する組み合わせは存在しない）。`unknownBuiltIn` は課金で解消しないため対象外（Paywall を提示しない。同 1.2）
 
 **`requiredPlan` の戻り値で可否を決めない**（プラン名の比較だと `status = pending` が素通りする）。作成時のプランで判定すると、Standard 時代に作ったプロジェクトが Free で編集できないのに同じ元写真を選び直せば Free の機能で同じものを作れるという説明のつかない差が生まれるため、現在の設定内容で判定する。
 
@@ -1398,6 +1398,9 @@ protocol ManagedFileStore: Sendable {
     ) async throws -> (ref: ManagedFileRef, result: R)
 
     func delete(_ ref: ManagedFileRef) async throws
+
+    /// 実体の存在確認のみを行う（スコープ付きアクセスは取得しない）
+    func exists(_ ref: ManagedFileRef) async throws -> Bool
 }
 ```
 
@@ -1407,6 +1410,8 @@ protocol ManagedFileStore: Sendable {
 | 保護データ利用不可 | `withReadAccess` が `ProtectedDataAvailability` を確認し、`unavailable` なら専用エラーを投げる（7.4） |
 | 存在しない `ref` | エラー。空ファイルを作らない |
 | `createFile` の失敗 | `ref` を返さない。一時ファイルは削除するか孤児 GC へ |
+| `exists` の戻り値 | 実体が無ければ `false` を返す |
+| `exists` の失敗 | 存在確認そのものが失敗した場合（保護データ利用不可・I/O 障害など）は throw する。呼び出し側はこれを「欠損」として扱ってはならない（実在する素材の不可逆な削除につながるため）。`withReadAccess` を実体確認に流用しない理由でもある |
 
 ##### 種別つきの参照
 

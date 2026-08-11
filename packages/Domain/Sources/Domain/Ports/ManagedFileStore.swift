@@ -30,4 +30,12 @@ public protocol ManagedFileStore: Sendable {
     ) async throws -> (ref: ManagedFileRef, result: R)
 
     func delete(_ ref: ManagedFileRef) async throws
+
+    /// 実体の存在確認のみを行う（スコープ付きアクセスは取得しない。image-pipeline.md
+    /// 「実体の存在確認」）。
+    /// - 実体が無ければ `false` を返す
+    /// - 存在確認そのものが失敗した場合（保護データ利用不可・I/O 障害など）は throw する。
+    ///   呼び出し側はこれを「欠損」として扱ってはならない（実在する素材の不可逆な削除に
+    ///   つながるため）
+    func exists(_ ref: ManagedFileRef) async throws -> Bool
 }
