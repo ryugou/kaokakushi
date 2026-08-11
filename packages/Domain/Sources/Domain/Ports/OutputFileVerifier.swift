@@ -1,7 +1,8 @@
 import Foundation
 
-// OutputFileVerifier — 本計画で新設するポート（正本の image-pipeline.md /
-// export-saga.md / architecture.md いずれにも存在しない）。
+// OutputFileVerifier — 正本は export-saga.md 0章「Application が使う永続化ポート」の
+// コードブロック（`protocol OutputFileVerifier: Sendable { ... }`）。3章 手順3・6章からも
+// `OutputFileVerifier.verify` が参照されている。
 //
 // export-saga.md 3章「手順」の手順3（健全性確認: 存在確認・サイズ0でないこと・簡易デコード
 // 成功の確認。いずれかが不成立なら手順4へ進まず中断として扱う）と、手順4の入力である
