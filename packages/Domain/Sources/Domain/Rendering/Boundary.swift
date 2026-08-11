@@ -15,7 +15,8 @@ import Foundation
 // `OutputMetadata` と `ImageEffectRenderer` / `ImageEncoder` 等のプロトコルは
 // Ports/ImagePipeline.swift ほか Ports/ 配下へ追加済み（Issue #7 Task 1）。
 // `SourceRepresentation` は Ports/WorkingSourceStore.swift に実装済み。
-// `PickedPhotoLoader` / `FaceDetector` はサブプロジェクト5で追加する（未追加）。
+// `PickedPhotoLoader` / `FaceDetector` は Ports/ImagePipeline.swift に実装済み
+// （サブプロジェクト5 A1）。
 // `StampRasterizer` と `RasterizedStampAsset` は Rendering/StampRasterizer.swift に
 // 実装済み（3 章）。
 
