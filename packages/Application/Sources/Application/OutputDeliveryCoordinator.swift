@@ -79,6 +79,10 @@ public actor OutputDeliveryCoordinator {
     /// 保存が成立した後に呼び出し元のタスクがキャンセルされても throw せず、成功として
     /// 正常 return する（`completeLibrarySave` へのシールドにより DB 反映を完走させるため）。
     /// 呼び出し元はキャンセルを再保存の要求根拠にしてはならない（写真ライブラリへの重複を作る）。
+    /// `mediaSaver.saveToPhotoLibrary` 自身がキャンセル起因で throw した場合も同様に扱う。
+    /// PhotoKit 側で書き込みが成立したかは判別できないまま `abandonDeliveryAttempt` により
+    /// `DeliveryAttempt` が削除される（結果不明の痕跡は残らない）。
+    /// この throw も自動再保存の要求根拠にしてはならない（同じく重複を作る）。
     ///
     /// この catch・後続の completeLibrarySave 呼び出しは、いずれも既に `queue.run` の op の
     /// 内側で実行されている。`SerialTaskQueue.run` の `onCancel: { current.cancel() }`
