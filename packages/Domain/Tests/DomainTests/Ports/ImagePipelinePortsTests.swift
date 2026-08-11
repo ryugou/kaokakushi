@@ -267,3 +267,37 @@ func fakeOutputFileVerifierForwardsArgumentAndReturnsMeasurement() async throws 
     let calls = await verifier.verifyCalls
     #expect(calls == [ref])
 }
+
+// MARK: - FaceDetector（image-pipeline.md 5章「プロトコルのシグネチャ」）
+
+private actor MinimalFaceDetector: FaceDetector {
+    private(set) var receivedSources: [ImageSource] = []
+    private let result: DetectionResult
+
+    init(result: DetectionResult) {
+        self.result = result
+    }
+
+    func detect(_ source: ImageSource) async throws -> DetectionResult {
+        receivedSources.append(source)
+        return result
+    }
+}
+
+@Test("FaceDetectorへの最小準拠がdetectへ渡されたImageSourceを記録し戻り値を返す")
+func faceDetectorMinimalConformancePassesSourceAndReturnsResult() async throws {
+    let expected = DetectionResult(
+        faces: [],
+        detectionPixelSize: PixelSize(width: 1920, height: 1440),
+        revision: FaceDetectorRevision(rawValue: 3)
+    )
+    let subject = MinimalFaceDetector(result: expected)
+    let source = makeImageSource()
+
+    let actual = try await subject.detect(source)
+
+    #expect(actual == expected)
+    let received = await subject.receivedSources
+    #expect(received.count == 1)
+    #expect(received.first?.file == source.file)
+}

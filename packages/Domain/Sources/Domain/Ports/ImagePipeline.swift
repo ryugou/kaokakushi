@@ -6,11 +6,16 @@ import Foundation
 // 実装は別サブプロジェクト（MediaKit）が担当する（アーキテクチャ設計 4.3。Application は
 // Domain のプロトコルのみに依存する）。
 //
-// `PickedPhotoLoader` / `FaceDetector` は同じ正本節にあるが、インポートフローは別サブ
-// プロジェクトの担当のためここには含めない（YAGNI。計画のスコープ外）。
+// `PickedPhotoLoader` / `FaceDetector` は素材取り込み（サブプロジェクト5）で使う。実装は
+// MediaKit が担当する。
 //
 // アクセス修飾（public）の方針は ExportSagaStore.swift と同じ（正本の疑似コードには現れないが、
 // Application 等の他パッケージが Domain の公開 API として参照するために必要）。
+
+/// image-pipeline.md「プロトコルのシグネチャ」節
+public protocol FaceDetector: Sendable {
+    func detect(_ source: ImageSource) async throws -> DetectionResult
+}
 
 /// image-pipeline.md「プロトコルのシグネチャ」節
 public protocol ImageEffectRenderer: Sendable {
