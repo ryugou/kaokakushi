@@ -141,9 +141,12 @@ func fakeImageEffectRendererForwardsArgumentsAndReturnsResult() async throws {
     let rendered = try await renderer.render(source: source, plan: plan, rasterAssets: [:])
 
     #expect(rendered.file == expected.file)
+    #expect(rendered.descriptor == expected.descriptor)
     let calls = await renderer.renderCalls
     #expect(calls.count == 1)
     #expect(calls[0].source.file == source.file)
+    #expect(calls[0].source.pixelSize == source.pixelSize)
+    #expect(calls[0].source.format == source.format)
     #expect(calls[0].rasterAssets.isEmpty)
 }
 
@@ -335,6 +338,8 @@ func pickedPhotoLoaderMinimalConformancePassesFileAndReturnsPhoto() async throws
     let actual = try await subject.load(file)
 
     #expect(actual.source.file == expected.source.file)
+    #expect(actual.source.pixelSize == expected.source.pixelSize)
+    #expect(actual.source.format == expected.source.format)
     #expect(actual.capture == capture)
     let received = await subject.receivedFiles
     #expect(received == [file])

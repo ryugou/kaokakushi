@@ -181,6 +181,8 @@ func pickedPhotoLoaderMinimalConformancePassesFileAndReturnsPhoto() async throws
     let actual = try await subject.load(file)
 
     #expect(actual.source.file == expected.source.file)
+    #expect(actual.source.pixelSize == expected.source.pixelSize)
+    #expect(actual.source.format == expected.source.format)
     #expect(actual.capture == capture)
     let received = await subject.receivedFiles
     #expect(received == [file])
