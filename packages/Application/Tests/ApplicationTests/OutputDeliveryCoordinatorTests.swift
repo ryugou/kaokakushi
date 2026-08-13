@@ -297,6 +297,10 @@ private func shareCompletedMapsToDeliveredWithoutAttempt() async throws {
     let result = try await coordinator.share(output)
 
     #expect(result == .completed)
+    // Issue #32 C-1: requireSettledがSharePresenterより前に、settledAt != nilの出力でも
+    // 呼ばれること（従来どおりSharePresenter→completeShareの順で進むことの確認）。
+    #expect(await outputDeliveryStore.requireSettledCalls == [exportID])
+    #expect(await MainActor.run { sharePresenter.calls.count } == 1)
     #expect(await outputDeliveryStore.completeShareCalls == [exportID])
     #expect(await outputDeliveryStore.beginDeliveryAttemptCalls.isEmpty)
     #expect(await outputDeliveryStore.outputSnapshot(for: exportID)?.state == .delivered)
@@ -322,7 +326,9 @@ private func shareNonCompletedKeepsCurrentState(_ shareResult: ShareResult) asyn
     #expect(await outputDeliveryStore.outputSnapshot(for: exportID)?.state == .generated)
 }
 
-@Test("settledAtがnilの出力への共有完了はストアの事前条件throwが伝播する")
+@Test(
+    "settledAtがnilの出力への共有はSharePresenterへ到達する前にストアの事前条件throwが伝播する（Issue #32 C-1）"
+)
 private func shareCompletedOnUnsettledOutputPropagatesStoreRejection() async throws {
     let exportID = makeExportID()
     let output = makeOutputRecord(exportID: exportID, state: .generated, settledAt: nil)
@@ -335,6 +341,11 @@ private func shareCompletedOnUnsettledOutputPropagatesStoreRejection() async thr
     await #expect(throws: FakeOutputDeliveryStoreError.outputNotSettled(exportID)) {
         try await coordinator.share(output)
     }
+
+    // C-1の核心: 未確定の出力は外部提示（SharePresenter）へ一度も到達してはならない
+    // （検査がSharePresenter呼び出しより前で完結していることの直接的な証拠）。
+    #expect(await MainActor.run { sharePresenter.calls.isEmpty })
+    #expect(await outputDeliveryStore.completeShareCalls.isEmpty)
 }
 
 @Test("completeShareのthrowが伝播する")

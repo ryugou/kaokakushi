@@ -30,6 +30,7 @@ actor FakeOutputDeliveryStore: OutputDeliveryStore {
 
     private(set) var beginDeliveryAttemptCalls: [ExportID] = []
     private(set) var completeLibrarySaveCalls: [ExportID] = []
+    private(set) var requireSettledCalls: [ExportID] = []
     private(set) var completeShareCalls: [ExportID] = []
     private(set) var abandonDeliveryAttemptCalls: [ExportID] = []
     private(set) var resolveOrphanedAttemptsCallCount = 0
@@ -41,6 +42,7 @@ actor FakeOutputDeliveryStore: OutputDeliveryStore {
 
     var beginDeliveryAttemptFailure: Error?
     var completeLibrarySaveFailure: Error?
+    var requireSettledFailure: Error?
     var completeShareFailure: Error?
     var abandonDeliveryAttemptFailure: Error?
     var resolveOrphanedAttemptsFailure: Error?
@@ -79,6 +81,7 @@ actor FakeOutputDeliveryStore: OutputDeliveryStore {
 
     func setBeginDeliveryAttemptFailure(_ value: Error?) { beginDeliveryAttemptFailure = value }
     func setCompleteLibrarySaveFailure(_ value: Error?) { completeLibrarySaveFailure = value }
+    func setRequireSettledFailure(_ value: Error?) { requireSettledFailure = value }
     func setCompleteShareFailure(_ value: Error?) { completeShareFailure = value }
     func setAbandonDeliveryAttemptFailure(_ value: Error?) { abandonDeliveryAttemptFailure = value }
     func setResolveOrphanedAttemptsFailure(_ value: Error?) { resolveOrphanedAttemptsFailure = value }
@@ -127,6 +130,14 @@ actor FakeOutputDeliveryStore: OutputDeliveryStore {
         if let failure = completeLibrarySaveFailure { throw failure }
         try consumeActiveAttempt(for: exportID)
         setState(.delivered, for: exportID)
+    }
+
+    /// 共有の開始前に呼ぶ検査専用API（Issue #32 C-1）。completeShareと同じ settledOutput(for:)
+    /// を再利用し、判定ロジックを二重に持たない。状態は変更しない。
+    func requireSettled(_ exportID: ExportID) async throws {
+        requireSettledCalls.append(exportID)
+        if let failure = requireSettledFailure { throw failure }
+        _ = try settledOutput(for: exportID)
     }
 
     func completeShare(_ exportID: ExportID) async throws {

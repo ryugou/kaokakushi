@@ -64,6 +64,15 @@ public protocol OutputDeliveryStore: Sendable {
     func beginDeliveryAttempt(_ exportID: ExportID) async throws
     /// delivered への更新と attempt 削除を単一トランザクションで
     func completeLibrarySave(_ exportID: ExportID) async throws
+    /// **共有（`SharePresenter`への外部提示）の開始前に呼ぶ。** `settledAt == nil` なら throw する。
+    /// `completeShare` と同じ事前条件を検査するだけの読み取り専用 API（`completeShare` は検査に
+    /// 加えて `delivered` への状態更新も行うため、外部提示より前の「検査だけ」には使えない。
+    /// Issue #32 C-1: 従来は外部提示の後で `completeShare` が検査していたため、未確定
+    /// （`settledAt == nil`）の出力でも共有シートが開いてしまっていた）。呼び出し元は引数の
+    /// `OutputRecord.settledAt` を信頼してはならない（stale でありうるため）。必ずこの API で
+    /// 権威あるストアへ問い合わせること（export-saga.md 7.0「共有には DeliveryAttempt を
+    /// 作らない」・7 章「利用者への受け渡し」）。
+    func requireSettled(_ exportID: ExportID) async throws
     /// 事前条件: settledAt != nil（nil なら throw）
     func completeShare(_ exportID: ExportID) async throws
     /// previousState へ戻す（現在が delivered なら維持）

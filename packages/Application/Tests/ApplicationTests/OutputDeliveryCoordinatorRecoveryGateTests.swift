@@ -7,9 +7,10 @@ import Domain
 // 起動時復旧ゲートを待つこと（Issue #7 Task 12）。
 //
 // 正本: architecture.md 4.3「起動時に1回のみ実行し、完了まで他のすべてを開始させない」。
-// ゲート待機は SerialTaskQueue へ投入する前に行う（spec 警告1）。share は提示自体（結果が
-// completed になるまで）はキューを保持しない（architecture.md 4.2）ため、ゲート待機も
-// completeShare 呼び出しの直前（completed 確定後）に置く。OutputDeliveryCoordinatorTests.swift
+// ゲート待機は SerialTaskQueue へ投入する前に行う（spec 警告1）。share は Issue #32 C-1 で
+// requireSettled（外部提示前の検査）が SharePresenter より前に入ったため、ゲート待機も
+// requireSettled 呼び出しの直前（SharePresenter 到達前）に置く。ShareResult.completed の場合は
+// completeShare 呼び出しの直前でも再度ゲートを待つ（従来どおり）。OutputDeliveryCoordinatorTests.swift
 // と同じ偽実装だけを注入し、FakeRecoveryGate で復旧未完了を模す。
 
 private func makeCoordinator(
@@ -54,7 +55,7 @@ private func saveToPhotoLibraryWaitsForRecoveryGateThenProceeds() async throws {
     #expect(await outputDeliveryStore.outputSnapshot(for: exportID)?.state == .delivered)
 }
 
-@Test("復旧未完了の間はcompleteShareへ進まず、完了後に共有を確定できる", .timeLimit(.minutes(1)))
+@Test("復旧未完了の間はrequireSettledへ進まずSharePresenterにも到達せず、完了後に共有を確定できる", .timeLimit(.minutes(1)))
 private func shareWaitsForRecoveryGateThenProceeds() async throws {
     let exportID = makeExportID()
     let output = makeOutputRecord(exportID: exportID, state: .generated)
@@ -69,14 +70,17 @@ private func shareWaitsForRecoveryGateThenProceeds() async throws {
 
     let task = Task { try await coordinator.share(output) }
     for _ in 0..<5 { await Task.yield() }
-    // 提示自体（SharePresenter.share）はゲートを待たずに進む（architecture.md 4.2）ため、
-    // completeShareだけが未達であることを確認する。
+    // Issue #32 C-1: requireSettled（外部提示前の検査）はSharePresenterより前に置いたため、
+    // ゲートが閉じている間はrequireSettledにもSharePresenterにも到達しない。
+    #expect(await outputDeliveryStore.requireSettledCalls.isEmpty)
+    #expect(await MainActor.run { sharePresenter.calls.isEmpty })
     #expect(await outputDeliveryStore.completeShareCalls.isEmpty)
 
     await gate.open()
     let result = try await task.value
 
     #expect(result == .completed)
+    #expect(await outputDeliveryStore.requireSettledCalls == [exportID])
     #expect(await outputDeliveryStore.outputSnapshot(for: exportID)?.state == .delivered)
 }
 
