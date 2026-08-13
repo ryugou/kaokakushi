@@ -50,7 +50,13 @@ public enum GenerateExportInputError: Error, Sendable, Equatable {
 extension ExportCoordinator {
     /// export-saga.md 3章 手順1〜4を実行する。途中のどの段階が失敗しても
     /// `exportSagaStore.discardExport` で後始末してから元のエラーを再 throw する（4章）。
+    ///
+    /// Issue #32 C-2: settleExport/settleBatch と同じ理由で、queue.run へ投入する前に
+    /// 復旧ゲートを待つ（cold start で起動時異常終了の残存 ExportJob に対して復旧より先に
+    /// generateOutput が到達しうるため。同一セッション内の開始経路ゲート済みだけでは
+    /// 前回セッションの残存行を守れない）。
     public func generateOutput(_ input: GenerateExportInput) async throws {
+        try await recoveryGate.awaitRecoveryCompleted()
         do {
             try await queue.run {
                 try await self.performGeneration(input)
@@ -81,8 +87,10 @@ extension ExportCoordinator {
     /// 「やり直す」・利用者によるキャンセル用の公開 API（export-saga.md 4章）。
     /// `exportSagaStore.discardExport` は冪等なため、同じ `exportID` への複数回呼び出しは
     /// エラーにならない。`temporaryFiles` は渡し忘れを型で検出できるよう既定値を持たない
-    /// （呼び出し元が明示する。reviewer 指摘 Suggestion 1）。
+    /// （呼び出し元が明示する。reviewer 指摘 Suggestion 1）。ゲートを待つ理由は
+    /// generateOutput と同じ（Issue #32 C-2）。
     public func discardExport(_ exportID: ExportID, temporaryFiles: [ManagedFileRef]) async throws {
+        try await recoveryGate.awaitRecoveryCompleted()
         try await queue.run {
             try await self.exportSagaStore.discardExport(exportID, temporaryFiles: temporaryFiles)
         }

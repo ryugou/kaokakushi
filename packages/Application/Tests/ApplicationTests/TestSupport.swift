@@ -215,7 +215,9 @@ func makeGenerateCoordinator(
     imageEncoder: FakeImageEncoder = FakeImageEncoder(),
     outputFileVerifier: FakeOutputFileVerifier,
     workingSourceStore: FakeWorkingSourceStore = FakeWorkingSourceStore(),
-    outputDeliveryStore: FakeOutputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock())
+    outputDeliveryStore: FakeOutputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock()),
+    queue: SerialTaskQueue = SerialTaskQueue(),
+    recoveryGate: RecoveryGate = FakeRecoveryGate()
 ) -> ExportCoordinator {
     ExportCoordinator(
         exportSagaStore: exportSagaStore,
@@ -227,10 +229,10 @@ func makeGenerateCoordinator(
         outputFileVerifier: outputFileVerifier,
         outputDeliveryStore: outputDeliveryStore,
         now: makeFixedClock(),
-        queue: SerialTaskQueue(),
+        queue: queue,
         exportedSettingsEntryStore: FakeExportedSettingsEntryStore(),
         settingsHashDigest: FakeSha256Digest(),
-        recoveryGate: FakeRecoveryGate()
+        recoveryGate: recoveryGate
     )
 }
 
