@@ -220,9 +220,14 @@ private func sharedQueueAvoidsSelfDeadlockForSettleRoutes(_ route: SettleRoute) 
         operation: {
             _ = try await fixture.blocking.value
             let report = try await fixture.recovery.value
-            // 復旧がゲートより先に完走し、残存ジョブ（cold start の想定）を削除している
-            // ことがこのテストの核心（Issue #32 C-2 が無ければ settle が先に到達し確定・
-            // 消費まで進んでしまう）。
+            // 復旧がゲートより先に完走し、残存ジョブ（cold start の想定）を削除する。
+            // ただしこの到達順は SerialTaskQueue の FIFO によるもので、recovery が
+            // settle より先にキューへ投入されるため C-2 のゲートの有無に関わらず
+            // 成立する（このテストはゲートの有無を区別しない）。ゲート自体は
+            // settleExportWaitsForRecoveryGateThenProceeds /
+            // settleBatchWaitsForRecoveryGateThenProceeds が固定する。ここで検証する
+            // のは、共有キューを外部opが占有し復旧がキュー操作を残した状態でも
+            // 自己デッドロックが起きないことである。
             #expect(report.deletedRunningJobCount == 1)
             // settle はゲートを待つため、routeTask は復旧完了後にのみ queue.run へ進む。
             // 対象ジョブは既に削除済みのため事前条件違反で拒否される（正しい挙動。誤って

@@ -212,7 +212,8 @@
 - 一度設定した `settledAt` は変更されないこと。二重に完了操作を呼んでも消費が重複しないこと
 - **`settleBatch` が結果一覧画面での完了操作 1 回で、対象バッチ内の確定対象の全出力を同一トランザクションで確定し、確定対象の枚数分だけクレジットを消費すること**（ADR 0006）
 - 完了操作の付近に「完了すると 1 枚として確定し、以降の作り直しは新しい 1 枚になる」旨が明示されること
-- 保存・共有が完了後にのみ行え、`beginDeliveryAttempt` / `completeLibrarySave` / `completeShare` が `settledAt != nil` を事前条件とすること（`nil` なら throw）
+- 保存・共有が完了後にのみ行え、`beginDeliveryAttempt` / `completeLibrarySave` / `requireSettled` / `completeShare` が `settledAt != nil` を事前条件とすること（`nil` なら throw）
+- **共有は外部提示（`SharePresenter`）へ到達する前に `requireSettled` で `settledAt != nil` を検査すること。未確定の出力では `SharePresenter` が一度も呼ばれないこと**
 - 保存・共有は何度実行しても追加消費せず、成否が枠に影響しないこと（失敗しても出力は保持され再試行できる）
 - **保存失敗時の `abandonDeliveryAttempt`・保存成功時の `completeLibrarySave` が、呼び出し元のタスクキャンセルが伝播した文脈でも完走し、`DeliveryAttempt` を残さないこと**（[書き出し Saga](export-saga.md) の 7.0）
 
