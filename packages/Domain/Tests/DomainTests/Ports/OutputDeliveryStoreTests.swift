@@ -151,6 +151,7 @@ func fakeOutputDeliveryStoreForwardsArguments() async throws {
 
     #expect(await store.beginDeliveryAttemptCalls == [beginID])
     #expect(await store.completeLibrarySaveCalls == [librarySaveID])
+    #expect(await store.requireSettledCalls == [requireSettledID])
     #expect(await store.completeShareCalls == [shareID])
     #expect(await store.abandonDeliveryAttemptCalls == [abandonID])
     #expect(await store.resolveOrphanedAttemptsCallCount == 1)
