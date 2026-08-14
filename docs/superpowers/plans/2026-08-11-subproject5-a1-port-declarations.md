@@ -37,7 +37,7 @@
 ```swift
 // MARK: - FaceDetector（image-pipeline.md 5章「プロトコルのシグネチャ」）
 
-private actor MinimalFaceDetector: FaceDetector {
+private actor FakeFaceDetector: FaceDetector {
     private(set) var receivedSources: [ImageSource] = []
     private let result: DetectionResult
 
@@ -58,7 +58,7 @@ func faceDetectorMinimalConformancePassesSourceAndReturnsResult() async throws {
         detectionPixelSize: PixelSize(width: 1920, height: 1440),
         revision: FaceDetectorRevision(rawValue: 3)
     )
-    let subject = MinimalFaceDetector(result: expected)
+    let subject = FakeFaceDetector(result: expected)
     let source = makeImageSource()
 
     let actual = try await subject.detect(source)
@@ -152,7 +152,7 @@ git commit -m "feat: FaceDetector ポートを宣言する (#8)"
 ```swift
 // MARK: - PickedPhotoLoader（image-pipeline.md 5章「プロトコルのシグネチャ」）
 
-private actor MinimalPickedPhotoLoader: PickedPhotoLoader {
+private actor FakePickedPhotoLoader: PickedPhotoLoader {
     private(set) var receivedFiles: [ManagedFileRef] = []
     private let photo: LoadedPhoto
 
@@ -175,7 +175,7 @@ func pickedPhotoLoaderMinimalConformancePassesFileAndReturnsPhoto() async throws
         utcMillis: 1_754_872_200_000
     )
     let expected = LoadedPhoto(source: makeImageSource(), capture: capture)
-    let subject = MinimalPickedPhotoLoader(photo: expected)
+    let subject = FakePickedPhotoLoader(photo: expected)
     let file = ManagedFileRef(kind: .processingTemporary, fileID: ManagedFileID(rawValue: UUID()))
 
     let actual = try await subject.load(file)
