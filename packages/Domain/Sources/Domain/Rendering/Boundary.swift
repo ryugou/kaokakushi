@@ -15,9 +15,10 @@ import Foundation
 // `OutputMetadata` と `ImageEffectRenderer` / `ImageEncoder` 等のプロトコルは
 // Ports/ImagePipeline.swift ほか Ports/ 配下へ追加済み（Issue #7 Task 1）。
 // `SourceRepresentation` は Ports/WorkingSourceStore.swift に実装済み。
-// `PickedPhotoLoader` / `FaceDetector` はサブプロジェクト5で追加する（未追加）。
-// `StampRasterizer` と `RasterizedStampAsset` は Rendering/StampRasterizer.swift に
-// 実装済み（3 章）。
+// `PickedPhotoLoader` / `FaceDetector` は Ports/ImagePipeline.swift に宣言済み
+// （サブプロジェクト5 A1）。実装は MediaKit が担当する。
+// `StampRasterizer` は Rendering/StampRasterizer.swift に宣言済み（3 章）。実装は
+// Rendering モジュールが担当する。`RasterizedStampAsset` は同ファイルに実装済み。
 
 /// 画像フォーマット。
 public enum ImageFormat: Sendable, Hashable {

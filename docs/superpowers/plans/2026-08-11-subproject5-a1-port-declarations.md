@@ -29,7 +29,7 @@
 - Consumes: `ImageSource`（`Rendering/Boundary.swift`）、`DetectionResult`（同）
 - Produces: `public protocol FaceDetector: Sendable { func detect(_ source: ImageSource) async throws -> DetectionResult }` — B2 の MediaKit 実装と、A2 の偽実装がこれに準拠する
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 `packages/Domain/Tests/DomainTests/Ports/ImagePipelinePortsTests.swift` の末尾に追記する。
 既存の `makeImageSource()`（同ファイル 15-18 行目）を再利用する。
@@ -37,7 +37,7 @@
 ```swift
 // MARK: - FaceDetector（image-pipeline.md 5章「プロトコルのシグネチャ」）
 
-private actor MinimalFaceDetector: FaceDetector {
+private actor FakeFaceDetector: FaceDetector {
     private(set) var receivedSources: [ImageSource] = []
     private let result: DetectionResult
 
@@ -58,7 +58,7 @@ func faceDetectorMinimalConformancePassesSourceAndReturnsResult() async throws {
         detectionPixelSize: PixelSize(width: 1920, height: 1440),
         revision: FaceDetectorRevision(rawValue: 3)
     )
-    let subject = MinimalFaceDetector(result: expected)
+    let subject = FakeFaceDetector(result: expected)
     let source = makeImageSource()
 
     let actual = try await subject.detect(source)
@@ -67,15 +67,20 @@ func faceDetectorMinimalConformancePassesSourceAndReturnsResult() async throws {
     let received = await subject.receivedSources
     #expect(received.count == 1)
     #expect(received.first?.file == source.file)
+    #expect(received.first?.pixelSize == source.pixelSize)
+    #expect(received.first?.format == source.format)
 }
 ```
 
-- [ ] **Step 2: テストが失敗することを確認する**
+`ImageSource` は `Equatable` に適合していないため、全フィールドをフィールド単位で比較する。
+`.file` だけの比較ではテスト名が主張する「ImageSource を記録」を裏付けられない。
+
+- [x] **Step 2: テストが失敗することを確認する**
 
 Run: `swift test --package-path packages/Domain --filter faceDetectorMinimalConformance`
 Expected: `cannot find type 'FaceDetector' in scope` でビルド失敗
 
-- [ ] **Step 3: プロトコルを宣言する**
+- [x] **Step 3: プロトコルを宣言する**
 
 `packages/Domain/Sources/Domain/Ports/ImagePipeline.swift` の `ImageEffectRenderer` の**前**に追記する
 （正本 5章の並び順に合わせる）。
@@ -87,7 +92,7 @@ public protocol FaceDetector: Sendable {
 }
 ```
 
-- [ ] **Step 4: 冒頭コメントを実態へ合わせる**
+- [x] **Step 4: 冒頭コメントを実態へ合わせる**
 
 同ファイル 9-10 行目の次の記述は、`FaceDetector` を宣言した時点で事実に反する。
 
@@ -105,12 +110,12 @@ public protocol FaceDetector: Sendable {
 
 Task 2 で `PickedPhotoLoader` も宣言するため、この文言はそのまま使える。
 
-- [ ] **Step 5: テストが通ることを確認する**
+- [x] **Step 5: テストが通ることを確認する**
 
 Run: `swift test --package-path packages/Domain --filter faceDetectorMinimalConformance`
 Expected: PASS
 
-- [ ] **Step 6: 全体の検証**
+- [x] **Step 6: 全体の検証**
 
 Run: `swift test --package-path packages/Domain`
 Expected: 全件 PASS（既存 340 件 + 1 件）
@@ -121,7 +126,7 @@ Expected: `0 violations`
 Run: `bash scripts/check-imports.sh`
 Expected: `OK`
 
-- [ ] **Step 7: コミット**
+- [x] **Step 7: コミット**
 
 ```bash
 git add packages/Domain/Sources/Domain/Ports/ImagePipeline.swift packages/Domain/Tests/DomainTests/Ports/ImagePipelinePortsTests.swift
@@ -140,14 +145,14 @@ git commit -m "feat: FaceDetector ポートを宣言する (#8)"
 - Consumes: `ManagedFileRef`（`Rendering/ManagedFileRef.swift`）、`LoadedPhoto`（`Rendering/Boundary.swift`）
 - Produces: `public protocol PickedPhotoLoader: Sendable { func load(_ file: ManagedFileRef) async throws -> LoadedPhoto }` — B4 の MediaKit 実装と、A2 の偽実装がこれに準拠する
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 同じテストファイルの末尾に追記する。
 
 ```swift
 // MARK: - PickedPhotoLoader（image-pipeline.md 5章「プロトコルのシグネチャ」）
 
-private actor MinimalPickedPhotoLoader: PickedPhotoLoader {
+private actor FakePickedPhotoLoader: PickedPhotoLoader {
     private(set) var receivedFiles: [ManagedFileRef] = []
     private let photo: LoadedPhoto
 
@@ -170,12 +175,14 @@ func pickedPhotoLoaderMinimalConformancePassesFileAndReturnsPhoto() async throws
         utcMillis: 1_754_872_200_000
     )
     let expected = LoadedPhoto(source: makeImageSource(), capture: capture)
-    let subject = MinimalPickedPhotoLoader(photo: expected)
+    let subject = FakePickedPhotoLoader(photo: expected)
     let file = ManagedFileRef(kind: .processingTemporary, fileID: ManagedFileID(rawValue: UUID()))
 
     let actual = try await subject.load(file)
 
     #expect(actual.source.file == expected.source.file)
+    #expect(actual.source.pixelSize == expected.source.pixelSize)
+    #expect(actual.source.format == expected.source.format)
     #expect(actual.capture == capture)
     let received = await subject.receivedFiles
     #expect(received == [file])
@@ -187,7 +194,7 @@ func pickedPhotoLoaderMinimalConformancePassesFileAndReturnsPhoto() async throws
 | 型 | 適合 | 比較方法 |
 | --- | --- | --- |
 | `LoadedPhoto` | `Sendable` のみ | フィールド単位で比較する（全体比較は不可） |
-| `ImageSource` | `Sendable` のみ | `.file` で比較する |
+| `ImageSource` | `Sendable` のみ | 全フィールド（`file` / `pixelSize` / `format`）をフィールド単位で比較する |
 | `ManagedFileRef` | `Sendable, Hashable` | `==` と配列比較が使える |
 | `OriginalCaptureMetadata` | `Sendable, Equatable` | `==` が使える |
 | `DetectionResult` | `Sendable, Equatable` | `==` が使える（Task 1 で使用） |
@@ -195,12 +202,12 @@ func pickedPhotoLoaderMinimalConformancePassesFileAndReturnsPhoto() async throws
 `Equatable` を足すために既存型を変更してはならない。正本の型定義を変える判断はこの計画のスコープ外であり、
 必要と判断した場合は実装せず差し戻す。
 
-- [ ] **Step 2: テストが失敗することを確認する**
+- [x] **Step 2: テストが失敗することを確認する**
 
 Run: `swift test --package-path packages/Domain --filter pickedPhotoLoaderMinimalConformance`
 Expected: `cannot find type 'PickedPhotoLoader' in scope` でビルド失敗
 
-- [ ] **Step 3: プロトコルを宣言する**
+- [x] **Step 3: プロトコルを宣言する**
 
 `packages/Domain/Sources/Domain/Ports/ImagePipeline.swift` の `FaceDetector` の**前**に追記する
 （正本 5章の並び順は `PickedPhotoLoader` → `FaceDetector` → `ImageEffectRenderer` → `ImageEncoder`）。
@@ -215,12 +222,12 @@ public protocol PickedPhotoLoader: Sendable {
 }
 ```
 
-- [ ] **Step 4: テストが通ることを確認する**
+- [x] **Step 4: テストが通ることを確認する**
 
 Run: `swift test --package-path packages/Domain --filter pickedPhotoLoaderMinimalConformance`
 Expected: PASS
 
-- [ ] **Step 5: 全体の検証**
+- [x] **Step 5: 全体の検証**
 
 Run: `swift test --package-path packages/Domain`
 Expected: 全件 PASS（既存 340 件 + 2 件）
@@ -234,7 +241,7 @@ Expected: `0 violations`
 Run: `bash scripts/check-imports.sh`
 Expected: `OK`
 
-- [ ] **Step 6: コミット**
+- [x] **Step 6: コミット**
 
 ```bash
 git add packages/Domain/Sources/Domain/Ports/ImagePipeline.swift packages/Domain/Tests/DomainTests/Ports/ImagePipelinePortsTests.swift

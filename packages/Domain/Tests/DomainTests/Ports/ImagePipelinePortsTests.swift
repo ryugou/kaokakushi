@@ -141,9 +141,12 @@ func fakeImageEffectRendererForwardsArgumentsAndReturnsResult() async throws {
     let rendered = try await renderer.render(source: source, plan: plan, rasterAssets: [:])
 
     #expect(rendered.file == expected.file)
+    #expect(rendered.descriptor == expected.descriptor)
     let calls = await renderer.renderCalls
     #expect(calls.count == 1)
     #expect(calls[0].source.file == source.file)
+    #expect(calls[0].source.pixelSize == source.pixelSize)
+    #expect(calls[0].source.format == source.format)
     #expect(calls[0].rasterAssets.isEmpty)
 }
 
@@ -266,4 +269,78 @@ func fakeOutputFileVerifierForwardsArgumentAndReturnsMeasurement() async throws 
     #expect(measurement.sha256 == expected.sha256)
     let calls = await verifier.verifyCalls
     #expect(calls == [ref])
+}
+
+// MARK: - FaceDetector（image-pipeline.md 5章「プロトコルのシグネチャ」）
+
+private actor FakeFaceDetector: FaceDetector {
+    private(set) var receivedSources: [ImageSource] = []
+    private let result: DetectionResult
+
+    init(result: DetectionResult) {
+        self.result = result
+    }
+
+    func detect(_ source: ImageSource) async throws -> DetectionResult {
+        receivedSources.append(source)
+        return result
+    }
+}
+
+@Test("FaceDetectorへの最小準拠がdetectへ渡されたImageSourceを記録し戻り値を返す")
+func faceDetectorMinimalConformancePassesSourceAndReturnsResult() async throws {
+    let expected = DetectionResult(
+        faces: [],
+        detectionPixelSize: PixelSize(width: 1920, height: 1440),
+        revision: FaceDetectorRevision(rawValue: 3)
+    )
+    let subject = FakeFaceDetector(result: expected)
+    let source = makeImageSource()
+
+    let actual = try await subject.detect(source)
+
+    #expect(actual == expected)
+    let received = await subject.receivedSources
+    #expect(received.count == 1)
+    #expect(received.first?.file == source.file)
+    #expect(received.first?.pixelSize == source.pixelSize)
+    #expect(received.first?.format == source.format)
+}
+
+// MARK: - PickedPhotoLoader（image-pipeline.md 5章「プロトコルのシグネチャ」）
+
+private actor FakePickedPhotoLoader: PickedPhotoLoader {
+    private(set) var receivedFiles: [ManagedFileRef] = []
+    private let photo: LoadedPhoto
+
+    init(photo: LoadedPhoto) {
+        self.photo = photo
+    }
+
+    func load(_ file: ManagedFileRef) async throws -> LoadedPhoto {
+        receivedFiles.append(file)
+        return photo
+    }
+}
+
+@Test("PickedPhotoLoaderへの最小準拠がloadへ渡されたManagedFileRefを記録し戻り値を返す")
+func pickedPhotoLoaderMinimalConformancePassesFileAndReturnsPhoto() async throws {
+    let capture = OriginalCaptureMetadata(
+        dateTimeOriginal: "2026:08:11 09:30:00",
+        subSecTimeOriginal: nil,
+        offsetTimeOriginal: "+09:00",
+        utcMillis: 1_754_872_200_000
+    )
+    let expected = LoadedPhoto(source: makeImageSource(), capture: capture)
+    let subject = FakePickedPhotoLoader(photo: expected)
+    let file = ManagedFileRef(kind: .processingTemporary, fileID: ManagedFileID(rawValue: UUID()))
+
+    let actual = try await subject.load(file)
+
+    #expect(actual.source.file == expected.source.file)
+    #expect(actual.source.pixelSize == expected.source.pixelSize)
+    #expect(actual.source.format == expected.source.format)
+    #expect(actual.capture == capture)
+    let received = await subject.receivedFiles
+    #expect(received == [file])
 }

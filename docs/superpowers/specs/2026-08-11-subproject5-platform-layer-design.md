@@ -61,7 +61,7 @@ vibepod の Swift profile は Foundation-only の SwiftPM パッケージしか�
 
 ## 3. Phase A（コンテナで完結）
 
-### A1: Domain のポート宣言と偽実装
+### A1: Domain のポート宣言
 
 境界型（`ImageSource` / `LoadedPhoto` / `DetectionResult` / `DetectedFace` / `FaceDetectorRevision`）は
 **すべて宣言済み**である（`Rendering/Boundary.swift`・`Rendering/DetectedFace.swift`）。追加は不要。
@@ -69,13 +69,9 @@ vibepod の Swift profile は Foundation-only の SwiftPM パッケージしか�
 - `PickedPhotoLoader` / `FaceDetector` を `image-pipeline.md` 5章「プロトコルのシグネチャ」から
   一字一句転記して宣言する。既存の `Ports/ImagePipeline.swift` と同じ様式に揃える
 - 最小準拠テストを既存パターン（`Ports/ImagePipelinePortsTests.swift`）に倣って書く
-- 偽実装（`FakeFaceDetector` / `FakePickedPhotoLoader`）を Application のテスト支援へ追加する。
-  A2 が使う
 
-**偽実装の要件**: 呼び出し引数を記録し、失敗を注入でき、**成功・失敗それぞれで現実に起こる状態を
-再現する**こと。A2 の Saga テストはこの偽実装の上に立つため、乖離すると検証が空洞化する。
-
-**完了条件**: `swift test --package-path packages/Domain` と `--package-path packages/Application` が緑。
+**完了条件**: `swift test --package-path packages/Domain` と `--package-path packages/Application` が緑
+（後者は Domain の変更が Application を壊していないことの回帰確認。Application 側の変更は無い）。
 
 ### A2: `SourceImportCoordinator`
 
@@ -97,6 +93,12 @@ vibepod の Swift profile は Foundation-only の SwiftPM パッケージしか�
 - 後始末（補償削除・`PendingFileDeletion` への登録）が DB 書き込みを伴う場合、キャンセル済み文脈でも
   完走させる（`Cleanup.swift` の `runShieldedFromCancellation` を使う）。生成・受け渡し経路と同じ扱い
 - 偽ストアは「失敗したら実体が残る」等の現実を再現する。再現しない偽実装は欠陥を隠す
+
+**偽実装の要件**: `FakeFaceDetector` / `FakePickedPhotoLoader` を含む、この節で追加する偽実装は
+`packages/Application/Tests/ApplicationTests/Fakes/`（`FakeImagePipeline.swift` と同じ様式）へ置く。
+契約スイートから参照できる配置にするかは B5 で決める（現時点では未確定）。
+呼び出し引数を記録し、失敗を注入でき、**成功・失敗それぞれで現実に起こる状態を再現する**こと。
+Saga テストはこの偽実装の上に立つため、乖離すると検証が空洞化する。
 
 **完了条件**: `swift test --package-path packages/Application` が緑。上記の不変条件それぞれに対応する
 テストが存在し、**当該のガードを外すとそのテストが落ちること**を実測で確認する。
@@ -161,7 +163,8 @@ Y 軸反転の検出（画像**上端**だけに顔／**下端**だけに顔）�
 
 A1 → A2 → B1 → B2 → B3 → B4 → B5。
 
-A1 は全ての前提（ポート契約と適合テストスイート）。A2 は偽実装ベースのため B を待たない。
+A1 は全ての前提（ポート契約）。契約スイートは B5。
+A2 は偽実装ベースのため B を待たない。
 B1 は B3 の依存。B2 は独立。B3 が最も難度が高い（ゴールデン画像）。B4 は PhotoKit 権限が絡む。
 
 各段階を独立した PR とし、`code-review` スキルの全 Stage（一次5観点 → codex → CI+Copilot）を通す。
