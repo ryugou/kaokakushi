@@ -71,6 +71,7 @@ func requiresDeliveryAttentionCombinesBothAxes(state: OutputState, hasUnknownLib
 private actor FakeOutputDeliveryStore: OutputDeliveryStore {
     private(set) var beginDeliveryAttemptCalls: [ExportID] = []
     private(set) var completeLibrarySaveCalls: [ExportID] = []
+    private(set) var requireSettledCalls: [ExportID] = []
     private(set) var completeShareCalls: [ExportID] = []
     private(set) var abandonDeliveryAttemptCalls: [ExportID] = []
     private(set) var resolveOrphanedAttemptsCallCount = 0
@@ -87,6 +88,10 @@ private actor FakeOutputDeliveryStore: OutputDeliveryStore {
 
     func completeLibrarySave(_ exportID: ExportID) async throws {
         completeLibrarySaveCalls.append(exportID)
+    }
+
+    func requireSettled(_ exportID: ExportID) async throws {
+        requireSettledCalls.append(exportID)
     }
 
     func completeShare(_ exportID: ExportID) async throws {
@@ -126,6 +131,9 @@ func fakeOutputDeliveryStoreForwardsArguments() async throws {
     let librarySaveID = ExportID(rawValue: UUID())
     try await store.completeLibrarySave(librarySaveID)
 
+    let requireSettledID = ExportID(rawValue: UUID())
+    try await store.requireSettled(requireSettledID)
+
     let shareID = ExportID(rawValue: UUID())
     try await store.completeShare(shareID)
 
@@ -143,6 +151,7 @@ func fakeOutputDeliveryStoreForwardsArguments() async throws {
 
     #expect(await store.beginDeliveryAttemptCalls == [beginID])
     #expect(await store.completeLibrarySaveCalls == [librarySaveID])
+    #expect(await store.requireSettledCalls == [requireSettledID])
     #expect(await store.completeShareCalls == [shareID])
     #expect(await store.abandonDeliveryAttemptCalls == [abandonID])
     #expect(await store.resolveOrphanedAttemptsCallCount == 1)

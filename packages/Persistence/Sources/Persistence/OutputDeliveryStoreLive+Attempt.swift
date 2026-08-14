@@ -2,8 +2,9 @@ import Foundation
 import Domain
 import GRDB
 
-// beginDeliveryAttempt / completeLibrarySave / completeShare / abandonDeliveryAttempt
-// （export-saga.md 7章「利用者への受け渡し」・7.0「写真ライブラリ保存の結果不明」が正本）。
+// beginDeliveryAttempt / completeLibrarySave / requireSettled / completeShare /
+// abandonDeliveryAttempt（export-saga.md 7章「利用者への受け渡し」・7.0「写真ライブラリ
+// 保存の結果不明」が正本）。
 //
 // decodeOutputState / updateOutputRecordState / deleteDeliveryAttempt / deliveryAttemptCountは
 // internal（モジュール内既定アクセス）で公開する。resolveOrphanedAttempts
@@ -53,6 +54,16 @@ extension OutputDeliveryStoreLive {
             }
             try Self.updateOutputRecordState(connection, exportID: exportID, state: .delivered)
             try Self.deleteDeliveryAttempt(connection, exportID: exportID)
+        }
+    }
+
+    /// 共有（外部提示）の開始前に呼ぶ（Issue #32 C-1。Domain/Ports/OutputDeliveryStore.swiftの
+    /// docコメントが正）。settledAt == nilならthrowする。completeShareが使うrequireSettled
+    /// （このファイル下部のprivate static関数）と同じ判定ロジックをそのまま再利用し、判定を
+    /// 二重に持たない。状態は変更しないため読み取り専用のdbQueue.readで完結させる。
+    public func requireSettled(_ exportID: ExportID) async throws {
+        try await database.dbQueue.read { connection in
+            try Self.requireSettled(connection, exportID: exportID)
         }
     }
 

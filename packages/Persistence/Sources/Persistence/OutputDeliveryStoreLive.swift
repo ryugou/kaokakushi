@@ -5,9 +5,10 @@ import GRDB
 // OutputDeliveryStoreの実装（export-saga.md 7章「利用者への受け渡し」・7.0「写真ライブラリ
 // 保存の結果不明」が正本。Issue #6 Task 6）。
 //
-// 実装する8メソッド: beginDeliveryAttempt / completeLibrarySave / completeShare /
-// abandonDeliveryAttempt / resolveOrphanedAttempts / loadUnknownLibrarySaves /
-// clearUnknownLibrarySave / deleteOutput。
+// 実装する9メソッド: beginDeliveryAttempt / completeLibrarySave / requireSettled /
+// completeShare / abandonDeliveryAttempt / resolveOrphanedAttempts / loadUnknownLibrarySaves /
+// clearUnknownLibrarySave / deleteOutput。requireSettled は Issue #32 C-1 で追加
+// （共有の外部提示前に settledAt を検査する読み取り専用 API。OutputDeliveryStoreLive+Attempt.swift）。
 //
 // `OutputDeliveryStore`のポートシグネチャには時刻引数が無いが、DeliveryAttempt.startedAt /
 // UnknownLibrarySave.occurredAtには実行時点の時刻が必要なため、ExportSagaStoreLiveと同じ

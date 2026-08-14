@@ -26,11 +26,13 @@ import Domain
 // 既にある）。
 //
 // 共有には DeliveryAttempt を作らない（7.0「共有には DeliveryAttempt を作らない」。結果が
-// 同期的に返るため中断点が無い）。SharePresenter.share は外部 UI 提示であり店（store）を
-// 変更しないため queue の外で呼ぶ（ExportCoordinator+Settle.swift の OutputFileVerifier.verify
-// と同じ方針。「読み取りは経由しない」）。ShareResult.completed のときのみ completeShare を
-// queue 経由で呼ぶ。canceled / failed / unknown は store を呼ばず現在の状態を維持する
-// （安全側へ倒す）。
+// 同期的に返るため中断点が無い）。Issue #32 C-1: SharePresenter へ渡す前に
+// outputDeliveryStore.requireSettled で settledAt != nil を検査する（検査自体は store への
+// 問い合わせのため queue 経由。saveToPhotoLibrary の beginDeliveryAttempt と同じ順序）。
+// SharePresenter.share 自体は外部 UI 提示であり店（store）を変更しないため queue の外で呼ぶ
+// （ExportCoordinator+Settle.swift の OutputFileVerifier.verify と同じ方針。「読み取りは
+// 経由しない」）。ShareResult.completed のときのみ completeShare を queue 経由で呼ぶ。
+// canceled / failed / unknown は store を呼ばず現在の状態を維持する（安全側へ倒す）。
 //
 // 破棄（deleteOutput）は queue 経由の薄い委譲。事前条件違反（settledAt == nil・
 // DeliveryAttempt 存在中）を含め store の throw をそのまま伝播する
@@ -116,7 +118,19 @@ public actor OutputDeliveryCoordinator {
     }
 
     /// OS 共有へ渡す（export-saga.md 7.0「共有には DeliveryAttempt を作らない」）。
+    ///
+    /// Issue #32 C-1: `SharePresenter` へ渡す**前**に `outputDeliveryStore.requireSettled` で
+    /// `settledAt != nil` を検査する（`saveToPhotoLibrary` の `beginDeliveryAttempt` と同じ順序。
+    /// 従来は `SharePresenter` へ渡した後に `completeShare` が初めて検査しており、未確定の出力
+    /// でも共有シートが開いてしまっていた）。引数 `output.settledAt` は呼び出し元が保持する
+    /// 値であり stale でありうるため判断根拠にせず、必ず `requireSettled` で権威あるストアへ
+    /// 問い合わせる。検査は `saveToPhotoLibrary` と同じく復旧ゲートを待った後 `queue.run` の
+    /// 中で行う。
     public func share(_ output: OutputRecord) async throws -> ShareResult {
+        try await recoveryGate.awaitRecoveryCompleted()
+        try await queue.run {
+            try await self.outputDeliveryStore.requireSettled(output.exportID)
+        }
         let result = await Self.performShare(sharePresenterBox, file: outputFile(for: output))
         guard result == .completed else {
             return result

@@ -55,6 +55,10 @@ protocol OutputDeliveryStore: Sendable {
     func beginDeliveryAttempt(_ exportID: ExportID) async throws
     /// delivered への更新と attempt 削除を単一トランザクションで
     func completeLibrarySave(_ exportID: ExportID) async throws
+    /// 共有（外部提示）の開始前に呼ぶ。事前条件: settledAt != nil（nil なら throw）。状態は
+    /// 変更しない検査専用 API（completeShare は検査に加えて delivered への状態更新も行うため
+    /// 検査専用には使えない）
+    func requireSettled(_ exportID: ExportID) async throws
     /// 事前条件: settledAt != nil（nil なら throw）、かつ対象の DeliveryAttempt が
     /// 存在しないこと（7.0。試行中の共有は拒否する）
     func completeShare(_ exportID: ExportID) async throws
@@ -450,7 +454,11 @@ struct ExportRecord: Sendable {
 
 バッチの完了操作は、結果一覧画面での操作 1 回で対象バッチ内の**未確定な全出力**の `settledAt` を同一トランザクションで設定し、確定した枚数分だけクレジットを消費する（`settleBatch`）。完了前は写真単位のやり直しができ、一括保存・共有は完了後にのみ行える。
 
-**不変条件**: `beginDeliveryAttempt` / `completeLibrarySave` / `completeShare` は `settledAt != nil` を事前条件とする（`nil` なら throw）。完了前の出力は UI 上も保存・共有へ到達できないが、防御として明記する。`completeShare` はさらに、対象の `DeliveryAttempt` が存在しないことも事前条件とする（存在すれば `deliveryAttemptAlreadyInProgress` を throw し、試行中の共有を拒否する。7.0）。`deleteOutput`（完了後の明示的な破棄）にもこの事前条件を課すが、完了前のやり直しは `discardExport`（4 章）を使うため対象外。保存・共有の成否は問わない（失敗しても出力は保持され再試行できる）。
+**不変条件**: `beginDeliveryAttempt` / `completeLibrarySave` / `completeShare` は `settledAt != nil` を事前条件とする（`nil` なら throw）。完了前の出力は UI 上も保存・共有へ到達できないが、防御として明記する。
+
+共有はこの事前条件を、外部提示（`SharePresenter`）より**前**に `requireSettled` で検査する。`completeShare` は検査に加えて `delivered` への状態更新も行うため、外部提示より前の「検査だけ」には使えない（`requireSettled` を別メソッドとして持つ理由）。呼び出し元が保持する `OutputRecord.settledAt` は stale でありうるため判断根拠にせず、`requireSettled` で権威あるストアへ問い合わせる。保存（`beginDeliveryAttempt`）も同じ順序（検査 → 外部提示）を `MediaSaver` に対して既に守っている。
+
+`completeShare` はさらに、対象の `DeliveryAttempt` が存在しないことも事前条件とする（存在すれば `deliveryAttemptAlreadyInProgress` を throw し、試行中の共有を拒否する。7.0）。`deleteOutput`（完了後の明示的な破棄）にもこの事前条件を課すが、完了前のやり直しは `discardExport`（4 章）を使うため対象外。保存・共有の成否は問わない（失敗しても出力は保持され再試行できる）。
 
 ### 7.0 写真ライブラリ保存の結果不明
 
@@ -504,7 +512,7 @@ struct UnknownLibrarySave: Sendable {
 | `resolveOrphanedAttempts` | `previousState` が `generated` なら `deliveryUnknown`、`delivered` なら維持 | 起動時 |
 | `deleteOutput` | 状態遷移ではない。`OutputRecord` 行を削除し、実体ファイルを同一トランザクションで `PendingFileDeletion` へ登録する（実削除はコミット後。0 章、削除経路の正本は [アーキテクチャ設計](architecture.md) の 7.5） | 完了後の出力を利用者が明示的に破棄したとき |
 
-共有には `DeliveryAttempt` を作らない（結果が同期的に返るため中断点が無い）。共有の開始時点で既に `settledAt` は確定済み（完了後にのみ共有へ進めるため）である。
+共有には `DeliveryAttempt` を作らない（結果が同期的に返るため中断点が無い）。共有の開始時点で `settledAt` が確定済みであることは、上記不変条件の `requireSettled` による事前検査で保証する。外部提示（`SharePresenter`）はこの検査を通過した後にのみ行う。
 
 ```swift
 enum ShareResult: Sendable, Equatable { case completed, canceled, unknown, failed }
