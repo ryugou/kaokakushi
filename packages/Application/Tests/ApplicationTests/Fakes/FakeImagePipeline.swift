@@ -178,6 +178,37 @@ actor FakeStampRasterizer: StampRasterizer {
     }
 }
 
+// MARK: - FakePickedPhotoLoader
+
+/// `PickedPhotoLoader`（image-pipeline.md 5章「プロトコルのシグネチャ」）の偽実装
+/// （Issue #8 サブプロジェクト5 A2 Task 2。SourceImportCoordinator が使う）。
+///
+/// 他の画像処理ポートの偽実装（FakeImageEffectRenderer 等）と異なり、戻り値は
+/// `makeLoadedPhoto()`（SourceImportTestSupport.swift）を既定値とする。`load` は入力の解釈に選択肢が無い
+/// 単純な委譲であり、未設定を「意図しない成功の見逃し」として検出する価値が薄い一方、
+/// SourceImportCoordinator の Saga 進行（手順3以降）を検証する大半のテストは load の戻り値
+/// そのものに関心が無いため、明示的な設定なしで成功させられる方が読みやすい。
+actor FakePickedPhotoLoader: PickedPhotoLoader {
+    private(set) var loadCalls: [ManagedFileRef] = []
+    var failure: Error?
+    var result: LoadedPhoto
+
+    init(result: LoadedPhoto = makeLoadedPhoto()) {
+        self.result = result
+    }
+
+    // MARK: - 失敗・結果注入セッター（actor 隔離のため外部から直接代入できない）
+
+    func setFailure(_ value: Error?) { failure = value }
+    func setResult(_ value: LoadedPhoto) { result = value }
+
+    func load(_ file: ManagedFileRef) async throws -> LoadedPhoto {
+        loadCalls.append(file)
+        if let failure { throw failure }
+        return result
+    }
+}
+
 // MARK: - FakeMediaSaver
 
 actor FakeMediaSaver: MediaSaver {
