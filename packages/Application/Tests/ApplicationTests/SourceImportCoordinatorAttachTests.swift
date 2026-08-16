@@ -131,3 +131,48 @@ private actor AttachCompletionFlag {
     private(set) var isCompleted = false
     func markCompleted() { isCompleted = true }
 }
+
+// MARK: - 不変条件4: attachWorkingSourceToExistingProjectの失敗はそのまま伝播し余分な副作用を残さない
+//
+// reviewer Warning W3: 「あり」側（SourceImportCoordinatorReselectTests.swiftの
+// reselectDoesNotDeleteReplacedSourceFileWhenReplaceWorkingSourceFails）には書き込み失敗経路の
+// テストがあるのに対し、「なし」側には対応するテストが無かった。「なし」側には手順3（旧ファイル
+// 削除）が存在しないため検証すべき副作用は少ないが、書き込み失敗時にreselectSourceがエラーを
+// そのまま呼び出し元へ伝播すること、および余計な副作用（managedFileStore.delete /
+// maintenanceStore.registerOrphan）が一切起きないことは、あり側と同型の不変条件として固定する
+// 価値がある。
+
+@Test("attachWorkingSourceToExistingProjectが失敗したらエラーをそのまま伝播し副作用を残さない")
+func reselectAttachPropagatesErrorWithoutSideEffectsWhenAttachWorkingSourceFails() async throws {
+    struct Boom: Error, Equatable {}
+
+    let projectID = makeProjectID()
+    let store = FakeWorkingSourceStore()
+    // seedWorkingSourceを呼ばない = WorkingSourceRecordが無い状態（「なし」側の分岐を通す）。
+    await store.setAttachToExistingProjectFailure(Boom())
+    let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
+    let coordinator = makeSourceImportCoordinator(
+        pickedPhotoLoader: FakePickedPhotoLoader(),
+        workingSourceStore: store,
+        managedFileStore: managedFileStore,
+        maintenanceStore: maintenanceStore
+    )
+    let input = makePickedPhotoInput()
+
+    do {
+        try await coordinator.reselectSource(projectID: projectID, input: input)
+        Issue.record("エラーがthrowされるはずだった")
+    } catch let error as Boom {
+        #expect(error == Boom())
+    } catch {
+        Issue.record("想定外のエラー: \(error)")
+    }
+
+    // 「なし」側には手順3（旧ファイル削除）が存在しないため、書き込み失敗時に削除は一切起きて
+    // はならない。registerOrphanの空チェックは現時点の未実装スコープ（論点3。performReselect
+    // 失敗時の新規正規化ファイル後始末はIssue #36で追跡中、本ファイル未実装）を固定するもので
+    // あり仕様上の禁止ではない。Issue #36実装時はこの期待値の見直しが必要（reviewer Warning W-1）。
+    #expect(await managedFileStore.deleteCalls.isEmpty)
+    #expect(await maintenanceStore.registerOrphanCalls.isEmpty)
+}

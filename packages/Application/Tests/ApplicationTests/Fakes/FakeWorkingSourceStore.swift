@@ -43,11 +43,17 @@ actor FakeWorkingSourceStore: WorkingSourceStore {
     /// ゲートを適用し、再接続Sagaの「DB登録の完了前に成功を返さない」の検証に流用する）。
     var gate: OneShotGate?
 
+    /// reviewer Warning S2: load → loadWorkingSource の呼び出し順序を Fake を跨いで検証するため
+    /// のオプトイン記録先（CallOrderRecorder.swift 参照）。設定しなければ何もしない
+    /// （既存テストへの影響なし）
+    var callOrderRecorder: CallOrderRecorder?
+
     init() {}
 
     // MARK: - 失敗注入セッター（actor 隔離のため外部から直接代入できない。Issue #7 Task 4 準備）
 
     func setGate(_ value: OneShotGate?) { gate = value }
+    func setCallOrderRecorder(_ value: CallOrderRecorder?) { callOrderRecorder = value }
     func setCreateProjectWithWorkingSourceFailure(_ value: Error?) { createProjectWithWorkingSourceFailure = value }
     func setReplaceWorkingSourceFailure(_ value: Error?) { replaceWorkingSourceFailure = value }
     func setAttachToExistingProjectFailure(_ value: Error?) { attachToExistingProjectFailure = value }
@@ -91,6 +97,7 @@ actor FakeWorkingSourceStore: WorkingSourceStore {
 
     func loadWorkingSource(for projectID: ProjectID) async throws -> WorkingSourceRecord? {
         loadWorkingSourceCalls.append(projectID)
+        await callOrderRecorder?.record("loadWorkingSource")
         if let failure = loadWorkingSourceFailure { throw failure }
         return records[projectID]
     }

@@ -67,6 +67,42 @@ func reselectReplacesWorkingSourceWhenRecordExists() async throws {
     #expect(call.sourceLocator.photoLibraryLocalIdentifier == input.providerAssetIdentifier)
 }
 
+// MARK: - 呼び出し順序: loadがloadWorkingSourceより先に呼ばれる
+//
+// reviewer Warning S2: image-pipeline.md 5章の正本は手順1（load）→手順2の分岐判定
+// （loadWorkingSource）の順を定めており、現在の実装（SourceImportCoordinator+Reselect.swift）は
+// この順を守っているが、Task 3→4間で実装の呼び出し順序が一時的に入れ替わった実績があるにも
+// かかわらず、順序そのものを固定するテストが無かった。CallOrderRecorder（Fakes/
+// CallOrderRecorder.swift）を両Fakeへ共通で注入し、Fakeを跨いだ呼び出し順序を検証する。
+
+@Test("再選択はloadをloadWorkingSourceより先に呼ぶ")
+func reselectCallsLoadBeforeLoadWorkingSource() async throws {
+    let projectID = makeProjectID()
+    let existingSourceFile = try makeWorkingSourceFileRef()
+    let store = FakeWorkingSourceStore()
+    await store.seedWorkingSource(
+        WorkingSourceRecord(projectID: projectID, sourceFile: existingSourceFile, createdAt: makeFixedClock()())
+    )
+    let managedFileStore = FakeManagedFileStore()
+    await managedFileStore.seedExistingFile(existingSourceFile.ref)
+    let loader = FakePickedPhotoLoader()
+    let recorder = CallOrderRecorder()
+    await loader.setCallOrderRecorder(recorder)
+    await store.setCallOrderRecorder(recorder)
+    let coordinator = makeSourceImportCoordinator(
+        pickedPhotoLoader: loader,
+        workingSourceStore: store,
+        managedFileStore: managedFileStore
+    )
+    let input = makePickedPhotoInput()
+
+    try await coordinator.reselectSource(projectID: projectID, input: input)
+
+    // 正本どおりload（手順1）がloadWorkingSource（手順2の分岐判定）より先に呼ばれることを、
+    // Fakeを跨いだ共通の順序記録で固定する。
+    #expect(await recorder.entries == ["load", "loadWorkingSource"])
+}
+
 // MARK: - 不変条件1: 成功経路で旧sourceFileが削除される
 
 @Test("再選択が成功したら置換された旧sourceFileが削除される")

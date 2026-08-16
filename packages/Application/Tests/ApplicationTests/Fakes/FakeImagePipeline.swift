@@ -192,6 +192,10 @@ actor FakePickedPhotoLoader: PickedPhotoLoader {
     private(set) var loadCalls: [ManagedFileRef] = []
     var failure: Error?
     var result: LoadedPhoto
+    /// reviewer Warning S2: load → loadWorkingSource の呼び出し順序を Fake を跨いで検証するため
+    /// のオプトイン記録先（CallOrderRecorder.swift 参照）。設定しなければ何もしない
+    /// （既存テストへの影響なし）
+    var callOrderRecorder: CallOrderRecorder?
 
     init(result: LoadedPhoto = makeLoadedPhoto()) {
         self.result = result
@@ -201,9 +205,11 @@ actor FakePickedPhotoLoader: PickedPhotoLoader {
 
     func setFailure(_ value: Error?) { failure = value }
     func setResult(_ value: LoadedPhoto) { result = value }
+    func setCallOrderRecorder(_ value: CallOrderRecorder?) { callOrderRecorder = value }
 
     func load(_ file: ManagedFileRef) async throws -> LoadedPhoto {
         loadCalls.append(file)
+        await callOrderRecorder?.record("load")
         if let failure { throw failure }
         return result
     }
