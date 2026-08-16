@@ -42,6 +42,59 @@ private func importPickedPhotoWaitsForRecoveryGateThenProceeds() async throws {
     #expect(await store.createProjectWithWorkingSourceCalls.count == 1)
 }
 
+// SourceImportCoordinator.reselectSource が起動時復旧ゲートを待つこと（Task 3 reviewer 一次
+// レビュー Critical 1）。
+//
+// Critical 1: `reselectSource` は `recoveryGate.awaitRecoveryCompleted()` を冒頭で呼んでは
+// いるが、`importPickedPhotoWaitsForRecoveryGateThenProceeds` と同様に
+// `makeSourceImportCoordinator` の既定 `FakeRecoveryGate()` が常に `isOpen: true` であるため、
+// この呼び出しを削除しても既存の全テストが緑のまま通ってしまっていた（reviewer が変異テストで
+// 実際に確認済み）。ここで復旧未完了時に変更系操作（loadWorkingSource / replaceWorkingSource）へ
+// 進まないことを固定する。
+
+/// あり側（既存 WorkingSourceRecord が見つかる経路）のフィクスチャ組み立てに必要な最小限の
+/// WorkingSourceFileRef。SourceImportCoordinatorReselectTests.swift の同名 private 関数と同型
+/// （ExportCoordinatorRecoveryGateTests.swift / ExportCoordinatorStartTests.swift 等、複数の
+/// テストファイルがこの小さなヘルパーをファイルごとに複製する既存の方針に揃える。private は
+/// ファイルスコープのため、別ファイルの private 宣言を越えて再利用できない）。
+private func makeReselectWorkingSourceFileRef() throws -> WorkingSourceFileRef {
+    let ref = ManagedFileRef(kind: .processingTemporary, fileID: ManagedFileID(rawValue: UUID()))
+    return try #require(WorkingSourceFileRef(ref))
+}
+
+@Test("復旧未完了の間はreselectSourceがstoreへ進まず、完了後に再選択できる", .timeLimit(.minutes(1)))
+private func reselectSourceWaitsForRecoveryGateThenProceeds() async throws {
+    let projectID = makeProjectID()
+    let existingSourceFile = try makeReselectWorkingSourceFileRef()
+    let store = FakeWorkingSourceStore()
+    await store.seedWorkingSource(
+        WorkingSourceRecord(projectID: projectID, sourceFile: existingSourceFile, createdAt: makeFixedClock()())
+    )
+    let managedFileStore = FakeManagedFileStore()
+    await managedFileStore.seedExistingFile(existingSourceFile.ref)
+    let loader = FakePickedPhotoLoader()
+    let gate = FakeRecoveryGate(isOpen: false)
+    let coordinator = makeSourceImportCoordinator(
+        pickedPhotoLoader: loader,
+        workingSourceStore: store,
+        managedFileStore: managedFileStore,
+        recoveryGate: gate
+    )
+    let input = makePickedPhotoInput()
+
+    let task = Task { try await coordinator.reselectSource(projectID: projectID, input: input) }
+    for _ in 0..<5 { await Task.yield() }
+    // ゲートが閉じている間はqueue.run（performReselect）へ到達しないため、loadWorkingSourceにも
+    // replaceWorkingSourceにも到達しない。
+    #expect(await store.loadWorkingSourceCalls.isEmpty)
+    #expect(await store.replaceWorkingSourceCalls.isEmpty)
+
+    await gate.open()
+    try await task.value
+
+    #expect(await store.replaceWorkingSourceCalls.count == 1)
+}
+
 // W（他 Coordinator と同型）: 共有キューを外部opが占有し、復旧がそのキューへ操作を積んだまま
 // 保留されている状態で importPickedPhoto を投入しても、占有解放後に両方完走することを確認する
 // （自己デッドロック非発生）。OutputDeliveryCoordinatorRecoveryGateTests.swift の

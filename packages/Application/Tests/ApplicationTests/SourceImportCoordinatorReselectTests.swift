@@ -202,6 +202,46 @@ func reselectDoesNotDeleteReplacedSourceFileBeforeDatabaseCommit() async throws 
     #expect(deleteCallsAfterCommit == [existingSourceFile.ref])
 }
 
+/// 不変条件3の関連テスト: replaceWorkingSource（手順2）自体が失敗しDBが結局確定しなかった
+/// （ロールバックした）ケース。reviewer が mutation テストで実証した Critical 2:
+/// `performReselect` の catch 節（または replaceWorkingSource 呼び出し直後）に「旧sourceFileを
+/// 削除する」危険なコードを注入しても既存の155 testsが全緑のままだった。DBが確定しなかった以上、
+/// 旧sourceFileはまだ「置換された旧ファイル」として参照され続けているはずであり、削除してよい
+/// 根拠がない（reselectDoesNotDeleteReplacedSourceFileBeforeDatabaseCommitが検証する「保留中＝
+/// まだ確定していない」ケースと対を成す、「確定に失敗した」ケース）。
+@Test("replaceWorkingSourceが失敗したら旧sourceFileを削除せずエラーをthrowする")
+func reselectDoesNotDeleteReplacedSourceFileWhenReplaceWorkingSourceFails() async throws {
+    struct Boom: Error, Equatable {}
+
+    let projectID = makeProjectID()
+    let existingSourceFile = try makeWorkingSourceFileRef()
+    let store = FakeWorkingSourceStore()
+    await store.seedWorkingSource(
+        WorkingSourceRecord(projectID: projectID, sourceFile: existingSourceFile, createdAt: makeFixedClock()())
+    )
+    await store.setReplaceWorkingSourceFailure(Boom())
+    let managedFileStore = FakeManagedFileStore()
+    await managedFileStore.seedExistingFile(existingSourceFile.ref)
+    let coordinator = makeSourceImportCoordinator(
+        pickedPhotoLoader: FakePickedPhotoLoader(),
+        workingSourceStore: store,
+        managedFileStore: managedFileStore
+    )
+    let input = makePickedPhotoInput()
+
+    do {
+        try await coordinator.reselectSource(projectID: projectID, input: input)
+        Issue.record("エラーがthrowされるはずだった")
+    } catch let error as Boom {
+        #expect(error == Boom())
+    } catch {
+        Issue.record("想定外のエラー: \(error)")
+    }
+
+    // DBが確定しなかった以上、手順3（旧sourceFileの削除）へ到達してはならない。
+    #expect(await managedFileStore.deleteCalls.isEmpty)
+}
+
 // MARK: - 不変条件4: 補償削除（registerOrphan）はキャンセル済み文脈でも完走する
 //
 // SourceImportCoordinatorImportCleanupTests.swift の
