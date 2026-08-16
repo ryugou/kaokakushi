@@ -34,10 +34,11 @@ actor FakeWorkingSourceStore: WorkingSourceStore {
 
     private var records: [ProjectID: WorkingSourceRecord] = [:]
 
-    /// createProjectWithWorkingSource 呼び出し中に足止めするゲート。設定しなければ足止めしない
-    /// （FakeMediaSaver.gate と同じ方針。Issue #8 サブプロジェクト5 A2 Task 2: インポートSagaが
-    /// 「DB確定より前に取り込みファイルを削除しない」「DB登録の完了前に成功を返さない」ことを
-    /// 決定的に検証するために使う）。
+    /// createProjectWithWorkingSource / replaceWorkingSource 呼び出し中に足止めするゲート。
+    /// 設定しなければ足止めしない（FakeMediaSaver.gate と同じ方針。Issue #8 サブプロジェクト5 A2
+    /// Task 2: インポートSagaが「DB確定より前に取り込みファイルを削除しない」「DB登録の完了前に
+    /// 成功を返さない」ことを決定的に検証するために使う。Task 3 で replaceWorkingSource にも
+    /// 同じゲートを適用し、再選択Sagaの「DB確定より前に旧ファイルを削除しない」の検証に流用する）。
     var gate: OneShotGate?
 
     init() {}
@@ -70,6 +71,7 @@ actor FakeWorkingSourceStore: WorkingSourceStore {
 
     func replaceWorkingSource(_ input: ReplaceWorkingSourceInput) async throws {
         replaceWorkingSourceCalls.append(input)
+        if let gate { await gate.wait() }
         if let failure = replaceWorkingSourceFailure { throw failure }
         records[input.projectID] = WorkingSourceRecord(
             projectID: input.projectID, sourceFile: input.newSourceFile, createdAt: input.replacedAt

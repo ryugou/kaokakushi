@@ -86,15 +86,20 @@ private struct ImportFailureAlreadyHandled: Error {
 }
 
 public actor SourceImportCoordinator {
-    private let pickedPhotoLoader: PickedPhotoLoader
-    private let workingSourceStore: WorkingSourceStore
-    private let managedFileStore: ManagedFileStore
-    private let maintenanceStore: MaintenanceStore
-    private let now: @Sendable () -> Date
-    private let queue: SerialTaskQueue
+    // Task 3（SourceImportCoordinator+Reselect.swift）が同じ actor を extension で拡張し、
+    // これらのプロパティへ触れる。Swift の private はファイルスコープのため、別ファイルの
+    // extension からはアクセスできない。internal（既定アクセスレベル）へ揃える
+    // （ExportCoordinator.swift の queue / recoveryGate / now が同じ理由で internal になっており、
+    // ExportCoordinator+Generate.swift 等の extension ファイルから触れているのと同じ方針）。
+    let pickedPhotoLoader: PickedPhotoLoader
+    let workingSourceStore: WorkingSourceStore
+    let managedFileStore: ManagedFileStore
+    let maintenanceStore: MaintenanceStore
+    let now: @Sendable () -> Date
+    let queue: SerialTaskQueue
     /// 起動時復旧の完了ゲート。変更系操作はキュー投入前にこれを待つ（architecture.md 4.3
     /// 「完了まで他のすべてを開始させない」）。
-    private let recoveryGate: RecoveryGate
+    let recoveryGate: RecoveryGate
 
     public init(
         pickedPhotoLoader: PickedPhotoLoader,
