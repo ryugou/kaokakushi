@@ -127,6 +127,9 @@ func reselectDeletesReplacedSourceFileOnSuccess() async throws {
     // 削除対象は「置換された旧sourceFile」（existingSourceFile）であり、新しく作られた
     // 正規化ファイルやinput.importedFileではない（正本「置換された旧sourceFileを削除する」）。
     #expect(await managedFileStore.deleteCalls == [existingSourceFile.ref])
+    // W-1: FakeWorkingSourceStoreが模すPendingFileDeletion相当の記録にも旧IDが登録される
+    // （異なるIDの通常経路。同一IDなら登録しないケースはC-1回帰テスト側で検証する）。
+    #expect(await store.pendingFileDeletionFileRefs == [existingSourceFile.ref])
 }
 
 // MARK: - 不変条件2: 削除に失敗したらPendingFileDeletionへ積む
@@ -336,4 +339,55 @@ func reselectRegisterOrphanIsShieldedFromCancellation() async throws {
     let deleteCalls = await managedFileStore.deleteCalls
     #expect(deleteCalls.isEmpty)
     #expect(await maintenanceStore.registerOrphanCalls == [existingSourceFile.ref])
+}
+
+// MARK: - 不変条件5（C-1）: ローダーが既存sourceFileと同一IDを返しても実体を削除しない
+//
+// codex レビュー Critical 1: PickedPhotoLoader.load（Domain/Ports/ImagePipeline.swift）の契約には
+// 「既存素材と異なるファイルIDを返す」保証が無い。既存のWorkingSourceRecordが指すsourceFileIDと、
+// 今回ローダーが返した正規化ファイルのIDが偶然一致した場合、手順3で無条件に「旧sourceFile」として
+// 削除すると、DB上は新しいWorkingSourceRecordが有効なまま実体ファイルだけを消してしまい、
+// 再編集不能になる致命的なデータ損失事故になる。Persistence層
+// （WorkingSourceStoreLive+Replace.swift:93-103）は既にこの状況を「新旧が同一なら登録しない」
+// ガードで防いでおり、SourceImportCoordinator+Reselect.swift の replacedSourceFileToDelete が
+// Application層で同じ判定を行う（本テストはそのガードの回帰テスト）。
+
+@Test("再選択でローダーが既存sourceFileと同一IDを返しても実体ファイルを削除しない")
+func reselectDoesNotDeleteWhenLoaderReturnsSameSourceFileID() async throws {
+    let projectID = makeProjectID()
+    let existingSourceFile = try makeWorkingSourceFileRef()
+    let store = FakeWorkingSourceStore()
+    await store.seedWorkingSource(
+        WorkingSourceRecord(projectID: projectID, sourceFile: existingSourceFile, createdAt: makeFixedClock()())
+    )
+    // ローダーが既存sourceFileと同一IDのImageSourceを返す状況を模す（PickedPhotoLoader.loadの
+    // 契約には異なるIDを返す保証が無いため、この状況を排除できない。上記コメント参照）。
+    let photo = LoadedPhoto(
+        source: ImageSource(file: existingSourceFile.ref, pixelSize: makePixelSize(), format: .jpeg),
+        capture: makeLoadedPhoto().capture
+    )
+    let loader = FakePickedPhotoLoader(result: photo)
+    let managedFileStore = FakeManagedFileStore()
+    await managedFileStore.seedExistingFile(existingSourceFile.ref)
+    let coordinator = makeSourceImportCoordinator(
+        pickedPhotoLoader: loader,
+        workingSourceStore: store,
+        managedFileStore: managedFileStore
+    )
+    let input = makePickedPhotoInput()
+
+    try await coordinator.reselectSource(projectID: projectID, input: input)
+
+    // 書き込み（手順2）は同一IDでも通常どおり行われる。ガードが対象にするのは手順3の削除判定
+    // のみである。
+    let calls = await store.replaceWorkingSourceCalls
+    #expect(calls.count == 1)
+    #expect(calls.first?.newSourceFile.ref == existingSourceFile.ref)
+
+    // C-1本体: 削除してはならない。削除すると新しいWorkingSourceRecordが指す実体そのものが
+    // 消え、再編集不能になる。
+    #expect(await managedFileStore.deleteCalls.isEmpty)
+    // W-1: FakeWorkingSourceStoreが模すPendingFileDeletion相当の記録も、Persistence層のガードと
+    // 同じ理由で登録されないことを確認する（本番の挙動を反映した回帰であることの根拠）。
+    #expect(await store.pendingFileDeletionFileRefs.isEmpty)
 }

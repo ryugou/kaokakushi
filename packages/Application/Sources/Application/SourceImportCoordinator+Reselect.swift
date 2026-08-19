@@ -80,13 +80,33 @@ extension SourceImportCoordinator {
             try await performReplace(
                 projectID: projectID, input: input, loaded: loaded, normalizedSourceFile: normalizedSourceFile
             )
-            return existing.sourceFile
+            return replacedSourceFileToDelete(existing: existing, normalizedSourceFile: normalizedSourceFile)
         } else {
+            // 「なし」側は loadWorkingSource が nil を返した時点で削除すべき旧ファイルが存在しない
+            // （比較対象となる「旧sourceFile」自体を持たない）ため、下記replacedSourceFileToDelete
+            // と同じ判定は不要。Persistence側のattachガード（WorkingSourceStoreLive+Replace.swift
+            // 51-59行目）は「契約違反で既存レコードが残っていた」場合に備えるDB内部の防御であり、
+            // Application層はそのケースでも旧ファイルを読み書きしないためここでは判定できない
+            // （最終報告に確認結果を明記する）。
             try await performAttach(
                 projectID: projectID, input: input, loaded: loaded, normalizedSourceFile: normalizedSourceFile
             )
             return nil
         }
+    }
+
+    /// 手順3で削除する「置換された旧sourceFile」を決める。新しい正規化ファイルと同一IDの場合は
+    /// 削除対象から外す。Persistence層のガード（WorkingSourceStoreLive+Replace.swift:93-103、
+    /// applyWorkingSourceReplacementの「旧sourceFileIDが新sourceFileIDと同一の場合は登録しない」
+    /// 判定）と同じ基準をApplication層でも適用する（PickedPhotoLoader.loadの契約
+    /// （Domain/Ports/ImagePipeline.swift）には「既存素材と異なるファイルIDを返す」保証が無く、
+    /// 同一IDが返る可能性を排除できないため）。ここで判定を怠ると、DB上は新しい
+    /// WorkingSourceRecordが有効なまま実体ファイルだけを削除してしまい、再編集不能になる
+    /// データ損失事故になる。
+    private func replacedSourceFileToDelete(
+        existing: WorkingSourceRecord, normalizedSourceFile: WorkingSourceFileRef
+    ) -> WorkingSourceFileRef? {
+        existing.sourceFile.ref.fileID == normalizedSourceFile.ref.fileID ? nil : existing.sourceFile
     }
 
     /// 「あり」側（`WorkingSourceRecord` が存在する）: 単一DBトランザクションで

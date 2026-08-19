@@ -34,6 +34,16 @@ actor FakeWorkingSourceStore: WorkingSourceStore {
 
     private var records: [ProjectID: WorkingSourceRecord] = [:]
 
+    /// 本番（WorkingSourceStoreLive+Replace.swift）が置換の同一トランザクション内で行う
+    /// 「旧sourceFileIDをPendingFileDeletionへ登録する」を模した記録（W-1）。replace / attach
+    /// どちらも実際に上書きする直前の旧レコードのsourceFileを比較対象にする。新旧が同一IDなら
+    /// 登録しない（applyWorkingSourceReplacementの「新旧が同一なら登録しない」ガードと同じ判定。
+    /// WorkingSourceStoreLive+Replace.swift:93-103）。これが無いとC-1（同一ID再選択でApplication層
+    /// が実体ファイルを直接削除してしまうバグ）の回帰テストが、Persistence層側は正しく防いでいる
+    /// という本番の挙動を反映できない。revision増加・FaceTrack破棄など他の副作用は、C-1検出に
+    /// 必要な範囲を超えるため再現しない（過剰に作り込まない。W-1の決定事項）。
+    private(set) var pendingFileDeletionFileRefs: [ManagedFileRef] = []
+
     /// createProjectWithWorkingSource / replaceWorkingSource / attachWorkingSourceToExistingProject
     /// 呼び出し中に足止めするゲート。設定しなければ足止めしない（FakeMediaSaver.gate と同じ方針。
     /// Issue #8 サブプロジェクト5 A2 Task 2: インポートSagaが「DB確定より前に取り込みファイルを
@@ -81,6 +91,7 @@ actor FakeWorkingSourceStore: WorkingSourceStore {
         replaceWorkingSourceCalls.append(input)
         if let gate { await gate.wait() }
         if let failure = replaceWorkingSourceFailure { throw failure }
+        recordPendingFileDeletionIfNeeded(projectID: input.projectID, newSourceFile: input.newSourceFile)
         records[input.projectID] = WorkingSourceRecord(
             projectID: input.projectID, sourceFile: input.newSourceFile, createdAt: input.replacedAt
         )
@@ -90,9 +101,19 @@ actor FakeWorkingSourceStore: WorkingSourceStore {
         attachToExistingProjectCalls.append(input)
         if let gate { await gate.wait() }
         if let failure = attachToExistingProjectFailure { throw failure }
+        recordPendingFileDeletionIfNeeded(projectID: input.projectID, newSourceFile: input.sourceFile)
         records[input.projectID] = WorkingSourceRecord(
             projectID: input.projectID, sourceFile: input.sourceFile, createdAt: input.attachedAt
         )
+    }
+
+    /// 上書き前の旧レコードのsourceFileと新sourceFileを比較し、異なる場合だけ
+    /// pendingFileDeletionFileRefsへ積む（同一IDなら登録しない防御。型冒頭コメント参照）。
+    private func recordPendingFileDeletionIfNeeded(projectID: ProjectID, newSourceFile: WorkingSourceFileRef) {
+        guard let previousSourceFile = records[projectID]?.sourceFile, previousSourceFile != newSourceFile else {
+            return
+        }
+        pendingFileDeletionFileRefs.append(previousSourceFile.ref)
     }
 
     func loadWorkingSource(for projectID: ProjectID) async throws -> WorkingSourceRecord? {
