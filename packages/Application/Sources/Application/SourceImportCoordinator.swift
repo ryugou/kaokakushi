@@ -46,6 +46,15 @@ import Domain
 // への登録）を伴うため runShieldedFromCancellation（Cleanup.swift）で包む。呼び出し元が
 // キャンセルされていても、これらの後始末は完走させる。
 //
+// 【手順4の削除可否判定】PickedPhotoLoader.load（Domain/Ports/ImagePipeline.swift）の契約には
+// 「入力（importedFile）と異なるファイルIDを返す」保証が無い。同一IDが返った場合、手順4が
+// importedFile を無条件削除すると、手順3で作った WorkingSourceRecord が指す実体（正規化後
+// ファイルそのもの）を削除してしまい、再編集不能になるデータ損失事故になる。performImport は
+// この判定（importedFileToDelete ヘルパー）を行い、同一IDなら削除対象なし（nil）を返す。
+// SourceImportCoordinator+Reselect.swift の replacedSourceFileToDelete と同型のガード
+// （両ファイルとも Persistence 側の同じガード、WorkingSourceStoreLive+Replace.swift:93-103、を
+// 参照している）。
+//
 // 【実装中の判断: queueItemID / batchID】importPickedPhoto は PickedPhotoInput のみを受け取り
 // バッチ関連の引数を持たない（計画書 147行目）ため、両方とも nil を渡す。
 // packages/Persistence/Sources/Persistence/WorkingSourceStoreLive.swift の
@@ -83,6 +92,17 @@ public enum SourceImportError: Error, Sendable, Equatable {
 /// performImport は必ずこの型へ包んで rethrow し、外側 catch は型で確実に区別する。
 private struct ImportFailureAlreadyHandled: Error {
     let underlying: Error
+}
+
+/// `performImport`（手順1〜3）の成功結果。手順4（削除）が「何を削除すべきか」を判定するのに
+/// 必要な情報を呼び出し元（`importPickedPhoto`）へ伝える。`importedFileToDelete` が nil の場合、
+/// 削除すべき取り込みファイルは存在しない（`importedFileToDelete(input:normalizedSourceFile:)`
+/// 参照）。タプル `(ProjectID, ManagedFileRef?)` でも `queue.run` の `T: Sendable` 制約は満たせるが、
+/// フィールド名が無いと「削除対象の有無」という意味が呼び出し側で読み取れないため、名前つきの
+/// 構造体にする。
+private struct ImportOutcome: Sendable {
+    let projectID: ProjectID
+    let importedFileToDelete: ManagedFileRef?
 }
 
 public actor SourceImportCoordinator {
@@ -123,10 +143,10 @@ public actor SourceImportCoordinator {
     public func importPickedPhoto(_ input: PickedPhotoInput) async throws -> ProjectID {
         try await recoveryGate.awaitRecoveryCompleted()
 
-        let projectID: ProjectID
+        let outcome: ImportOutcome
         do {
             // 手順1〜3を単一 op として直列化する（W1。ファイル冒頭コメント参照）。
-            projectID = try await queue.run {
+            outcome = try await queue.run {
                 try await self.performImport(input)
             }
         } catch let error as ImportFailureAlreadyHandled {
@@ -149,9 +169,14 @@ public actor SourceImportCoordinator {
             }
         }
 
-        // 手順4: 取り込みファイルを削除する。
-        try await deleteImportedFile(input.importedFile)
-        return projectID
+        // 手順4: 取り込みファイルを削除する。ローダーが input.importedFile と同一IDの正規化
+        // ファイルを返した場合（PickedPhotoLoader.load の契約には異なるIDを返す保証が無い。
+        // `importedFileToDelete(input:normalizedSourceFile:)` 参照）、削除すべき取り込みファイルは
+        // 存在しない。再選択Saga（SourceImportCoordinator+Reselect.swift の reselectSource、
+        // `guard let replacedSourceFile else { return }`）と同型の書き方に揃える。
+        guard let fileToDelete = outcome.importedFileToDelete else { return outcome.projectID }
+        try await deleteImportedFile(fileToDelete)
+        return outcome.projectID
     }
 
     /// 手順1〜3本体（load・向き正規化・createProjectWithWorkingSource を単一 `queue.run` の
@@ -167,7 +192,7 @@ public actor SourceImportCoordinator {
     /// `CancellationError` を投げるケースで、外側 catch が「queue.run 自身のキャンセル
     /// チェックで performImport が未実行だった」と誤認し、importedFile を二重に
     /// registerOrphan してしまう）。
-    private func performImport(_ input: PickedPhotoInput) async throws -> ProjectID {
+    private func performImport(_ input: PickedPhotoInput) async throws -> ImportOutcome {
         var createdFiles: [ManagedFileRef] = []
         do {
             // 手順1〜2: EXIF 読み取り・向き正規化・working/ への書き込みはローダーへ完全委譲する。
@@ -197,7 +222,10 @@ public actor SourceImportCoordinator {
 
             // 手順3: 単一 DB トランザクションで Project・キュー項目・WorkingSourceRecord を作成する。
             try await workingSourceStore.createProjectWithWorkingSource(createInput)
-            return projectID
+            return ImportOutcome(
+                projectID: projectID,
+                importedFileToDelete: importedFileToDelete(input: input, normalizedSourceFile: normalizedSourceFile)
+            )
         } catch {
             let snapshot = createdFiles
             do {
@@ -222,6 +250,22 @@ public actor SourceImportCoordinator {
                 throw ImportFailureAlreadyHandled(underlying: error)
             }
         }
+    }
+
+    /// 手順4で削除する「取り込みファイル」を決める。ローダーが返した正規化後ファイルと同一IDの
+    /// 場合は削除対象から外す。再選択Saga（SourceImportCoordinator+Reselect.swift の
+    /// replacedSourceFileToDelete、98-110行目）・Persistence層のガード
+    /// （WorkingSourceStoreLive+Replace.swift:93-103、applyWorkingSourceReplacementの
+    /// 「旧sourceFileIDが新sourceFileIDと同一の場合は登録しない」判定）と同じ基準をここでも
+    /// 適用する（PickedPhotoLoader.load の契約（Domain/Ports/ImagePipeline.swift）には
+    /// 「入力と異なるファイルIDを返す」保証が無く、同一IDが返る可能性を排除できないため）。
+    /// ここで判定を怠ると、DB上は新しい WorkingSourceRecord が有効なまま実体ファイル
+    /// （normalizedSourceFile そのもの）を手順4が削除してしまい、再編集不能になるデータ損失
+    /// 事故になる。
+    private func importedFileToDelete(
+        input: PickedPhotoInput, normalizedSourceFile: WorkingSourceFileRef
+    ) -> ManagedFileRef? {
+        input.importedFile.fileID == normalizedSourceFile.ref.fileID ? nil : input.importedFile
     }
 
     /// 手順4。削除に失敗したら registerOrphan で積む（正本「削除に失敗したら

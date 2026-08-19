@@ -19,6 +19,9 @@ import Domain
 // 2. 削除失敗 → registerOrphan も失敗 → CleanupPreservingError(cause: 削除失敗)
 // 3. registerOrphan 呼び出し自体のキャンセルシールド
 //    （SourceImportCoordinatorImportTests.swift の Step6 と同型）
+//
+// 末尾の importDoesNotDeleteWhenLoaderReturnsSameSourceFileID のみ主題が異なる:
+// 「削除に失敗した場合の後始末」ではなく「削除するかどうかの判定そのもの」の検証（MARK 参照）。
 
 @Test("手順4の削除が失敗してもregisterOrphanが成功すればインポート全体は成功する")
 func importSucceedsWhenDeleteFailsButRegisterOrphanSucceeds() async throws {
@@ -120,4 +123,49 @@ func deleteImportedFileRegisterOrphanIsShieldedFromCancellation() async throws {
     let deleteCalls = await managedFileStore.deleteCalls
     #expect(deleteCalls.isEmpty)
     #expect(await maintenanceStore.registerOrphanCalls == [input.importedFile])
+}
+
+// MARK: - 削除可否の判定そのものの検証（削除失敗時の後始末ではない）
+//
+// SourceImportCoordinator+Reselect.swift の C-1
+// （reselectDoesNotDeleteWhenLoaderReturnsSameSourceFileID）と完全に同型の欠陥が、インポート
+// Sagaの手順4にも残っていた: PickedPhotoLoader.load（Domain/Ports/ImagePipeline.swift）の契約には
+// 「入力と異なるファイルIDを返す」保証が無く、同一IDが返る可能性を排除できない。手順4が
+// input.importedFileを無条件に削除すると、ローダーが同一IDを返した場合、手順3で作った
+// WorkingSourceRecordが指す実体（正規化後ファイルそのもの）を手順4が削除してしまい、
+// 再編集不能になるデータ損失事故になる。
+
+@Test("手順4はローダーが取り込みファイルと同一IDの正規化ファイルを返した場合は削除しない")
+func importDoesNotDeleteWhenLoaderReturnsSameSourceFileID() async throws {
+    let input = makePickedPhotoInput()
+    // ローダーがinput.importedFileと同一IDのImageSourceを返す状況を模す（上記MARKコメント参照）。
+    let photo = LoadedPhoto(
+        source: ImageSource(file: input.importedFile, pixelSize: makePixelSize(), format: .jpeg),
+        capture: makeLoadedPhoto().capture
+    )
+    let loader = FakePickedPhotoLoader(result: photo)
+    let store = FakeWorkingSourceStore()
+    let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
+    let coordinator = makeSourceImportCoordinator(
+        pickedPhotoLoader: loader,
+        workingSourceStore: store,
+        managedFileStore: managedFileStore,
+        maintenanceStore: maintenanceStore
+    )
+
+    let projectID = try await coordinator.importPickedPhoto(input)
+
+    // 書き込み（手順3）は同一IDでも通常どおり行われる。ガードが対象にするのは手順4の削除判定
+    // のみである。
+    let created = await store.createProjectWithWorkingSourceCalls
+    #expect(created.count == 1)
+    #expect(created.first?.sourceFile.ref == input.importedFile)
+    #expect(created.first?.projectID == projectID)
+
+    // 本体: 削除してはならない。削除すると新しいWorkingSourceRecordが指す実体そのものが
+    // 消え、再編集不能になる。
+    #expect(await managedFileStore.deleteCalls.isEmpty)
+    // 削除しない＝失敗もしていないため後始末（registerOrphan）も発生しない。
+    #expect(await maintenanceStore.registerOrphanCalls.isEmpty)
 }
