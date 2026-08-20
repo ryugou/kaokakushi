@@ -391,3 +391,5 @@ func reselectDoesNotDeleteWhenLoaderReturnsSameSourceFileID() async throws {
     // 同じ理由で登録されないことを確認する（本番の挙動を反映した回帰であることの根拠）。
     #expect(await store.pendingFileDeletionFileRefs.isEmpty)
 }
+
+// W-1回帰（kind差の同一性判定）は型制約によりSagaレベルでは再現不能なためManagedFileIdentityTests.swiftへ移動した。

@@ -169,3 +169,59 @@ func importDoesNotDeleteWhenLoaderReturnsSameSourceFileID() async throws {
     // 削除しない＝失敗もしていないため後始末（registerOrphan）も発生しない。
     #expect(await maintenanceStore.registerOrphanCalls.isEmpty)
 }
+
+// MARK: - W-1回帰テスト: 同一UUID・異なるkindは別実体として削除される
+//
+// codex レビュー W-1: `ManagedFileRef`（ManagedFileRef.swift）の同一性は kind + fileID の両方で
+// 決まるが、importedFileToDelete は fileID だけを比較していた。`PickedPhotoInput.importedFile`
+// は kind 制約の無い `ManagedFileRef`（正本 image-pipeline.md 5章「PickedPhotoInput」）であるのに
+// 対し、ローダーが返す正規化後ファイル（`normalizedSourceFile.ref`）は `WorkingSourceFileRef` の
+// 型制約により常に `.processingTemporary` に固定される。したがって
+// `input.importedFile.kind != .processingTemporary` かつ
+// `input.importedFile.fileID == normalizedSourceFile.ref.fileID` という「同一UUID・異なるkind」の
+// 入力は実際に起こりうる。fileIDのみの比較のままだと、この入力を上のテスト
+// （importDoesNotDeleteWhenLoaderReturnsSameSourceFileID、完全に同一な参照）と同じ「削除しない」
+// 経路へ誤って合流させてしまい、別実体である取り込みファイルの削除を怠る（孤児ファイル化。
+// .historyThumbnailは起動時GCの対象外 — StartupRecoveryCoordinatorのorphanGCKinds判定）。
+
+@Test("W-1回帰: 手順4はローダーが取り込みファイルと同一UUID・異なるkindの正規化ファイルを返しても削除する")
+func importDeletesWhenLoaderReturnsSameFileIDButDifferentKind() async throws {
+    let sharedFileID = ManagedFileID(rawValue: UUID())
+    // 取り込みファイル自体は historyThumbnail 種別（processingTemporary以外なら何でもよいが、
+    // GC対象外のkindを選ぶことで削除を怠った場合の実害〈孤児ファイルが永久に残る〉を明確にする）。
+    let input = makePickedPhotoInput(importedFile: ManagedFileRef(kind: .historyThumbnail, fileID: sharedFileID))
+    // ローダーは同一UUID・.processingTemporaryのImageSourceを返す（WorkingSourceFileRefの型制約上
+    // 正規化後ファイルの kind は必ずこれになる）。
+    let photo = LoadedPhoto(
+        source: ImageSource(
+            file: ManagedFileRef(kind: .processingTemporary, fileID: sharedFileID),
+            pixelSize: makePixelSize(),
+            format: .jpeg
+        ),
+        capture: makeLoadedPhoto().capture
+    )
+    let loader = FakePickedPhotoLoader(result: photo)
+    let store = FakeWorkingSourceStore()
+    let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
+    let coordinator = makeSourceImportCoordinator(
+        pickedPhotoLoader: loader,
+        workingSourceStore: store,
+        managedFileStore: managedFileStore,
+        maintenanceStore: maintenanceStore
+    )
+
+    let projectID = try await coordinator.importPickedPhoto(input)
+
+    // 書き込み（手順3）は正規化後ファイル（.processingTemporary側）で通常どおり行われる。
+    let created = await store.createProjectWithWorkingSourceCalls
+    #expect(created.count == 1)
+    #expect(created.first?.sourceFile.ref.fileID == sharedFileID)
+    #expect(created.first?.projectID == projectID)
+
+    // 本体（W-1）: kindが異なる別実体であるため、取り込みファイル（historyThumbnail側）の
+    // 削除が実行される。
+    #expect(await managedFileStore.deleteCalls == [input.importedFile])
+    // 削除に成功しているため後始末（registerOrphan）は発生しない。
+    #expect(await maintenanceStore.registerOrphanCalls.isEmpty)
+}

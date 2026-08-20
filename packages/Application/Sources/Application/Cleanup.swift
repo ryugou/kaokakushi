@@ -13,6 +13,10 @@ import Foundation
 // メソッドだったが、OutputDeliveryCoordinator.saveToPhotoLibrary の abandonDeliveryAttempt
 // 失敗経路にも同型で必要になったため、後始末ヘルパーの集約先であるこのファイルへ移した
 // （Issue #7 受け渡し後始末のキャンセルシールド横展開）。
+//
+// ファイル同一性の判定（isDistinctManagedFile）はこのファイルの責務（エラー保全）とは無関係
+// なため ManagedFileIdentity.swift へ分離した（codex レビュー reviewer 指摘。集約の経緯は
+// そちらのファイル冒頭コメント参照）。
 
 /// 後始末（`cleanup`）自体が失敗した場合に、失敗の真因を後始末の失敗へすり替えずに
 /// 呼び出し元へ伝えるための複合エラー。`cause` が本来の失敗（真因）、`cleanupFailure` が

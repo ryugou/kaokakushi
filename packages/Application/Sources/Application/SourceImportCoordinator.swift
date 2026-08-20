@@ -252,9 +252,9 @@ public actor SourceImportCoordinator {
         }
     }
 
-    /// 手順4で削除する「取り込みファイル」を決める。ローダーが返した正規化後ファイルと同一IDの
+    /// 手順4で削除する「取り込みファイル」を決める。ローダーが返した正規化後ファイルと同一実体の
     /// 場合は削除対象から外す。再選択Saga（SourceImportCoordinator+Reselect.swift の
-    /// replacedSourceFileToDelete、98-110行目）・Persistence層のガード
+    /// replacedSourceFileToDelete、98-127行目）・Persistence層のガード
     /// （WorkingSourceStoreLive+Replace.swift:93-103、applyWorkingSourceReplacementの
     /// 「旧sourceFileIDが新sourceFileIDと同一の場合は登録しない」判定）と同じ基準をここでも
     /// 適用する（PickedPhotoLoader.load の契約（Domain/Ports/ImagePipeline.swift）には
@@ -262,10 +262,26 @@ public actor SourceImportCoordinator {
     /// ここで判定を怠ると、DB上は新しい WorkingSourceRecord が有効なまま実体ファイル
     /// （normalizedSourceFile そのもの）を手順4が削除してしまい、再編集不能になるデータ損失
     /// 事故になる。
+    ///
+    /// 同一性判定は fileID だけでなく `ManagedFileRef` 全体（kind + fileID。
+    /// isDistinctManagedFile、ManagedFileIdentity.swift）で行う（codex レビュー W-1）。
+    /// `input.importedFile` は kind 制約の無い `ManagedFileRef`（PickedPhotoInput の契約）であり、
+    /// `normalizedSourceFile.ref` は常に `.processingTemporary` に固定されている
+    /// （WorkingSourceFileRef の型制約）ため、「同一UUID・異なるkind」の入力を fileID だけで
+    /// 判定すると同一実体と誤認し、削除すべき別実体（多くは起動時GCの対象だが
+    /// `.historyThumbnail` はGC対象外）を削除し損ね孤児ファイル化する。
+    ///
+    /// 上記「Persistence層のガードと同じ基準」について: Persistence側
+    /// （WorkingSourceStoreLive+Replace.swift）はkindが `.processingTemporary` に固定された文脈での
+    /// fileID比較であり、実質は同一の基準である。Application層はkind非固定の値
+    /// （`PickedPhotoInput.importedFile` は任意kindを受理する）を扱うため、fileIDだけでなく参照
+    /// 全体（kind + fileID）で比較する必要がある。この違いを見落として「Persistenceに合わせよう」と
+    /// fileIDのみの比較へ戻すと、W-1（同一UUID・異なるkindの誤同一視）を再導入することになるため
+    /// 注意する。
     private func importedFileToDelete(
         input: PickedPhotoInput, normalizedSourceFile: WorkingSourceFileRef
     ) -> ManagedFileRef? {
-        input.importedFile.fileID == normalizedSourceFile.ref.fileID ? nil : input.importedFile
+        isDistinctManagedFile(input.importedFile, from: normalizedSourceFile.ref) ? input.importedFile : nil
     }
 
     /// 手順4。削除に失敗したら registerOrphan で積む（正本「削除に失敗したら

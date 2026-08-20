@@ -95,7 +95,7 @@ extension SourceImportCoordinator {
         }
     }
 
-    /// 手順3で削除する「置換された旧sourceFile」を決める。新しい正規化ファイルと同一IDの場合は
+    /// 手順3で削除する「置換された旧sourceFile」を決める。新しい正規化ファイルと同一実体の場合は
     /// 削除対象から外す。Persistence層のガード（WorkingSourceStoreLive+Replace.swift:93-103、
     /// applyWorkingSourceReplacementの「旧sourceFileIDが新sourceFileIDと同一の場合は登録しない」
     /// 判定）と同じ基準をApplication層でも適用する（PickedPhotoLoader.loadの契約
@@ -103,10 +103,27 @@ extension SourceImportCoordinator {
     /// 同一IDが返る可能性を排除できないため）。ここで判定を怠ると、DB上は新しい
     /// WorkingSourceRecordが有効なまま実体ファイルだけを削除してしまい、再編集不能になる
     /// データ損失事故になる。
+    ///
+    /// 同一性判定は fileID だけでなく `ManagedFileRef` 全体（kind + fileID。
+    /// isDistinctManagedFile、ManagedFileIdentity.swift）で行う（codex レビュー W-1。
+    /// SourceImportCoordinator.swift の importedFileToDelete と同じ基準へ揃える。S-1）。
+    /// `existing.sourceFile.ref` / `normalizedSourceFile.ref` はいずれも `WorkingSourceFileRef` の
+    /// 型制約により常に `.processingTemporary` に固定されるため、この呼び出し元では kind が
+    /// 一致しない組み合わせは現状発生しない。それでも fileID のみの比較のままにせず判定基準を
+    /// 揃えるのは、削除可否判定という同一の意味を持つロジックを2箇所に別々の粒度で持たせない
+    /// ため（S-1の趣旨。将来 `WorkingSourceFileRef` の kind 制約が緩んだ場合の防御にもなる）。
+    ///
+    /// 上記「Persistence層のガードと同じ基準」について: Persistence側
+    /// （WorkingSourceStoreLive+Replace.swift）はkindが `.processingTemporary` に固定された文脈での
+    /// fileID比較であり、実質は同一の基準である。Application層はkind非固定の値
+    /// （`PickedPhotoInput.importedFile` は任意kindを受理する）を扱うため、fileIDだけでなく参照
+    /// 全体（kind + fileID）で比較する必要がある。この違いを見落として「Persistenceに合わせよう」と
+    /// fileIDのみの比較へ戻すと、W-1（同一UUID・異なるkindの誤同一視）を再導入することになるため
+    /// 注意する。
     private func replacedSourceFileToDelete(
         existing: WorkingSourceRecord, normalizedSourceFile: WorkingSourceFileRef
     ) -> WorkingSourceFileRef? {
-        existing.sourceFile.ref.fileID == normalizedSourceFile.ref.fileID ? nil : existing.sourceFile
+        isDistinctManagedFile(existing.sourceFile.ref, from: normalizedSourceFile.ref) ? existing.sourceFile : nil
     }
 
     /// 「あり」側（`WorkingSourceRecord` が存在する）: 単一DBトランザクションで
