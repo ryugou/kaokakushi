@@ -47,10 +47,13 @@ import Domain
 // キャンセルされていても、これらの後始末は完走させる。
 //
 // 【手順4の削除可否判定】PickedPhotoLoader.load（Domain/Ports/ImagePipeline.swift）の契約には
-// 「入力（importedFile）と異なるファイルIDを返す」保証が無い。同一IDが返った場合、手順4が
+// 「入力（importedFile）と異なる ManagedFileRef を返す」保証が無い。同一参照が返った場合、手順4が
 // importedFile を無条件削除すると、手順3で作った WorkingSourceRecord が指す実体（正規化後
 // ファイルそのもの）を削除してしまい、再編集不能になるデータ損失事故になる。performImport は
-// この判定（importedFileToDelete ヘルパー）を行い、同一IDなら削除対象なし（nil）を返す。
+// この判定（importedFileToDelete ヘルパー）を行い、同一参照なら削除対象なし（nil）を返す。
+// 判定は kind と fileID の両方を見る（isDistinctManagedFile、ManagedFileIdentity.swift）。
+// fileID だけで比較してはならない。ManagedFileRef の同一性は kind + fileID で決まり、実体パスも
+// kind 別ディレクトリから解決されるため、同一 UUID・異なる kind は別実体である（codex W-1）。
 // SourceImportCoordinator+Reselect.swift の replacedSourceFileToDelete と同型のガード
 // （両ファイルとも Persistence 側の同じガード、WorkingSourceStoreLive+Replace.swift:93-103、を
 // 参照している）。
@@ -169,8 +172,8 @@ public actor SourceImportCoordinator {
             }
         }
 
-        // 手順4: 取り込みファイルを削除する。ローダーが input.importedFile と同一IDの正規化
-        // ファイルを返した場合（PickedPhotoLoader.load の契約には異なるIDを返す保証が無い。
+        // 手順4: 取り込みファイルを削除する。ローダーが input.importedFile と同一参照（kind と
+        // fileID がともに一致）の正規化ファイルを返した場合（load の契約には異なる参照を返す保証が無い。
         // `importedFileToDelete(input:normalizedSourceFile:)` 参照）、削除すべき取り込みファイルは
         // 存在しない。再選択Saga（SourceImportCoordinator+Reselect.swift の reselectSource、
         // `guard let replacedSourceFile else { return }`）と同型の書き方に揃える。
