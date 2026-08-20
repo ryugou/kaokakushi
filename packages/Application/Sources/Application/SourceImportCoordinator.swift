@@ -324,12 +324,22 @@ public actor SourceImportCoordinator {
     /// 「無加工」状態を表す（sourceCrop 全面・regions 空）。ファイル冒頭コメント参照。
     /// `NormalizedRect(0,0,1,1)` はリテラル定数のみで構成され、finite・left<right・
     /// top<bottom・絶対値16以下のすべての検査を常に満たすため失敗しえない（S1。
-    /// ValidatedValues.swift の NormalizedRect.init 参照）。
+    /// ValidatedValues.swift の NormalizedRect.init 参照）。失敗しえない前提を
+    /// `try!` で握り潰さず、万一到達した場合に検証条件の変更を明示できるよう
+    /// do/catch + preconditionFailure で表現する。
     private func defaultInitialRenderSpec() -> RenderSpec {
-        RenderSpec(
-            // 上記doc コメントのとおりリテラル定数のみで構成され失敗しえない。
-            // swiftlint:disable:next force_try
-            sourceCrop: try! NormalizedRect(left: 0, top: 0, rightExclusive: 1, bottomExclusive: 1),
+        let sourceCrop: NormalizedRect
+        do {
+            sourceCrop = try NormalizedRect(left: 0, top: 0, rightExclusive: 1, bottomExclusive: 1)
+        } catch {
+            preconditionFailure(
+                "NormalizedRect(0,0,1,1) はリテラル定数のみで構成され、finite・left<right・" +
+                "top<bottom・絶対値16以下のすべての検査を常に満たすため失敗しえない。" +
+                "ここに到達した場合、NormalizedRect の検証条件が変更されたことを意味する: \(error)"
+            )
+        }
+        return RenderSpec(
+            sourceCrop: sourceCrop,
             scaleMode: .fit,
             background: .none,
             regions: []
