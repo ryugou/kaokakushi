@@ -973,7 +973,12 @@ struct WorkingSourceRecord: Sendable {
 
 1. 向きを正規化した原寸ファイルを作成し、EXIF を読む
 2. 単一 DB トランザクションで、`WorkingSourceRecord` の置換または新規作成、`Project` の撮影メタデータ・再編集用参照の更新、`FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` の破棄、`detectionRevision` / `projectRevision` の増加を行う
-3. 置換された旧 `sourceFile` を削除する（失敗したら `PendingFileDeletion` へ積む）
+3. 置換された旧 `sourceFile`（既存の `WorkingSourceRecord` が指していた実体）を削除する（失敗したら `PendingFileDeletion` へ積む）
+4. 取り込みファイル（`PickedPhotoInput.importedFile`。手順3で削除する旧 `sourceFile` とは別の実体で、今回選び直した写真そのもの）を削除する（削除に失敗したら `PendingFileDeletion` へ積む）
+
+**手順 2 が失敗した場合、作成済みのファイル（取り込み・正規化の両方）を `PendingFileDeletion` へ積み、起動時の孤児 GC に委ねます。**
+
+手順 3・4 とも、削除候補がローダーの返した正規化後ファイルと同一の `ManagedFileRef`（`kind` と `fileID` がともに一致）であれば削除しません。`PickedPhotoLoader.load` の契約には入力と異なる参照を返す保証が無く、同一参照を削除すると現在参照中の実体を失うためです（`ManagedFileIdentity.swift` の `isDistinctManagedFile`、および Persistence 側 `WorkingSourceStoreLive+Replace.swift` の同型ガード）。
 
 手順 2 は `WorkingSourceRecord` の有無で分岐します。
 
