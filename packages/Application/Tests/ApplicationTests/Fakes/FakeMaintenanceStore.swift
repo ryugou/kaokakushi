@@ -36,6 +36,14 @@ actor FakeMaintenanceStore: MaintenanceStore {
     var listReferencedFileIDsFailure: Error?
     var registerOrphanFailure: Error?
 
+    /// true の間、registerOrphan は呼び出された瞬間の `Task.isCancelled` を検査し、true なら
+    /// 何もせず `CancellationError` を throw する。実ストアがキャンセルを尊重する実装に
+    /// なった場合を模し、呼び出し元（SourceImportCoordinator）が後始末をキャンセル非伝播の
+    /// コンテキストで実行しているかを検証するためのフック（FakeExportSagaStore.
+    /// discardExportChecksCancellation と同型。既定 false では既存の振る舞いを変えない。
+    /// Issue #8 サブプロジェクト5 A2 Task 2 Step 6）。
+    var registerOrphanChecksCancellation = false
+
     // MARK: - in-memory 状態
 
     /// 実体の所在の単一の真実（W-5）。listExistingFileIDs はここから導出する。
@@ -55,6 +63,7 @@ actor FakeMaintenanceStore: MaintenanceStore {
     func setListExistingFileIDsFailure(_ value: Error?) { listExistingFileIDsFailure = value }
     func setListReferencedFileIDsFailure(_ value: Error?) { listReferencedFileIDsFailure = value }
     func setRegisterOrphanFailure(_ value: Error?) { registerOrphanFailure = value }
+    func setRegisterOrphanChecksCancellation(_ value: Bool) { registerOrphanChecksCancellation = value }
 
     /// テストが未処理の PendingFileDeletion をあらかじめ登録する
     func seedPendingFileDeletion(_ file: ManagedFileRef) {
@@ -100,6 +109,11 @@ actor FakeMaintenanceStore: MaintenanceStore {
     }
 
     func registerOrphan(_ file: ManagedFileRef) async throws {
+        // 呼び出し記録より前に検査する: シールドされていない実装だと、この throw により
+        // registerOrphanCalls に記録すら残らない（FakeExportSagaStore.discardExport と同型）。
+        if registerOrphanChecksCancellation {
+            try Task.checkCancellation()
+        }
         registerOrphanCalls.append(file)
         if let failure = registerOrphanFailure { throw failure }
         pendingDeletions.insert(file)

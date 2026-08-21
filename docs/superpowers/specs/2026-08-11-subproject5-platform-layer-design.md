@@ -73,10 +73,17 @@ vibepod の Swift profile は Foundation-only の SwiftPM パッケージしか�
 **完了条件**: `swift test --package-path packages/Domain` と `--package-path packages/Application` が緑
 （後者は Domain の変更が Application を壊していないことの回帰確認。Application 側の変更は無い）。
 
-### A2: `SourceImportCoordinator`
+### A2: `SourceImportCoordinator`（インポート・再選択・再接続）
 
 `image-pipeline.md` 5章「インポート Saga」「再選択後の Saga」「実装の所在」が正本。
-4つの Saga（インポート／再選択／再接続／複製）を実装する。
+**3つの Saga（インポート／再選択／再接続）を実装する。**
+
+**複製 Saga は A2 から除外する（Issue #35）。**`architecture.md` 712-725 が手順を定めているが、
+手順3（`Project`・設定・`WorkingSourceRecord` を単一トランザクションで複製し、有料スタンプの領域を
+置換する）を担うポートが正本のどこにも定義されていない。`WorkingSourceStore` は 6 メソッドのみで
+複製用が無く、`duplicateProject` 相当の記述も存在しない。ポート設計から始まるため性質が異なり、
+`initialSpec` の展開が Issue #25（未着手）を参照している点も前提の確認が要る。
+Issue #35 の解決後に A3 として着手する。
 
 守るべき不変条件（`test-plan.md` 4.3 が要求。すべてテストで固定する）:
 
@@ -84,10 +91,11 @@ vibepod の Swift profile は Foundation-only の SwiftPM パッケージしか�
 - 手順3が失敗したら、作成済みファイル（取り込み・正規化の両方）を `PendingFileDeletion` へ積む
 - `PickedPhotoInput.importedFile` を作り直さず所有権を受け取る
 - 再選択・再接続の成功経路でも旧 `sourceFile` を削除する
-- 複製で新しい `projectID` の `WorkingSourceRecord` を作り、処理用ファイルを元 `Project` と共有しない
-- 複製に `ExportedSettingsEntry` をコピーしない
-- 元素材の実体が無い場合は `WorkingSourceRecord` を作らず複製する
 - DB 登録の完了前に成功を呼び出し元へ返さない
+- 検出用の縮小画像がメモリ内で完結し、`ManagedFileStore` へ書かれず DB へも登録されない
+- `WorkingSourceRecord` が最初から向き正規化済みの原寸ファイルを指す
+
+複製に関する不変条件（`test-plan.md` 4.3 の残り3項目）は A3 で扱う。
 
 **サブプロジェクト4の教訓を適用する**:
 - 後始末（補償削除・`PendingFileDeletion` への登録）が DB 書き込みを伴う場合、キャンセル済み文脈でも
