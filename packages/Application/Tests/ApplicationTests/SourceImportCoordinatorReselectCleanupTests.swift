@@ -246,3 +246,110 @@ func reselectAttachDeletesImportedFileWhenLoaderReturnsSameFileIDButDifferentKin
     // 削除に成功しているため後始末（registerOrphan）は発生しない。
     #expect(await maintenanceStore.registerOrphanCalls.isEmpty)
 }
+
+// MARK: - codex レビュー指摘: replacedSourceFileとinput.importedFileが同一参照の場合の冪等性固定
+
+@Test("「あり」側: 旧sourceFileと取り込みファイルが同一参照でも手順3・4の2回削除は冪等に成功する")
+func reselectSucceedsWhenReplacedSourceFileAndImportedFileAreSameRef() async throws {
+    // codex レビュー指摘: replacedSourceFileとinput.importedFileが同一ManagedFileRefになることを
+    // 型・ポート契約は禁止していない。この場合、手順3・4はどちらもsharedFileを削除対象と判定し、
+    // managedFileStore.deleteが同じ参照へ2回呼ばれる。本テストが固定するのはApplication層の
+    // SourceImportCoordinatorが重複除去をせず同一参照へ2回deleteを呼ぶこと（下記deleteCallsの
+    // アサーション）であり、FakeManagedFileStoreを使うため本番アダプタの冪等性そのものはここでは
+    // 検証していない（ManagedFileStoreLiveを非冪等に変更してもこのテストは落ちない）。本番
+    // アダプタの「実体が無ければ成功扱い」という冪等性は、Persistence側
+    // ManagedFileStoreTests.swift の deleteIsIdempotentForMissingFile が正本として固定する。
+    let sharedFile = ManagedFileRef(kind: .processingTemporary, fileID: ManagedFileID(rawValue: UUID()))
+    let existingSourceFile = try #require(WorkingSourceFileRef(sharedFile))
+    let projectID = makeProjectID()
+    let store = FakeWorkingSourceStore()
+    await store.seedWorkingSource(
+        WorkingSourceRecord(projectID: projectID, sourceFile: existingSourceFile, createdAt: makeFixedClock()())
+    )
+    // 取り込みファイル（input.importedFile）を旧sourceFileと同一参照にする（本テストの本体）。
+    let input = makePickedPhotoInput(importedFile: sharedFile)
+    // ローダーが返す正規化後ファイルは makeLoadedPhoto 内の makeImageSource が毎回新しい UUID を
+    // 割り当てるため、sharedFile とは自動的に別実体になる（「通常は異なる実体だが型・ポート契約は
+    // これを保証しない」というimage-pipeline.md 5章の記述どおりの通常ケース）。
+    let loader = FakePickedPhotoLoader(result: makeLoadedPhoto())
+    let managedFileStore = FakeManagedFileStore()
+    await managedFileStore.seedExistingFile(sharedFile)
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
+    let coordinator = makeSourceImportCoordinator(
+        pickedPhotoLoader: loader,
+        workingSourceStore: store,
+        managedFileStore: managedFileStore,
+        maintenanceStore: maintenanceStore
+    )
+
+    // 本体: 手順3・4がどちらもsharedFileを削除しようとしても例外を投げずに成功する。
+    try await coordinator.reselectSource(projectID: projectID, input: input)
+
+    // 手順3（旧sourceFile）・手順4（取り込みファイル）がどちらもsharedFileを削除対象と判定し、
+    // 同じ参照へ2回deleteが呼ばれたことを明示的に確認する。
+    #expect(await managedFileStore.deleteCalls == [sharedFile, sharedFile])
+    // 2回とも削除が成功したため後始末（registerOrphan）は発生しない。
+    #expect(await maintenanceStore.registerOrphanCalls.isEmpty)
+}
+
+@Test("「なし」側: 手順2失敗時、取り込みファイルと正規化ファイルが同一参照でもregisterOrphanの2回登録は冪等に成功する")
+func reselectAttachFailurePreservesErrorWhenImportedFileAndNormalizedFileAreSameRef() async throws {
+    // codex レビュー指摘: 手順2失敗時、performReselectのcatchは
+    // [input.importedFile] + snapshot（load成功直後に積んだcreatedFiles）をregisterOrphanする。
+    // ローダーがinput.importedFileと同一参照のImageSourceを返した場合、snapshotの要素は
+    // input.importedFileと同一参照になり、同じ参照が2回registerOrphanされる。本テストが固定
+    // するのはApplication層のSourceImportCoordinatorが重複除去をせず同一参照へ2回
+    // registerOrphanを呼ぶこと（下記のregisterOrphanCallsアサーション）であり、
+    // FakeMaintenanceStoreを使うため本番アダプタの冪等性そのものはここでは検証していない
+    // （MaintenanceStoreLiveを非冪等に変更してもこのテストは落ちない）。本番アダプタの
+    // 「INSERT OR IGNORE」という冪等性はPersistence側 MaintenanceStoreTests.swift の
+    // registerOrphanIsIdempotent が正本として固定する。
+    let projectID = makeProjectID()
+    let input = makePickedPhotoInput()
+    // ローダーがinput.importedFileと同一参照のImageSourceを返す状況を模す
+    // （reselectAttachDoesNotDeleteImportedFileWhenLoaderReturnsSameFileと同じパターン。
+    // PickedPhotoLoader.loadの契約には異なる参照を返す保証が無いため、この状況を排除できない）。
+    let photo = LoadedPhoto(
+        source: ImageSource(file: input.importedFile, pixelSize: makePixelSize(), format: .jpeg),
+        capture: makeLoadedPhoto().capture
+    )
+    let loader = FakePickedPhotoLoader(result: photo)
+    let store = FakeWorkingSourceStore()
+    // seedWorkingSourceを呼ばない = WorkingSourceRecordが無い状態（「なし」側の分岐。
+    // attachWorkingSourceToExistingProjectを呼ぶ経路を使い、attachToExistingProjectFailure
+    // 一つで手順2失敗を再現する。ファイル冒頭コメント参照）。
+    struct AttachBoom: Error, Equatable {}
+    await store.setAttachToExistingProjectFailure(AttachBoom())
+    let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
+    let coordinator = makeSourceImportCoordinator(
+        pickedPhotoLoader: loader,
+        workingSourceStore: store,
+        managedFileStore: managedFileStore,
+        maintenanceStore: maintenanceStore
+    )
+
+    do {
+        try await coordinator.reselectSource(projectID: projectID, input: input)
+        Issue.record("エラーがthrowされるはずだった")
+    } catch let error as AttachBoom {
+        // performReselectのcatch → ReselectFailureAlreadyHandledに包まれ、reselectSource側で
+        // unwrapされてrethrowされる。手順2失敗の理由（AttachBoom）がそのまま伝播することを
+        // 確認する（Global Constraints「エラーの握りつぶし禁止」）。
+        #expect(error == AttachBoom())
+    } catch {
+        Issue.record("想定外のエラー: \(error)")
+    }
+
+    // Suggestion対応（Issue #36 reviewer指摘）: 手順2失敗時は削除フェーズ（手順3・4）へ
+    // 到達しないのが不変条件である。これが無いと「手順2失敗なのに削除してしまう」という
+    // データ損失方向の回帰（例外処理の実装ミスで削除ロジックまで実行されてしまう変更等）を
+    // 見逃す。
+    #expect(await managedFileStore.deleteCalls.isEmpty)
+
+    // 本体: [input.importedFile] + snapshot は同じ参照が2要素になり、registerOrphanが同じ
+    // ManagedFileRefへ2回呼ばれたことを明示的に確認する（registerOrphanFailureは未設定のため
+    // 2回とも成功する。ファイル冒頭の説明のとおり、これはApplication層が重複除去せず2回
+    // 呼び出す挙動の固定であり、本番アダプタの冪等性の検証はPersistence側の既存テストに譲る）。
+    #expect(await maintenanceStore.registerOrphanCalls == [input.importedFile, input.importedFile])
+}
