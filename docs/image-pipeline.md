@@ -937,7 +937,7 @@ struct WorkingSourceRecord: Sendable {
 | 参照 | 編集中の `Project` の元素材（`projectID` が `Project` への外部キー） |
 | 削除の経路 | **DB トランザクションで `WorkingSourceRecord` を削除し、同じトランザクションで `PendingFileDeletion` を追加する。コミット後に実体を削除する**（[アーキテクチャ設計](architecture.md) の 7.5「出力の削除経路」と同じ単一経路） |
 | 削除の契機 | **完了操作（settle）**（[書き出し Saga](export-saga.md) 側の契約）・**プロジェクト破棄**・**実体欠損による無効化**（`invalidateWorkingSource`。下記「実体の存在確認」） |
-| 起動時 | どのプロジェクトからも参照されない行を、同じ経路で回収・削除する |
+| 起動時 | どの `WorkingSourceRecord` からも参照されない `working/` の実体ファイルを、孤児ファイル GC が回収する（[アーキテクチャ設計](architecture.md) の 7.5。`WorkingSourceRecord` 行自体は `Project` への外部キーで束縛され、孤児にならない） |
 | 実体が欠けている | `invalidateWorkingSource` が `WorkingSourceRecord` を削除する。該当項目はセッション内で **`paused(.sourceReselectionRequired)`** として扱われる（`BatchItemStartOutcome.itemPaused`。[書き出し Saga](export-saga.md) の 1.6）。エラーで止めない |
 
 `tmp/` に置くと OS がいつでも削除でき、再編集や履歴からの再開に必要な実体が失われます。それでもディスク不足で消える可能性はゼロにならないため、`paused(.sourceReselectionRequired)` を逃げ道として残し、**該当項目だけを再選択対象としてバッチ全体を失いません。**
@@ -1062,7 +1062,7 @@ struct AttachWorkingSourceInput: Sendable {
 
 ##### 実体の存在確認
 
-**`WorkingSourceRecord`（`app.db` の平文行）がファイル参照とメタデータを持ち、実体を開くときは `ManagedFileStore.exists(_:)`（[アーキテクチャ設計](architecture.md) の 7.3「スコープ付きアクセス」）で存在確認のみ行います。** `exists` が `false` を返した場合だけ `WorkingSourceStore.invalidateWorkingSource(projectID)` を呼びます。存在確認そのものが失敗した場合（保護データ利用不可・I/O 障害など）は `exists` が throw するため、欠損とは扱わず再選択導線へも倒しません。**単一 DB トランザクション**で `WorkingSourceRecord` の削除・欠損したファイル参照の `PendingFileDeletion` への登録を原子的に行い、続けて該当項目をセッション内で `paused(.sourceReselectionRequired)` として扱って再選択の導線を出します（**確認の契機は書き出し開始時**（[書き出し Saga](export-saga.md) の 1.6 手順 3）**と、履歴から `Project` を開いて再編集を始めるときの 2 つに限り、起動時には行いません**〈起動時に行うのは、どのプロジェクトからも参照されない孤児行の GC だけです。下記「未完了作業の保持期限」〉。呼び出し主体は `SourceImportCoordinator`）。`FaceDetector` / `ImageEffectRenderer` は通常の `ImageSource`（上記「境界型」）を受け取ります（プロトコル宣言は上記「プロトコルのシグネチャ」）。
+**`WorkingSourceRecord`（`app.db` の平文行）がファイル参照とメタデータを持ち、実体を開くときは `ManagedFileStore.exists(_:)`（[アーキテクチャ設計](architecture.md) の 7.3「スコープ付きアクセス」）で存在確認のみ行います。** `exists` が `false` を返した場合だけ `WorkingSourceStore.invalidateWorkingSource(projectID)` を呼びます。存在確認そのものが失敗した場合（保護データ利用不可・I/O 障害など）は `exists` が throw するため、欠損とは扱わず再選択導線へも倒しません。**単一 DB トランザクション**で `WorkingSourceRecord` の削除・欠損したファイル参照の `PendingFileDeletion` への登録を原子的に行い、続けて該当項目をセッション内で `paused(.sourceReselectionRequired)` として扱って再選択の導線を出します（**確認の契機は書き出し開始時**（[書き出し Saga](export-saga.md) の 1.6 手順 3）**と、履歴から `Project` を開いて再編集を始めるときの 2 つに限り、起動時には行いません**〈起動時に行うのは孤児ファイルの GC だけです。どの `WorkingSourceRecord` からも参照されない `working/` の実体を回収する（[アーキテクチャ設計](architecture.md) の 7.5）。下記「未完了作業の保持期限」〉。呼び出し主体は `SourceImportCoordinator`）。`FaceDetector` / `ImageEffectRenderer` は通常の `ImageSource`（上記「境界型」）を受け取ります（プロトコル宣言は上記「プロトコルのシグネチャ」）。
 
 ##### 照合に使ってよいもの・使ってはいけないもの
 
