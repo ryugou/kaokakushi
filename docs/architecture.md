@@ -1083,7 +1083,7 @@ enum BatchKind: UInt32, Sendable, Hashable {
 - 1 バッチ最大 50 枚
 - 同時並列処理は **v1 では 1 固定**（初期値・hard max とも 1）。2 へ引き上げる場合は開始順序と勘定の再設計が要る（v2 検討時）
 - 一枚の失敗でバッチ全体を停止しない
-- **アプリ再起動後、未完了のバッチは復元しない。** 最初からやり直しになる。起動時復旧が未 settle の `Batch` 残骸を削除する（[書き出し Saga](export-saga.md) の 5 章、[画像処理](image-pipeline.md) の `WorkingSourceRecord`）
+- **アプリ再起動後、未完了のバッチは復元しない。** 最初からやり直しになる。起動時復旧が、どの `ExportRecord` からも参照されない `Batch` 行（未 settle のまま中断されたバッチの残骸）を削除する（削除条件と手順の正本は [書き出し Saga](export-saga.md) の 5 章。処理用素材は [画像処理](image-pipeline.md) の `WorkingSourceRecord`）
 - 元素材へのアクセス権限を失った場合は再選択を求める
 - バックグラウンド処理は OS の実行制限に従う。`BGProcessingTask` は使わず、フォアグラウンド継続を前提とする
 

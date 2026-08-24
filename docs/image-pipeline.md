@@ -1025,7 +1025,9 @@ protocol WorkingSourceStore: Sendable {
 
 struct CreateWorkingSourceInput: Sendable {
     let projectID: ProjectID
-    let batchID: BatchID?                     // ExportJob / 勘定が使う（[書き出し Saga](export-saga.md)）ため残す
+    let batchID: BatchID?                     // ExportJob / 勘定へ引き継ぐための一時値。WorkingSourceStore は
+                                              // 保存しない（Project / WorkingSourceRecord は batchID を持たない。
+                                              // アーキテクチャ設計 7.5「削除の可否判定」が正本）
     let sourceFile: WorkingSourceFileRef      // 向き正規化済みの原寸
     let createdAt: Date
     let sourceLocator: ProjectSourceLocator
