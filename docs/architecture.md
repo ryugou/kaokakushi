@@ -1010,7 +1010,7 @@ extension ExportQueueState {
 }
 ```
 
-**処理用ファイルが失われた場合も新しい状態を作らず `paused(.sourceReselectionRequired)` へ遷移させる**（`paused` は「利用者操作を待って再開できる」の意で再選択要求もこれに当てはまる。バッチ全体ではなく該当項目だけが `paused` になる）。**`WorkingSourceRecord` の削除と欠損したファイル参照の `PendingFileDeletion` への登録は単一 DB トランザクションで原子的に行う**（正本は [画像処理](image-pipeline.md) の `WorkingSourceStore.invalidateWorkingSource`）。**キュー項目の `paused` への遷移は DB を更新しない。** 進行状態はセッション内のメモリ状態であり（7.1）、`Application` の `BatchItemStartOutcome.itemPaused`（[書き出し Saga](export-saga.md) の 1.6）が該当項目だけをこの状態にする。**`isTerminal` を各所で書き下さない**（バッチ完了判定と UI の進行表示がこの 1 述語を使う。書き下すと状態追加時に一部だけ更新される事故が起こる。キュー状態はセッション内のメモリにしか存在しないため、DB を対象とする履歴削除可否判定〈7.5〉や起動時復旧はこの述語を使わない）。
+**処理用ファイルが失われた場合も新しい状態を作らず `paused(.sourceReselectionRequired)` へ遷移させる**（`paused` は「利用者操作を待って再開できる」の意で再選択要求もこれに当てはまる。バッチ全体ではなく該当項目だけが `paused` になる）。**`WorkingSourceRecord` の削除と欠損したファイル参照の `PendingFileDeletion` への登録は単一 DB トランザクションで原子的に行う**（正本は [画像処理](image-pipeline.md) の `WorkingSourceStore.invalidateWorkingSource`）。**キュー項目の `paused` への遷移は DB を更新しない。** 進行状態はセッション内のメモリ状態であり `app.db` に行を持たない（正本は本節。DB にキューのテーブルが無いことは 7.1）。`Application` の `BatchItemStartOutcome.itemPaused`（[書き出し Saga](export-saga.md) の 1.6）が該当項目だけをこの状態にする。**`isTerminal` を各所で書き下さない**（バッチ完了判定と UI の進行表示がこの 1 述語を使う。書き下すと状態追加時に一部だけ更新される事故が起こる。キュー状態はセッション内のメモリにしか存在しないため、DB を対象とする履歴削除可否判定〈7.5〉や起動時復旧はこの述語を使わない）。
 
 **キューの進行状態と 6.1 の 2 軸は別物。**
 
