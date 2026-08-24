@@ -24,11 +24,11 @@ protocol ExportSagaStore: Sendable {
     /// 認可を評価し ExportJob を挿入する（1 章）。expectedProjectRevision と不一致なら throw
     func startExport(_ input: StartExportInput, expectedProjectRevision: Int64) async throws -> ExportStartDecision
     /// 確認用の OutputRecord(settledAt: nil) を作成する（3 章）。同じ projectID の未確定 OutputRecord が
-    /// 既に存在すれば throw（部分 UNIQUE 制約。詳細は 3 章）。台帳・ExportRecord・キュー・WorkingSourceRecord には触れない
+    /// 既に存在すれば throw（部分 UNIQUE 制約。詳細は 3 章）。台帳・ExportRecord・WorkingSourceRecord には触れない
     func recordGeneratedOutput(_ input: RecordOutputInput) async throws
     /// 完了（単体専用。ExportJob.batchID == nil でなければ throw）。単一トランザクションで、台帳の加算または
     /// トライアルクレジットの消費・settledAt の確定・ExportRecord の作成・confirmed 設定エントリの更新・
-    /// キュー項目の completed 更新・WorkingSourceRecord の削除を行う（3 章）。ここが唯一の確定境界。
+    /// WorkingSourceRecord の削除を行う（3 章）。ここが唯一の確定境界。
     /// 削除する WorkingSourceRecord の WorkingSourceFileRef は同一トランザクションで PendingFileDeletion へ
     /// 登録する（実削除はコミット後、失敗時は起動時再試行。削除経路の正本はアーキテクチャ設計 7.5）。最後に ExportJob を削除する
     func settleExport(_ exportID: ExportID) async throws
@@ -98,7 +98,6 @@ struct VerifiedOutputMeasurement: Sendable {
     let sha256: Data
 }
 
-struct ExportQueueItemID: Sendable, Hashable { let rawValue: UUID }
 /// 出力の縦横比（仕様の 元比率 / 1:1 / 4:5 / 9:16）
 enum OutputAspect: Sendable, Hashable {
     case original, square, fourFive, nineSixteen
@@ -122,7 +121,6 @@ struct ExportSetting: Sendable, Equatable {
 struct StartExportInput: Sendable {
     let projectID: ProjectID
     let batchID: BatchID?
-    let queueItemID: ExportQueueItemID?   // 単体書き出しでは nil
     let renderSpec: RenderSpec
     let exportSetting: ExportSetting
     let previewConfirmation: PreviewConfirmation   // 1.1
@@ -240,13 +238,9 @@ enum ExportStartBlockReason: Sendable, Equatable {
     case monthlyLimitReached, trialCreditsUnavailable
     case capabilityVerificationRequired   // entitlementSnapshot.verificationRequired、
                                           // または開始時点の能力が勘定の前提（proBatch の
-                                          // canUseProBatch）を満たさない（1.5 の store 側ゲート）。
-                                          // batchTrial は能力ゲートでブロックしない（作成時の
-                                          // 可否は canEnterBatch が担う）。ただし開始時点で
-                                          // canUseProBatch を持つ（Pro 加入済み）なら
-                                          // クレジットを消費せず paidUnlimited で認可する
-                                          // （architecture.md 6.3「Pro へ加入済みの場合は
-                                          // 消費しない」。アップグレード後もバッチを中断させない）
+                                          // canUseProBatch）を満たさない（1.6 手順4 で評価する）。
+                                          // batchTrial は能力ゲートでブロックしない
+                                          // （作成時の可否は canEnterBatch が担う）
 }
 struct ExportStartBlock: Sendable, Equatable {
     let reason: ExportStartBlockReason
@@ -270,26 +264,43 @@ enum ExportAccountingMode: Sendable, Equatable {
 | `freeMonthlyConsume` | 1 消費 | 使わない |
 | `batchTrial` | 使わない | 1 消費 |
 
-**トライアルバッチ（`kind == .trial`）でも、開始時点で `canUseProBatch` を持つ場合は `batchTrial` ではなく `paidUnlimited` として認可する**（クレジットを消費しない。Pro へアップグレード後もバッチを中断させないため。1.3 の `ExportStartBlockReason` の注記が正本）。
-
 月間クォータを使うのは Free の単体処理だけ（Free 利用者が月 5 枚を使い切っていても、クレジットが残っていれば一括トライアルを実行できる）。`batchTrial` は選択した写真ごとに毎回 1 クレジットを消費する。素材が過去に処理済みかどうかによる例外は無い（[ADR 0006](adr/0006-accounting-per-delivered-output.md)。同じ写真を選び直しても新しい加工として扱う）。
 
 消費は完了操作でのみ発生するため、完了前のやり直し（4 章）に免除や返還という概念は存在しない。まだ何も消費していないものを免除する対象が無いからである。
 
 ### 1.5 開始後の権限変化
 
-開始後に有料契約の失効・月間上限への到達が起きても、その書き出しは開始時の権限（`ExportJob.authorization`）で完了させる。開始済みの写真は開始時の認可のまま完了させる。まだ認可されていない写真は開始せず、バッチを `paused` にする。
+開始後に有料契約の失効・月間上限への到達・昇格が起きても無視し、バッチ開始時の認可スナップショットで全項目を完了させる。単体書き出しも同じ規則で、開始時の権限（`ExportJob.authorization`）のまま完了させる。
 
 ### 1.6 開始の順序
 
-直列実行キュー1本（並列数1）が同時実行を構造的に防ぐため、専用の排他ゲートや素材単位のロックは不要。
+直列実行キュー1本（並列数1）が同時実行を構造的に防ぐため、専用の排他ゲートや素材単位のロックは不要。**バッチの項目で手順1・2・4・5のいずれかが不成立に終わった場合、または手順3で `WorkingSourceRecord` の行自体が存在しない場合、該当項目だけがセッション内で `failed`（`BatchItemStartOutcome.itemFailed`）として扱われ、バッチの残り項目は続行する**（一枚の失敗でバッチ全体を止めない既存則。[アーキテクチャ設計](architecture.md) の 6.4）。**単体書き出しでは、この不成立がそのまま書き出し全体の不開始として利用者へ返る**（バッチと違い継続すべき「残り項目」が無いため）。
 
-1. 確認の一致を検査する（1.1）。不一致なら終える
-2. 設定内容の能力を検査する（1.2）。`blocked` なら終える
-3. `WorkingSourceRecord` の実体（ファイルの存在）を確認する（[画像処理](image-pipeline.md)）。無ければ無効化して再選択導線へ倒し、終える。素材参照は `projectID` を介した `WorkingSourceRecord` を使う（素材の同一性照合は行わない。ADR 0006）
-4. 権限とクォータを評価する（1.3）。`.blocked` ならここで終える
-5. `startExport` で `ExportJob` を挿入する（`expectedProjectRevision` つき）。revision が変わっていれば失敗し、終える
+1. 確認の一致を検査する（1.1）。不一致なら終える（バッチの項目はここで `itemFailed`）
+2. 設定内容の能力を検査する（1.2）。`blocked` なら終える（バッチの項目はここで `itemFailed`）
+3. `WorkingSourceRecord` を検査する（[画像処理](image-pipeline.md)）。**行自体が存在しなければ**（`Project` が履歴削除された等。FK CASCADE で行ごと消えるため再選択で復帰できない）終える（バッチの項目はここで `itemFailed`。`AppErrorCode.sourceMissing`。[アーキテクチャ設計](architecture.md) の 9.1）。**行はあるが実体ファイルが無ければ** `invalidateWorkingSource` で無効化し、再選択導線へ倒して終える（バッチの項目については下記 `BatchItemStartOutcome.itemPaused` が結果を表す）。素材参照は `projectID` を介した `WorkingSourceRecord` を使う（素材の同一性照合は行わない。ADR 0006）
+4. 権限とクォータを評価する（1.3）。`.blocked` ならここで終える（バッチの項目はここで `itemFailed`）。**バッチの 2 件目以降の項目は、この評価をバッチの最初の項目が確定させた `ExportAuthorization` でそのまま満たし、個別に再評価しない**（1.5。開始後の失効・昇格を無視するのはこの再評価をしないことで実現する）
+5. `startExport` で `ExportJob` を挿入する（`expectedProjectRevision` つき）。revision が変わっていれば失敗し、終える（バッチの項目はここで `itemFailed`）
 6. 処理を開始する（3 章）
+
+上記はバッチの各項目にも単体書き出しにも共通する順序。バッチの Coordinator は項目ごとの結果を次の型で扱う。
+
+```swift
+/// バッチの 1 項目が処理を開始しようとした結果。DB には保存せず Application 層の
+/// メモリ状態としてのみ扱う（キュー進行状態はセッション内のメモリ状態。architecture.md 6.4）
+enum BatchItemStartOutcome: Sendable {
+    case started(ExportJob)
+    /// 手順 3 で `WorkingSourceRecord` の行はあるが実体ファイルが失われていた。
+    /// 該当項目だけがセッション内で paused(.sourceReselectionRequired) として扱われる。
+    /// バッチの残り項目は続行する
+    case itemPaused
+    /// 手順 1・2・4・5 のいずれかが不成立（確認不一致・能力不足・権限クォータ不足・
+    /// revision 不一致）、または手順 3 で `WorkingSourceRecord` の行自体が存在しない
+    /// （AppErrorCode.sourceMissing）。該当項目だけがセッション内で failed として
+    /// 扱われる。バッチの残り項目は続行する
+    case itemFailed
+}
+```
 
 ---
 
@@ -300,7 +311,6 @@ struct ExportJob: Sendable {
     let exportID: ExportID
     let projectID: ProjectID
     let batchID: BatchID?
-    let queueItemID: ExportQueueItemID?      // 単体書き出しでは nil。手順 0 で固定する
     let authorization: ExportAuthorization   // 開始時に固定する（1.5）
     let delivery: OutputDeliveryDescriptor   // 認可時に確定。生成時に OutputRecord へコピーする
 }
@@ -330,8 +340,8 @@ struct OutputDeliveryDescriptor: Sendable {
 | 1 | レンダリングし、一時ファイルへ出力する | ファイルシステム | — |
 | 2 | 一時ファイルを出力ディレクトリへ移動する | ファイルシステム | — |
 | 3 | 出力ファイルの健全性を確認する（下記） | ファイルシステム | — |
-| 4 | `recordGeneratedOutput` で確認用の `OutputRecord`（`settledAt: nil`）を作成する。台帳・`ExportRecord`・キュー・`WorkingSourceRecord` には触れない | DB | 確認用 `OutputRecord` 作成 |
-| 5（settle） | **単一トランザクション**。`ExportJob.authorization.accountingMode` に従って台帳を加算またはトライアルクレジットを消費、`settledAt` の確定、`ExportRecord` の作成、confirmed 設定エントリの更新、キュー項目の `completed` 更新、`WorkingSourceRecord` の削除、`ExportJob` の削除を行う。ここが唯一の確定境界 | DB | 完了 |
+| 4 | `recordGeneratedOutput` で確認用の `OutputRecord`（`settledAt: nil`）を作成する。台帳・`ExportRecord`・`WorkingSourceRecord` には触れない | DB | 確認用 `OutputRecord` 作成 |
+| 5（settle） | **単一トランザクション**。`ExportJob.authorization.accountingMode` に従って台帳を加算またはトライアルクレジットを消費、`settledAt` の確定、`ExportRecord` の作成、confirmed 設定エントリの更新、`WorkingSourceRecord` の削除、`ExportJob` の削除を行う。ここが唯一の確定境界 | DB | 完了 |
 
 ```
 ExportJob 作成 → レンダリング・移動・健全性確認（DB 上の状態変化なし）
@@ -380,7 +390,7 @@ struct ExportRecord: Sendable {
 }
 ```
 
-`settleExport` は単体書き出し専用であり、実装はトランザクション内で次を確認する（不成立なら throw し、手順 5 を実行しない）。`ExportJob` が存在する（二重確定の防止）、`ExportJob.batchID == nil`（バッチの成果物は `settleBatch` でのみ確定する。個別に確定させると「結果一覧画面での完了操作 1 回」という単位が壊れる）、対応する `OutputRecord` が存在し `settledAt IS NULL` である、`queueItemID` が指定されていれば対応するキュー項目が存在し `projectID` / `batchID` が一致し `state == .exporting`（無関係なキュー項目を `completed` にしない）。`settleBatch` も同様に、対象 `batchID` に一致し `settledAt IS NULL` である全 `OutputRecord` それぞれについて同じキュー項目チェックを行う。加えて、確定対象の集合（`settledAt IS NULL` の `OutputRecord`）に含めない項目（生成前・処理中・`failed`・`paused` のいずれかで `OutputRecord` を持たない）が残っていてもバッチ全体を止めない（一枚の失敗でバッチ全体を停止しない。[アーキテクチャ設計](architecture.md) の 6.4）。ただし消費するクレジット・枠の枚数は、同一トランザクション内で実際に `settledAt` を設定する `OutputRecord` の件数と必ず一致することを検査する（数え間違いによる過不足消費を防ぐ）。**確定対象が 0 件（不明な `batchID`・確定済みバッチを含む）なら throw する**（`settleExport` の二重確定防止と対称。静かな成功は誤 `batchID` や二重呼び出しを隠す）。
+`settleExport` は単体書き出し専用であり、実装はトランザクション内で次を確認する（不成立なら throw し、手順 5 を実行しない）。`ExportJob` が存在する（二重確定の防止）、`ExportJob.batchID == nil`（バッチの成果物は `settleBatch` でのみ確定する。個別に確定させると「結果一覧画面での完了操作 1 回」という単位が壊れる）、対応する `OutputRecord` が存在し `settledAt IS NULL` である。`settleBatch` も同様に、対象 `batchID` に一致し `settledAt IS NULL` である全 `OutputRecord` を確定対象とする。加えて、確定対象の集合（`settledAt IS NULL` の `OutputRecord`）に含めない項目（生成前・処理中・`failed`・`paused` のいずれかで `OutputRecord` を持たない）が残っていてもバッチ全体を止めない（一枚の失敗でバッチ全体を停止しない。[アーキテクチャ設計](architecture.md) の 6.4）。ただし消費するクレジット・枠の枚数は、同一トランザクション内で実際に `settledAt` を設定する `OutputRecord` の件数と必ず一致することを検査する（数え間違いによる過不足消費を防ぐ）。**確定対象が 0 件（不明な `batchID`・確定済みバッチを含む）なら throw する**（`settleExport` の二重確定防止と対称。静かな成功は誤 `batchID` や二重呼び出しを隠す）。
 
 確認を通ったら、`settledAt` に確定時刻（単体は現在時刻、バッチは呼び出し側が渡した時刻）を設定し、`expiresAt` を `settledAt + 24h` に設定する。`ExportJob` の値だけから `ExportRecord` を導出する。
 
@@ -417,12 +427,15 @@ struct ExportRecord: Sendable {
 ## 5. 起動時復旧
 
 1. `loadRunningJobs()` で `ExportJob` の全行を読み、`deleteRunningJobs` で行と対応する未確定（`settledAt IS NULL`）`OutputRecord` をまとめて削除する
-2. 出力先・一時ディレクトリの孤児ファイル（どの `OutputRecord` からも参照されないファイル）を GC で回収する
-3. `resolveOrphanedAttempts()` を実行し、残存 `DeliveryAttempt` を `previousState` に応じて解決する（7 章）
-4. `loadUnknownLibrarySaves()` で残っている注記を読み、未受け渡し出力（`settledAt != nil` かつ未受け渡し）の復旧案内を提示する
-5. 更新誘導を判定する（[アーキテクチャ設計](architecture.md) が正本）
+2. どの `ExportRecord` からも参照されない `Batch` 行（未 settle のまま中断されたバッチの残骸）を削除する
+3. 出力先・一時ディレクトリの孤児ファイル（どの `OutputRecord` からも参照されないファイル）を GC で回収する
+4. `resolveOrphanedAttempts()` を実行し、残存 `DeliveryAttempt` を `previousState` に応じて解決する（7 章）
+5. `loadUnknownLibrarySaves()` で残っている注記を読み、未受け渡し出力（`settledAt != nil` かつ未受け渡し）の復旧案内を提示する
+6. 更新誘導を判定する（[アーキテクチャ設計](architecture.md) が正本）
 
 完了済み（`settledAt != nil`）の `OutputRecord` には手順1で何もしない。復旧が完了するまで新しい書き出しを開始させない。
+
+**起動時復旧が削除するのは `Batch` / `ExportJob` / 未確定 `OutputRecord` に限られる。** クラッシュ・やり直しで処理されないまま終わった `Project` と `WorkingSourceRecord`（バッチが破棄された場合、最大49件相当が残りうる）は、いずれの削除契機（完了操作・プロジェクト破棄・実体欠損による無効化。[画像処理](image-pipeline.md)）にも該当しないため起動時復旧では削除しない。**これは意図した挙動である。** 通常のインポート済み写真と区別が付かず、利用者が履歴から手動で削除するか、書き出しをやり直すまで無期限に残る。
 
 ---
 

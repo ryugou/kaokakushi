@@ -921,7 +921,7 @@ defer {
 
 ##### 処理用ファイルの寿命を DB で管理する
 
-`PickedPhotoInput` は一時値であり、再起動後には残りません。一方、未完了キューは再起動後に復元します（[アーキテクチャ設計](architecture.md) のバッチ処理）。復元したキュー項目が参照する処理用ファイルを表す永続モデルが無ければ、**復元しても加工を再開できません。**
+`PickedPhotoInput` は一時値であり、再起動後には残りません。**未完了のバッチは再起動後に復元しません**（アプリが処理の途中で終了したバッチは最初からやり直しになります。[アーキテクチャ設計](architecture.md) の 6.4）。それでも、処理中に素材の実体（写真ライブラリの権限喪失やディスク不足）が失われる可能性はゼロにならないため、**処理用ファイルを表す永続モデル（`WorkingSourceRecord`）を持ちます。**
 
 ```swift
 struct WorkingSourceRecord: Sendable {
@@ -934,13 +934,13 @@ struct WorkingSourceRecord: Sendable {
 | 項目 | 規約 |
 | --- | --- |
 | 保存先 | `app.db`。実体は `working/` |
-| 参照 | キュー項目・編集中プロジェクトの元素材 |
+| 参照 | 編集中の `Project` の元素材（`projectID` が `Project` への外部キー） |
 | 削除の経路 | **DB トランザクションで `WorkingSourceRecord` を削除し、同じトランザクションで `PendingFileDeletion` を追加する。コミット後に実体を削除する**（[アーキテクチャ設計](architecture.md) の 7.5「出力の削除経路」と同じ単一経路） |
 | 削除の契機 | **完了操作（settle）**（[書き出し Saga](export-saga.md) 側の契約）・**プロジェクト破棄**・**実体欠損による無効化**（`invalidateWorkingSource`。下記「実体の存在確認」） |
 | 起動時 | どのプロジェクトからも参照されない行を、同じ経路で回収・削除する |
-| 実体が欠けている | `invalidateWorkingSource` がそのキュー項目を **`paused(.sourceReselectionRequired)`** へ遷移させる。エラーで止めない |
+| 実体が欠けている | `invalidateWorkingSource` が `WorkingSourceRecord` を削除する。該当項目はセッション内で **`paused(.sourceReselectionRequired)`** として扱われる（`BatchItemStartOutcome.itemPaused`。[書き出し Saga](export-saga.md) の 1.6）。エラーで止めない |
 
-`tmp/` に置くと OS がいつでも削除でき、再起動のたびにキューの復元が失敗します。それでもディスク不足で消える可能性はゼロにならないため、`paused(.sourceReselectionRequired)` を逃げ道として残し、**該当項目だけを再選択対象としてバッチ全体を失いません。**
+`tmp/` に置くと OS がいつでも削除でき、再編集や履歴からの再開に必要な実体が失われます。それでもディスク不足で消える可能性はゼロにならないため、`paused(.sourceReselectionRequired)` を逃げ道として残し、**該当項目だけを再選択対象としてバッチ全体を失いません。**
 
 ##### インポート Saga
 
@@ -948,7 +948,7 @@ struct WorkingSourceRecord: Sendable {
 
 1. `PickedPhotoInput.importedFile` の所有権を受け取り、EXIF を読む
 2. 向きを正規化した原寸ファイルを作成し `working/` へ書き込む
-3. 単一 DB トランザクションで `Project`（撮影メタデータ・再編集用参照を含む）・キュー項目・`WorkingSourceRecord`（正規化ファイルを指す）を作成する
+3. 単一 DB トランザクションで `Project`（撮影メタデータ・再編集用参照を含む）・`WorkingSourceRecord`（正規化ファイルを指す）を作成する（バッチ経由の取り込みでも、進行状態はセッション内のメモリで持つため DB にキュー項目は作らない。[アーキテクチャ設計](architecture.md) の 6.4）
 4. 取り込みファイルを削除する（削除に失敗したら `PendingFileDeletion` へ積む）
 
 **手順 3 が失敗した場合、作成済みのファイル（取り込み・正規化の両方）を `PendingFileDeletion` へ積み、起動時の孤児 GC に委ねます。** 撮影メタデータ（`OriginalCaptureMetadata`）と再編集用の参照（`ProjectSourceLocator`）は別エンティティを持たず、`Project` 自身のフィールドとして保存します。`Project` の削除でのみ消えます。
@@ -1009,11 +1009,12 @@ protocol WorkingSourceStore: Sendable {
     func deleteWorkingSource(_ projectID: ProjectID) async throws
 
     /// 実体欠損時の無効化（下記「実体の存在確認」）。単一 DB トランザクションで
-    /// (a) `WorkingSourceRecord` を削除し、(b) 対象 `projectID` の非終端キュー項目を
-    /// `paused(.sourceReselectionRequired)` へ更新し、(c) 欠損したファイル参照を
-    /// `PendingFileDeletion` へ登録する。**実体が無くても (c) を行ってよい**（参照の掃除
-    /// であり、孤児 GC が空振りで行を消すだけで無害。[アーキテクチャ設計](architecture.md) の
-    /// 7.5「出力の削除経路」と同じ単一経路に揃える）
+    /// (a) `WorkingSourceRecord` を削除し、(b) 欠損したファイル参照を `PendingFileDeletion`
+    /// へ登録する。**実体が無くても (b) を行ってよい**（参照の掃除であり、孤児 GC が
+    /// 空振りで行を消すだけで無害。[アーキテクチャ設計](architecture.md) の 7.5「出力の削除経路」
+    /// と同じ単一経路に揃える）。呼び出し元（`Application`）は、この DB 更新に続けて
+    /// 対象項目をセッション内で `paused(.sourceReselectionRequired)` として扱う
+    /// （`BatchItemStartOutcome.itemPaused`。[書き出し Saga](export-saga.md) の 1.6。DB は更新しない）
     func invalidateWorkingSource(_ projectID: ProjectID) async throws
 }
 ```
@@ -1024,8 +1025,7 @@ protocol WorkingSourceStore: Sendable {
 
 struct CreateWorkingSourceInput: Sendable {
     let projectID: ProjectID
-    let batchID: BatchID?
-    let queueItemID: ExportQueueItemID?
+    let batchID: BatchID?                     // ExportJob / 勘定が使う（[書き出し Saga](export-saga.md)）ため残す
     let sourceFile: WorkingSourceFileRef      // 向き正規化済みの原寸
     let createdAt: Date
     let sourceLocator: ProjectSourceLocator
@@ -1060,7 +1060,7 @@ struct AttachWorkingSourceInput: Sendable {
 
 ##### 実体の存在確認
 
-**`WorkingSourceRecord`（`app.db` の平文行）がファイル参照とメタデータを持ち、実体を開くときは `ManagedFileStore.exists(_:)`（[アーキテクチャ設計](architecture.md) の 7.3「スコープ付きアクセス」）で存在確認のみ行います。** `exists` が `false` を返した場合だけ `WorkingSourceStore.invalidateWorkingSource(projectID)` を呼びます。存在確認そのものが失敗した場合（保護データ利用不可・I/O 障害など）は `exists` が throw するため、欠損とは扱わず再選択導線へも倒しません。**単一 DB トランザクション**で `WorkingSourceRecord` の削除・対象キュー項目の `paused(.sourceReselectionRequired)` への更新・欠損したファイル参照の `PendingFileDeletion` への登録を原子的に行い、再選択の導線を出します（起動時と書き出し開始時の 2 回確認します。呼び出し主体は `SourceImportCoordinator`）。`FaceDetector` / `ImageEffectRenderer` は通常の `ImageSource`（上記「境界型」）を受け取ります（プロトコル宣言は上記「プロトコルのシグネチャ」）。
+**`WorkingSourceRecord`（`app.db` の平文行）がファイル参照とメタデータを持ち、実体を開くときは `ManagedFileStore.exists(_:)`（[アーキテクチャ設計](architecture.md) の 7.3「スコープ付きアクセス」）で存在確認のみ行います。** `exists` が `false` を返した場合だけ `WorkingSourceStore.invalidateWorkingSource(projectID)` を呼びます。存在確認そのものが失敗した場合（保護データ利用不可・I/O 障害など）は `exists` が throw するため、欠損とは扱わず再選択導線へも倒しません。**単一 DB トランザクション**で `WorkingSourceRecord` の削除・欠損したファイル参照の `PendingFileDeletion` への登録を原子的に行い、続けて該当項目をセッション内で `paused(.sourceReselectionRequired)` として扱って再選択の導線を出します（**確認の契機は書き出し開始時**（[書き出し Saga](export-saga.md) の 1.6 手順 3）**と、履歴から `Project` を開いて再編集を始めるときの 2 つに限り、起動時には行いません**〈起動時に行うのは、どのプロジェクトからも参照されない孤児行の GC だけです。下記「未完了作業の保持期限」〉。呼び出し主体は `SourceImportCoordinator`）。`FaceDetector` / `ImageEffectRenderer` は通常の `ImageSource`（上記「境界型」）を受け取ります（プロトコル宣言は上記「プロトコルのシグネチャ」）。
 
 ##### 照合に使ってよいもの・使ってはいけないもの
 
