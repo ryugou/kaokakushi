@@ -973,7 +973,14 @@ struct WorkingSourceRecord: Sendable {
 
 1. 向きを正規化した原寸ファイルを作成し、EXIF を読む
 2. 単一 DB トランザクションで、`WorkingSourceRecord` の置換または新規作成、`Project` の撮影メタデータ・再編集用参照の更新、`FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` の破棄、`detectionRevision` / `projectRevision` の増加を行う
-3. 置換された旧 `sourceFile` を削除する（失敗したら `PendingFileDeletion` へ積む）
+3. 置換された旧 `sourceFile`（既存の `WorkingSourceRecord` が指していた実体）を削除する（失敗したら `PendingFileDeletion` へ積む）
+4. 取り込みファイル（`PickedPhotoInput.importedFile`。今回選び直した写真そのもの。通常は手順3で削除する旧 `sourceFile` と異なる実体だが、型・ポート契約はこれを保証しない）を削除する（削除に失敗したら `PendingFileDeletion` へ積む）
+
+**手順 2 が失敗した場合、作成済みのファイル（取り込み・正規化の両方）を `PendingFileDeletion` へ積み、起動時の孤児 GC に委ねます。**
+
+手順 3・4 とも、削除候補がローダーの返した正規化後ファイルと同一の `ManagedFileRef`（`kind` と `fileID` がともに一致）であれば削除しません。`PickedPhotoLoader.load` の契約には入力と異なる参照を返す保証が無く、同一参照を削除すると現在参照中の実体を失うためです（`ManagedFileIdentity.swift` の `isDistinctManagedFile`、および Persistence 側 `WorkingSourceStoreLive+Replace.swift` の同型ガード）。
+
+手順 3・4 の削除候補どうし、および手順 2 失敗時に積む取り込みファイルと正規化ファイルは、同一 `ManagedFileRef` になりうることを型・ポート契約が禁じていません。同一だった場合、同じ参照へ削除と `PendingFileDeletion` 登録が 2 回行われます。`ManagedFileStore.delete`（宣言は [アーキテクチャ設計](architecture.md) の 7.3）は実体が無ければ成功扱いで冪等です（Persistence 側 `ManagedFileStoreLive.swift` の `delete` 実装。回帰は `ManagedFileStoreTests.swift` の `deleteIsIdempotentForMissingFile` が固定）。`registerOrphan` も `PendingFileDeletion(kind, fileID)` の UNIQUE 制約（[アーキテクチャ設計](architecture.md) の 7.1）に基づく `INSERT OR IGNORE` で冪等です（Persistence 側 `PendingFileDeletions.swift` の `registerPendingFileDeletion`。回帰は `MaintenanceStoreTests.swift` の `registerOrphanIsIdempotent` が固定）。重複しても結果は変わりません。**冪等でないアダプタを実装してはなりません。**
 
 手順 2 は `WorkingSourceRecord` の有無で分岐します。
 

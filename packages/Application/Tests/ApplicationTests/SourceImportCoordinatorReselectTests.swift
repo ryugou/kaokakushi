@@ -6,16 +6,21 @@ import Domain
 // SourceImportCoordinator.reselectSource（再選択 Saga。Issue #8 サブプロジェクト5 A2 Task 3）の
 // 検証。
 //
-// 正本: image-pipeline.md 5章「再選択後の Saga」（手順1〜3）。
+// 正本: image-pipeline.md 5章「再選択後の Saga」（手順1〜4）。
 //   1. 向きを正規化した原寸ファイルを作成し、EXIFを読む
 //   2. 単一DBトランザクションでWorkingSourceRecordの置換等を行う
 //      （WorkingSourceRecordあり → replaceWorkingSource。なし → attachWorkingSourceToExistingProject。
 //      本ファイルは「あり」側のみを対象とする。「なし」側はTask 4の担当のため実装・専用テストの
 //      いずれも対象外）
 //   3. 置換された旧sourceFileを削除する（失敗したらPendingFileDeletionへ積む）
+//   4. 取り込みファイル（PickedPhotoInput.importedFile）を削除する
+//      （失敗したらPendingFileDeletionへ積む。Issue #36で追加）
 //
 // 計画書（docs/superpowers/plans/2026-08-15-subproject5-a2-source-import.md）Task 3 Step 5の
-// 4つの不変条件を、1件ずつ独立したテストとして固定する。
+// 4つの不変条件を、1件ずつ独立したテストとして固定する。手順4固有の削除失敗経路・削除可否判定の
+// 単独検証（C-1相当）は SourceImportCoordinatorReselectCleanupTests.swift へ分離した
+// （SourceImportCoordinatorImportTests.swift / SourceImportCoordinatorImportCleanupTests.swift の
+// 分割と同じ理由。ファイル400行制限〈Global Constraints〉）。
 
 /// あり側の標準フィクスチャ: FakeWorkingSourceStore へ既存の WorkingSourceRecord を仕込む。
 /// 戻り値の sourceFile は input.importedFile / photo.source.file とは別の ManagedFileID を持つ
@@ -124,11 +129,13 @@ func reselectDeletesReplacedSourceFileOnSuccess() async throws {
 
     try await coordinator.reselectSource(projectID: projectID, input: input)
 
-    // 削除対象は「置換された旧sourceFile」（existingSourceFile）であり、新しく作られた
-    // 正規化ファイルやinput.importedFileではない（正本「置換された旧sourceFileを削除する」）。
-    #expect(await managedFileStore.deleteCalls == [existingSourceFile.ref])
-    // W-1: FakeWorkingSourceStoreが模すPendingFileDeletion相当の記録にも旧IDが登録される
-    // （異なるIDの通常経路。同一IDなら登録しないケースはC-1回帰テスト側で検証する）。
+    // 削除対象は「置換された旧sourceFile」（existingSourceFile。手順3）と「取り込みファイル」
+    // （input.importedFile。手順4）の両方である（正本「再選択後のSaga」手順3・4。Issue #36で
+    // 手順4の削除を追加した）。呼び出し順は手順3→手順4（reselectSource参照）。
+    #expect(await managedFileStore.deleteCalls == [existingSourceFile.ref, input.importedFile])
+    // W-1: FakeWorkingSourceStoreが模すPendingFileDeletion相当の記録は旧sourceFileのみ
+    // （取り込みファイルの削除はDBのreplaceWorkingSource経路を通らないためこの記録には
+    // 現れない。削除成功そのものはmanagedFileStore.deleteCallsで検証済み）。
     #expect(await store.pendingFileDeletionFileRefs == [existingSourceFile.ref])
 }
 
@@ -158,10 +165,12 @@ func reselectSucceedsWhenDeleteFailsButRegisterOrphanSucceeds() async throws {
 
     // 手順2は成功しているため、手順3の削除失敗はSaga全体を失敗させない（正本「削除に失敗したら
     // PendingFileDeletionへ積む」）。throwせず正常に完了することそのものが不変条件の主張であり、
-    // ここでcatchせずtry awaitするのが検証になる。
+    // ここでcatchせずtry awaitするのが検証になる。setDeleteFailureは全delete呼び出しに影響する
+    // ため、手順4（取り込みファイルの削除）も同様に失敗しregisterOrphanへ積まれる
+    // （Issue #36。どちらか一方の失敗が他方の試行を妨げない設計。reselectSource参照）。
     try await coordinator.reselectSource(projectID: projectID, input: input)
 
-    #expect(await maintenanceStore.registerOrphanCalls == [existingSourceFile.ref])
+    #expect(await maintenanceStore.registerOrphanCalls == [existingSourceFile.ref, input.importedFile])
 }
 
 @Test("旧sourceFileの削除もregisterOrphanも失敗したら削除失敗の理由をcauseに保持したままthrowする")
@@ -192,11 +201,22 @@ func reselectThrowsCleanupPreservingErrorWhenDeleteAndRegisterOrphanBothFail() a
         try await coordinator.reselectSource(projectID: projectID, input: input)
         Issue.record("エラーがthrowされるはずだった")
     } catch let error as CleanupPreservingError {
+        // 手順3の削除失敗（真因）を優先して保持する（Cleanup.swiftの契約）。手順4も同様に
+        // 削除・registerOrphanとも失敗するが、先に発生した手順3側の失敗だけが呼び出し元へ
+        // 伝わる（Issue #36「両方試みるが最初の失敗を保持する」設計。reselectSource参照）。
         #expect(error.cause is DeleteBoom)
         #expect(error.cleanupFailure is RegisterOrphanBoom)
     } catch {
         Issue.record("想定外のエラー: \(error)")
     }
+
+    // 手順3が失敗した後も手順4の削除は試みられる（諦めない）ことを、registerOrphanの呼び出し
+    // 件数で確認する（両方ともdelete・registerOrphanが失敗するため、両方がregisterOrphanCallsに
+    // 記録される）。
+    let registered = await maintenanceStore.registerOrphanCalls
+    #expect(registered.count == 2)
+    #expect(registered.contains(existingSourceFile.ref))
+    #expect(registered.contains(input.importedFile))
 }
 
 // MARK: - 不変条件3: DB確定より前に旧ファイルを削除しない
@@ -237,8 +257,10 @@ func reselectDoesNotDeleteReplacedSourceFileBeforeDatabaseCommit() async throws 
     await gate.open()
     try await task.value
 
+    // 手順3（旧sourceFile）・手順4（取り込みファイル）とも、DB確定（ゲートが開く）後に削除される
+    // （Issue #36で手順4の削除を追加した）。
     let deleteCallsAfterCommit = await managedFileStore.deleteCalls
-    #expect(deleteCallsAfterCommit == [existingSourceFile.ref])
+    #expect(deleteCallsAfterCommit == [existingSourceFile.ref, input.importedFile])
 }
 
 /// 不変条件3の関連テスト: replaceWorkingSource（手順2）自体が失敗しDBが結局確定しなかった
@@ -248,6 +270,11 @@ func reselectDoesNotDeleteReplacedSourceFileBeforeDatabaseCommit() async throws 
 /// 旧sourceFileはまだ「置換された旧ファイル」として参照され続けているはずであり、削除してよい
 /// 根拠がない（reselectDoesNotDeleteReplacedSourceFileBeforeDatabaseCommitが検証する「保留中＝
 /// まだ確定していない」ケースと対を成す、「確定に失敗した」ケース）。
+///
+/// Issue #36: 手順2が失敗した場合、作成済みのファイル（取り込み・正規化の両方）を
+/// PendingFileDeletionへ積み、起動時の孤児GCに委ねる（正本「再選択後のSaga」「手順2が失敗した
+/// 場合...」）。ここでは正規化ファイル（photo.source.file）が既に working/ へ書き込まれた後に
+/// replaceWorkingSourceが失敗する状況を模すため、ローダーの結果を明示的に捕捉する。
 @Test("replaceWorkingSourceが失敗したら旧sourceFileを削除せずエラーをthrowする")
 func reselectDoesNotDeleteReplacedSourceFileWhenReplaceWorkingSourceFails() async throws {
     struct Boom: Error, Equatable {}
@@ -259,12 +286,16 @@ func reselectDoesNotDeleteReplacedSourceFileWhenReplaceWorkingSourceFails() asyn
         WorkingSourceRecord(projectID: projectID, sourceFile: existingSourceFile, createdAt: makeFixedClock()())
     )
     await store.setReplaceWorkingSourceFailure(Boom())
+    let photo = makeLoadedPhoto()
+    let loader = FakePickedPhotoLoader(result: photo)
     let managedFileStore = FakeManagedFileStore()
     await managedFileStore.seedExistingFile(existingSourceFile.ref)
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
     let coordinator = makeSourceImportCoordinator(
-        pickedPhotoLoader: FakePickedPhotoLoader(),
+        pickedPhotoLoader: loader,
         workingSourceStore: store,
-        managedFileStore: managedFileStore
+        managedFileStore: managedFileStore,
+        maintenanceStore: maintenanceStore
     )
     let input = makePickedPhotoInput()
 
@@ -279,6 +310,14 @@ func reselectDoesNotDeleteReplacedSourceFileWhenReplaceWorkingSourceFails() asyn
 
     // DBが確定しなかった以上、手順3（旧sourceFileの削除）へ到達してはならない。
     #expect(await managedFileStore.deleteCalls.isEmpty)
+    // Issue #36本体: 取り込みファイル（input.importedFile）と正規化ファイル（photo.source.file）
+    // の両方がPendingFileDeletion相当（registerOrphan）へ積まれる。旧sourceFile
+    // （existingSourceFile.ref）は手順2失敗時点ではまだ「置換された旧ファイル」の判定
+    // （replacedSourceFileToDelete）に到達していないため対象に含まれない。
+    let registered = await maintenanceStore.registerOrphanCalls
+    #expect(registered.count == 2)
+    #expect(registered.contains(input.importedFile))
+    #expect(registered.contains(photo.source.file))
 }
 
 // MARK: - 不変条件4: 補償削除（registerOrphan）はキャンセル済み文脈でも完走する
@@ -328,68 +367,20 @@ func reselectRegisterOrphanIsShieldedFromCancellation() async throws {
     task.cancel()
     await gate.open()
 
-    // ゲートが開くと手順2は（失敗注入していないため）成功し、手順3のqueue.run（delete）へ
+    // ゲートが開くと手順2は（失敗注入していないため）成功し、手順3・4のqueue.run（delete）へ
     // 進む。呼び出し元のtaskは既にキャンセル済みのため、SerialTaskQueue.run自身のキャンセル
     // チェックがmanagedFileStore.deleteを呼び出す前にCancellationErrorをthrowする
-    // （削除は実行されない）。deleteReplacedSourceFileのcatchはこれを削除失敗として扱い
-    // registerOrphanを試みる。これがrunShieldedFromCancellationで守られていれば、キャンセル
-    // 済み文脈でも完走しSaga全体は成功として返る（手順2は既にコミット済みのため）。
+    // （削除は実行されない。手順3・4のいずれも同様）。deleteReplacedSourceFile /
+    // deleteReselectedImportedFileのcatchはこれを削除失敗として扱いregisterOrphanを試みる。
+    // これがrunShieldedFromCancellationで守られていれば、キャンセル済み文脈でも両方完走し
+    // Saga全体は成功として返る（手順2は既にコミット済みのため。Issue #36で手順4を追加）。
     try await task.value
 
     let deleteCalls = await managedFileStore.deleteCalls
     #expect(deleteCalls.isEmpty)
-    #expect(await maintenanceStore.registerOrphanCalls == [existingSourceFile.ref])
+    #expect(await maintenanceStore.registerOrphanCalls == [existingSourceFile.ref, input.importedFile])
 }
 
-// MARK: - 不変条件5（C-1）: ローダーが既存sourceFileと同一IDを返しても実体を削除しない
-//
-// codex レビュー Critical 1: PickedPhotoLoader.load（Domain/Ports/ImagePipeline.swift）の契約には
-// 「既存素材と異なるファイルIDを返す」保証が無い。既存のWorkingSourceRecordが指すsourceFileIDと、
-// 今回ローダーが返した正規化ファイルのIDが偶然一致した場合、手順3で無条件に「旧sourceFile」として
-// 削除すると、DB上は新しいWorkingSourceRecordが有効なまま実体ファイルだけを消してしまい、
-// 再編集不能になる致命的なデータ損失事故になる。Persistence層
-// （WorkingSourceStoreLive+Replace.swift:93-103）は既にこの状況を「新旧が同一なら登録しない」
-// ガードで防いでおり、SourceImportCoordinator+Reselect.swift の replacedSourceFileToDelete が
-// Application層で同じ判定を行う（本テストはそのガードの回帰テスト）。
-
-@Test("再選択でローダーが既存sourceFileと同一IDを返しても実体ファイルを削除しない")
-func reselectDoesNotDeleteWhenLoaderReturnsSameSourceFileID() async throws {
-    let projectID = makeProjectID()
-    let existingSourceFile = try makeWorkingSourceFileRef()
-    let store = FakeWorkingSourceStore()
-    await store.seedWorkingSource(
-        WorkingSourceRecord(projectID: projectID, sourceFile: existingSourceFile, createdAt: makeFixedClock()())
-    )
-    // ローダーが既存sourceFileと同一IDのImageSourceを返す状況を模す（PickedPhotoLoader.loadの
-    // 契約には異なるIDを返す保証が無いため、この状況を排除できない。上記コメント参照）。
-    let photo = LoadedPhoto(
-        source: ImageSource(file: existingSourceFile.ref, pixelSize: makePixelSize(), format: .jpeg),
-        capture: makeLoadedPhoto().capture
-    )
-    let loader = FakePickedPhotoLoader(result: photo)
-    let managedFileStore = FakeManagedFileStore()
-    await managedFileStore.seedExistingFile(existingSourceFile.ref)
-    let coordinator = makeSourceImportCoordinator(
-        pickedPhotoLoader: loader,
-        workingSourceStore: store,
-        managedFileStore: managedFileStore
-    )
-    let input = makePickedPhotoInput()
-
-    try await coordinator.reselectSource(projectID: projectID, input: input)
-
-    // 書き込み（手順2）は同一IDでも通常どおり行われる。ガードが対象にするのは手順3の削除判定
-    // のみである。
-    let calls = await store.replaceWorkingSourceCalls
-    #expect(calls.count == 1)
-    #expect(calls.first?.newSourceFile.ref == existingSourceFile.ref)
-
-    // C-1本体: 削除してはならない。削除すると新しいWorkingSourceRecordが指す実体そのものが
-    // 消え、再編集不能になる。
-    #expect(await managedFileStore.deleteCalls.isEmpty)
-    // W-1: FakeWorkingSourceStoreが模すPendingFileDeletion相当の記録も、Persistence層のガードと
-    // 同じ理由で登録されないことを確認する（本番の挙動を反映した回帰であることの根拠）。
-    #expect(await store.pendingFileDeletionFileRefs.isEmpty)
-}
-
-// W-1回帰（kind差の同一性判定）は型制約によりSagaレベルでは再現不能なためManagedFileIdentityTests.swiftへ移動した。
+// 不変条件5（C-1: ローダーが既存sourceFileと同一IDを返しても実体を削除しない）と、手順4固有の
+// 削除失敗経路・削除可否判定の単独検証は SourceImportCoordinatorReselectCleanupTests.swift へ
+// 分離した（ファイル冒頭コメント参照。ファイル400行制限〈Global Constraints〉）。

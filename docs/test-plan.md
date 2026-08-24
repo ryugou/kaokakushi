@@ -313,7 +313,8 @@
 - **インポート Saga が `PickedPhotoInput.importedFile` を作り直さず、所有権を受け取ること**
 - **DB 確定（手順 3）の後に取り込みファイルが削除され、削除失敗時は `PendingFileDeletion` へ積まれること**
 - **DB 確定より前に取り込みファイルを削除しないこと**
-- **再選択・再接続の成功経路でも候補ファイル（正規化前の旧 `sourceFile`）が削除されること**
+- **再選択・再接続の成功経路で、置換された旧 `sourceFile`（既存 `WorkingSourceRecord` が指していた実体）と取り込みファイル（`PickedPhotoInput.importedFile`。今回選び直した写真）の両方が削除されること**
+- **削除候補がローダーの返した正規化後ファイルと同一の `ManagedFileRef`（`kind` と `fileID` がともに一致）の場合は削除されないこと**
 - **「Free 版として複製」で新しい `projectID` の `WorkingSourceRecord` が作られ、処理用ファイルが元 `Project` と共有されないこと**
 - **複製の DB 失敗（手順 3）で、手順 2 で作成した実体ファイルが補償削除されること（`WorkingSourceRecord` 行は単一 DB トランザクション内で作られるためロールバックで消える）**
 - **元素材の実体が無い場合、`WorkingSourceRecord` を作らず複製すること**

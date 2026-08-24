@@ -12,9 +12,11 @@ import Domain
 //
 // 本ファイルは分岐の「なし」側（SourceImportCoordinatorReselectTests.swift の「あり」側と対）を
 // 対象とする。計画書（docs/superpowers/plans/2026-08-15-subproject5-a2-source-import.md）
-// Task 4 Step 4 の3つの不変条件のうち、不変条件2（候補ファイル削除）は実装しない
-// （SourceImportCoordinator+Reselect.swift ファイル冒頭コメント「論点2」「論点3」参照。
-// Issue #36 で追跡中）ため、ここでもテストを追加しない。
+// Task 4 Step 4 の3つの不変条件のうち、不変条件2（候補ファイル削除）は Issue #36 で実装した
+// （手順4の取り込みファイル削除・手順2失敗時の後始末は「なし」側にも「あり」側と対称に適用
+// される。SourceImportCoordinator+Reselect.swift ファイル冒頭コメント参照）。「なし」側固有の
+// 削除失敗経路・削除可否判定のテストは SourceImportCoordinatorReselectCleanupTests.swift へ
+// 集約したため、本ファイルには追加しない。
 
 @Test("WorkingSourceRecordが無い場合、attachWorkingSourceToExistingProjectでPickedPhotoLoaderの結果を新規作成する")
 func reselectAttachesWorkingSourceWhenRecordDoesNotExist() async throws {
@@ -52,9 +54,11 @@ func reselectAttachesWorkingSourceWhenRecordDoesNotExist() async throws {
     #expect(call.representation == input.representation)
     #expect(call.sourceLocator.photoLibraryLocalIdentifier == input.providerAssetIdentifier)
 
-    // 「なし」側には「置換された旧sourceFile」が存在しないため、手順3は一切実行されない。
-    // 新規正規化ファイル（DBへ登録済み）を削除すると素材の実体を失う（あり側 Critical 2 と同型）。
-    #expect(await managedFileStore.deleteCalls.isEmpty)
+    // 「なし」側には「置換された旧sourceFile」が存在しないため、手順3は一切実行されない
+    // （新規正規化ファイル〈DBへ登録済み〉を削除すると素材の実体を失う。あり側 Critical 2 と同型）。
+    // 一方、手順4（取り込みファイルの削除）は「あり」側と対称に実行される（Issue #36）。
+    // input.importedFileはphoto.source.file（正規化後ファイル）とは別実体のため削除される。
+    #expect(await managedFileStore.deleteCalls == [input.importedFile])
     #expect(await maintenanceStore.registerOrphanCalls.isEmpty)
 }
 
@@ -138,11 +142,17 @@ private actor AttachCompletionFlag {
 // reselectDoesNotDeleteReplacedSourceFileWhenReplaceWorkingSourceFails）には書き込み失敗経路の
 // テストがあるのに対し、「なし」側には対応するテストが無かった。「なし」側には手順3（旧ファイル
 // 削除）が存在しないため検証すべき副作用は少ないが、書き込み失敗時にreselectSourceがエラーを
-// そのまま呼び出し元へ伝播すること、および余計な副作用（managedFileStore.delete /
-// maintenanceStore.registerOrphan）が一切起きないことは、あり側と同型の不変条件として固定する
-// 価値がある。
+// そのまま呼び出し元へ伝播すること、および余計な副作用（managedFileStore.delete）が一切起きない
+// ことは、あり側と同型の不変条件として固定する価値がある。
+//
+// Issue #36: performReselect失敗時の後始末（正本「手順2が失敗した場合、作成済みのファイル
+// （取り込み・正規化の両方）をPendingFileDeletionへ積み...」）は「あり」側・「なし」側の
+// 両方に対称に適用される。「なし」側にも手順2失敗時のregisterOrphan後始末が働くことを、
+// 「あり」側の reselectDoesNotDeleteReplacedSourceFileWhenReplaceWorkingSourceFails と同じ形で
+// 検証する（旧: registerOrphanCalls.isEmpty を期待していたが、これは未実装だった当時の挙動を
+// 固定したものであり、実装時に見直しが必要と明記されていた〈reviewer Warning W-1〉）。
 
-@Test("attachWorkingSourceToExistingProjectが失敗したらエラーをそのまま伝播し副作用を残さない")
+@Test("attachWorkingSourceToExistingProjectが失敗したらエラーをそのまま伝播し取り込み・正規化ファイルを後始末する")
 func reselectAttachPropagatesErrorWithoutSideEffectsWhenAttachWorkingSourceFails() async throws {
     struct Boom: Error, Equatable {}
 
@@ -150,10 +160,12 @@ func reselectAttachPropagatesErrorWithoutSideEffectsWhenAttachWorkingSourceFails
     let store = FakeWorkingSourceStore()
     // seedWorkingSourceを呼ばない = WorkingSourceRecordが無い状態（「なし」側の分岐を通す）。
     await store.setAttachToExistingProjectFailure(Boom())
+    let photo = makeLoadedPhoto()
+    let loader = FakePickedPhotoLoader(result: photo)
     let managedFileStore = FakeManagedFileStore()
     let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
     let coordinator = makeSourceImportCoordinator(
-        pickedPhotoLoader: FakePickedPhotoLoader(),
+        pickedPhotoLoader: loader,
         workingSourceStore: store,
         managedFileStore: managedFileStore,
         maintenanceStore: maintenanceStore
@@ -170,9 +182,12 @@ func reselectAttachPropagatesErrorWithoutSideEffectsWhenAttachWorkingSourceFails
     }
 
     // 「なし」側には手順3（旧ファイル削除）が存在しないため、書き込み失敗時に削除は一切起きて
-    // はならない。registerOrphanの空チェックは現時点の未実装スコープ（論点3。performReselect
-    // 失敗時の新規正規化ファイル後始末はIssue #36で追跡中、本ファイル未実装）を固定するもので
-    // あり仕様上の禁止ではない。Issue #36実装時はこの期待値の見直しが必要（reviewer Warning W-1）。
+    // はならない。
     #expect(await managedFileStore.deleteCalls.isEmpty)
-    #expect(await maintenanceStore.registerOrphanCalls.isEmpty)
+    // Issue #36本体: 取り込みファイル（input.importedFile）と正規化ファイル（photo.source.file）
+    // の両方がPendingFileDeletion相当（registerOrphan）へ積まれる。
+    let registered = await maintenanceStore.registerOrphanCalls
+    #expect(registered.count == 2)
+    #expect(registered.contains(input.importedFile))
+    #expect(registered.contains(photo.source.file))
 }
