@@ -1688,7 +1688,7 @@ struct DeletionContext: Sendable {
 
 **v1 では `Project` に `isFavorite` / `isBeingEdited` の列が無く、お気に入り・編集中の上書き可能保護は機能しない（常に非保護扱い）。** 列の追加と判定の有効化は Issue #23 で行う（`WorkingSourceRecord` による保護は列を必要としないため v1 でも機能する）。
 
-**履歴は写真アプリ型のフラットな写真グリッドであり、閲覧・削除の単位は `Project` のみとする**（バッチのグルーピングは処理の単位としてのみ存在し、閲覧・削除の単位ではない。[商品面の決定](product-decisions.md)）。`Batch` 行自体は利用者が直接削除する対象ではなく、その `batchID` を参照する `ExportRecord` が 1 件も残らなくなったときに自動的に消える（下記「`Project` 削除 Saga」）。
+**履歴は写真アプリ型のフラットな写真グリッドであり、閲覧・削除の単位は `Project` のみとする**（バッチのグルーピングは処理の単位としてのみ存在し、閲覧・削除の単位ではない。[商品面の決定](product-decisions.md)）。`Batch` 行自体は利用者が直接削除する対象ではなく、その `batchID` を参照する `ExportRecord` / `OutputRecord` / `ExportJob` の残数が合計 0 になったときに自動的に消える（条件と手順の正本は下記「`Project` 削除 Saga」。一度も `ExportRecord` から参照されなかった未 settle の残骸は、これとは別経路の起動時復旧が削除する。[書き出し Saga](export-saga.md) の 5 章）。
 
 **参照元は 2 種類に分かれます。**
 
@@ -1804,7 +1804,7 @@ enum AbsoluteProtection: Sendable, Hashable {
 | 7 日 / 30 日 | 期限で削除する |
 | 保存期限なし | 容量上限に達したら古いものから削除する |
 
-**`ExportRecord` は対応する `Project` または `Batch` と同じトランザクションで削除する**（別々だと記録の食い違いが生じる）。一括処理した写真も履歴では個別の `Project` として表示する（バッチのグルーピングなし。閲覧・削除の単位は `Project` のみ。上記「削除の可否判定」と [商品面の決定](product-decisions.md) が正本）。`Batch` は処理と勘定の単位であり、履歴の表示・削除の単位ではない。
+**`ExportRecord` は対応する `Project` と同じトランザクションで削除する**（別々だと記録の食い違いが生じる）。**`Batch` の削除では `ExportRecord` を削除しない**（外部キーの `SET NULL` により `batchID` だけが消える。7.1）。一括処理した写真も履歴では個別の `Project` として表示する（バッチのグルーピングなし。閲覧・削除の単位は `Project` のみ。上記「削除の可否判定」と [商品面の決定](product-decisions.md) が正本）。`Batch` は処理と勘定の単位であり、履歴の表示・削除の単位ではない。
 
 ##### 履歴サムネイル
 

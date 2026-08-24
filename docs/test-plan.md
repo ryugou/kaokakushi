@@ -238,6 +238,7 @@
 
 - **起動時復旧が次の相対順序で実行されること**（正本の手順は [書き出し Saga](export-saga.md) の 5 章）: `running` の `ExportJob` と対応する未確定出力（`settledAt == nil` の `OutputRecord` と出力ファイル）の削除は、どの `ExportRecord` からも参照されない `Batch` 行（未 settle の残骸）の削除より前。`Batch` 残骸の削除は、孤児ファイルの GC より前。孤児ファイル GC は `resolveOrphanedAttempts` による残存 `DeliveryAttempt` の解決より前。`DeliveryAttempt` の解決は `UnknownLibrarySave` の読み込み・復旧案内の提示より前
 - **未 settle の `Batch` 行が起動時に削除され、settle 済みの `Batch`（`ExportRecord` が存在する）は残ること**
+- **`deleteUnsettledBatches()` を連続で 2 回実行しても 2 回目が成功し、settle 済みの `Batch` と関連記録に変化がないこと**（冪等。[書き出し Saga](export-saga.md) の 0 章が正本）
 - 復旧が完了するまで新しい書き出しを開始させないこと
 - `DeliveryAttempt` が残っている場合、`previousState == generated` なら `deliveryUnknown` へ、`previousState == delivered` なら `delivered` を維持したうえで「保存結果が不明」を別途提示すること。状態を後退させないこと
 - `resolveOrphanedAttempts` が解決後の全出力の受け渡し状態を返すこと。復旧案内はこの戻り値を使うこと
@@ -274,7 +275,7 @@
 - **再接続が `detectionRevision` / `projectRevision` を増やし、検出結果を再利用しないこと**
 - **再選択が顔検出をやり直し、`detectionRevision` と `projectRevision` を増やし、旧 `FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` を破棄すること**
 - **`PreviewConfirmation` が DB に存在せず、`detectionRevision` の増加だけで確認が無効になること**
-- **`isTerminal` が `completed` / `failed` / `canceled` のみ真であり、履歴削除の保護と完了判定が同じ述語を使うこと**
+- **`isTerminal` が `completed` / `failed` / `canceled` のみ真であり、バッチ完了判定と UI の進行表示が同じ述語を使うこと。履歴削除の可否判定・起動時復旧がこの述語を参照しないこと**（キュー状態はセッション内のメモリにしか存在しない。[アーキテクチャ設計](architecture.md) の 6.4）
 
 ### 3.7 更新誘導との順序（[アーキテクチャ設計](architecture.md) の 6.6）
 
