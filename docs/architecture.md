@@ -1699,9 +1699,9 @@ struct DeletionContext: Sendable {
 | 同上 | **試行中の `DeliveryAttempt`**（`hasDeliveryAttemptInProgress`。[書き出し Saga](export-saga.md) の 7.0） | 写真ライブラリ保存の試行中に出力記録が失われ、結果を追跡できなくなる |
 | **利用者が上書きできる** | お気に入り（v1 では機能しない。上記） | 利用者が明示的に保護した履歴が消える |
 | 同上 | 編集中のプロジェクト（v1 では機能しない。上記） | 編集画面が参照先を失う |
-| 同上 | `WorkingSourceRecord`（[画像処理](image-pipeline.md)） | `Project` ごと消えるため（FK CASCADE）、該当項目は素材欠損として失敗する（`itemFailed`）。バッチ全体は止めない |
+| 同上 | `WorkingSourceRecord`（[画像処理](image-pipeline.md)） | `Project` ごと消えるため（FK CASCADE）、該当項目は行欠損として失敗する（`itemFailed`・`AppErrorCode.sourceMissing`。[書き出し Saga](export-saga.md) の 1.6 手順 3）。バッチ全体は止めない |
 
-**非終端のキュー項目は絶対保護に含めない**（キューの進行状態はセッション内のメモリ状態であり、削除可否判定が読む DB トランザクションの対象にならない。6.4）。`waiting` 中の `Project` が削除された場合、その項目は処理用素材の実体欠損として失敗し、「一枚の失敗でバッチ全体を止めない」既存則（6.4）で吸収する（ADR 0005 の受容）。
+**非終端のキュー項目は絶対保護に含めない**（キューの進行状態はセッション内のメモリ状態であり、削除可否判定が読む DB トランザクションの対象にならない。6.4）。`waiting` 中の `Project` が削除された場合、`WorkingSourceRecord` は FK CASCADE で行ごと消えるため、その項目は行欠損として失敗し（`itemFailed`・`AppErrorCode.sourceMissing`。実体ファイル欠損の `itemPaused`〈再選択で復帰可能〉とは区別する。[書き出し Saga](export-saga.md) の 1.6 手順 3）、「一枚の失敗でバッチ全体を止めない」既存則（6.4）で吸収する（ADR 0005 の受容）。
 
 **絶対保護は 3 つ**（「消すと復旧できない」「利用者がまだ受け取っていない」「進行中の受け渡し試行と競合する」のいずれかに該当し、確認を出しても意味がない）。残りは利用者の明示操作で上書きできる。**契機ごとに扱いを変える**（「閲覧と削除は常に可能」という原則〈6.2〉と自動削除の安全性を両立させるため）。
 
