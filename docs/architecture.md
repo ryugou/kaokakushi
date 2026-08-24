@@ -1688,7 +1688,7 @@ struct DeletionContext: Sendable {
 
 **v1 では `Project` に `isFavorite` / `isBeingEdited` の列が無く、お気に入り・編集中の上書き可能保護は機能しない（常に非保護扱い）。** 列の追加と判定の有効化は Issue #23 で行う（`WorkingSourceRecord` による保護は列を必要としないため v1 でも機能する）。
 
-**履歴は写真アプリ型のフラットな写真グリッドであり、閲覧・削除の単位は `Project` のみとする**（バッチのグルーピングは処理の単位としてのみ存在し、閲覧・削除の単位ではない。[商品面の決定](product-decisions.md)）。`Batch` 行自体は利用者が直接削除する対象ではなく、その `batchID` を参照する `ExportRecord` / `OutputRecord` / `ExportJob` の残数が合計 0 になったときに自動的に消える（条件と手順の正本は下記「`Project` 削除 Saga」。一度も `ExportRecord` から参照されなかった未 settle の残骸は、これとは別経路の起動時復旧が削除する。[書き出し Saga](export-saga.md) の 5 章）。
+**履歴は写真アプリ型のフラットな写真グリッドであり、閲覧・削除の単位は `Project` のみとする**（バッチのグルーピングは処理の単位としてのみ存在し、閲覧・削除の単位ではない。[商品面の決定](product-decisions.md)）。`Batch` 行自体は利用者が直接削除する対象ではなく、その `batchID` を参照する `ExportRecord` / `OutputRecord` / `ExportJob` の残数が合計 0 になったときに自動的に消える（条件と手順の正本は下記「`Project` 削除 Saga」。起動時点でどの `ExportRecord` からも参照されない未 settle の残骸は、これとは別経路の起動時復旧が削除する。[書き出し Saga](export-saga.md) の 5 章）。
 
 **参照元は 2 種類に分かれます。**
 
