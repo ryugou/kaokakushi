@@ -47,6 +47,10 @@ protocol ExportSagaStore: Sendable {
     func loadRunningJobs() async throws -> [ExportJob]
     /// 起動時復旧。ExportJob 行と、対応する未確定（settledAt IS NULL）OutputRecord をまとめて削除する（5 章）
     func deleteRunningJobs(_ exportIDs: [ExportID]) async throws
+    /// 起動時復旧の手順2（5 章）。どの ExportRecord からも参照されない Batch 行
+    /// （未 settle のまま中断されたバッチの残骸）を単一 DB トランザクションで削除する。
+    /// 手順1（deleteRunningJobs）の完了後に呼ぶ。該当行が無ければ何もしない（冪等）
+    func deleteUnsettledBatches() async throws
 }
 
 /// 受け渡し（7 章）。ExportSagaStore とは寿命が異なるため分ける
@@ -427,7 +431,7 @@ struct ExportRecord: Sendable {
 ## 5. 起動時復旧
 
 1. `loadRunningJobs()` で `ExportJob` の全行を読み、`deleteRunningJobs` で行と対応する未確定（`settledAt IS NULL`）`OutputRecord` をまとめて削除する
-2. どの `ExportRecord` からも参照されない `Batch` 行（未 settle のまま中断されたバッチの残骸）を削除する
+2. `deleteUnsettledBatches()` で、どの `ExportRecord` からも参照されない `Batch` 行（未 settle のまま中断されたバッチの残骸）を削除する（0 章）
 3. 出力先・一時ディレクトリの孤児ファイル（どの `OutputRecord` からも参照されないファイル）を GC で回収する
 4. `resolveOrphanedAttempts()` を実行し、残存 `DeliveryAttempt` を `previousState` に応じて解決する（7 章）
 5. `loadUnknownLibrarySaves()` で残っている注記を読み、未受け渡し出力（`settledAt != nil` かつ未受け渡し）の復旧案内を提示する

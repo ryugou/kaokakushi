@@ -1010,7 +1010,7 @@ extension ExportQueueState {
 }
 ```
 
-**処理用ファイルが失われた場合も新しい状態を作らず `paused(.sourceReselectionRequired)` へ遷移させる**（`paused` は「利用者操作を待って再開できる」の意で再選択要求もこれに当てはまる。バッチ全体ではなく該当項目だけが `paused` になる）。**`WorkingSourceRecord` の削除と欠損したファイル参照の `PendingFileDeletion` への登録は単一 DB トランザクションで原子的に行う**（正本は [画像処理](image-pipeline.md) の `WorkingSourceStore.invalidateWorkingSource`）。**キュー項目の `paused` への遷移は DB を更新しない。** 進行状態はセッション内のメモリ状態であり（7.1）、`Application` の `BatchItemStartOutcome.itemPaused`（[書き出し Saga](export-saga.md) の 1.6）が該当項目だけをこの状態にする。**`isTerminal` を各所で書き下さない**（履歴削除可否判定〈7.5〉・バッチ完了判定・復旧対象選定がすべてこの 1 述語を使う。書き下すと状態追加時に一部だけ更新される事故が起こる）。
+**処理用ファイルが失われた場合も新しい状態を作らず `paused(.sourceReselectionRequired)` へ遷移させる**（`paused` は「利用者操作を待って再開できる」の意で再選択要求もこれに当てはまる。バッチ全体ではなく該当項目だけが `paused` になる）。**`WorkingSourceRecord` の削除と欠損したファイル参照の `PendingFileDeletion` への登録は単一 DB トランザクションで原子的に行う**（正本は [画像処理](image-pipeline.md) の `WorkingSourceStore.invalidateWorkingSource`）。**キュー項目の `paused` への遷移は DB を更新しない。** 進行状態はセッション内のメモリ状態であり（7.1）、`Application` の `BatchItemStartOutcome.itemPaused`（[書き出し Saga](export-saga.md) の 1.6）が該当項目だけをこの状態にする。**`isTerminal` を各所で書き下さない**（バッチ完了判定と UI の進行表示がこの 1 述語を使う。書き下すと状態追加時に一部だけ更新される事故が起こる。キュー状態はセッション内のメモリにしか存在しないため、DB を対象とする履歴削除可否判定〈7.5〉や起動時復旧はこの述語を使わない）。
 
 **キューの進行状態と 6.1 の 2 軸は別物。**
 
@@ -1804,7 +1804,7 @@ enum AbsoluteProtection: Sendable, Hashable {
 | 7 日 / 30 日 | 期限で削除する |
 | 保存期限なし | 容量上限に達したら古いものから削除する |
 
-**`ExportRecord` は対応する `Project` または `Batch` と同じトランザクションで削除する**（別々だと記録の食い違いが生じる）。一括処理した写真は履歴へ 50 件並べず**バッチ単位で 1 件に集約する**（開くと個別写真を確認でき、エラーのみの再試行へ遷移できる）。
+**`ExportRecord` は対応する `Project` または `Batch` と同じトランザクションで削除する**（別々だと記録の食い違いが生じる）。一括処理した写真も履歴では個別の `Project` として表示する（バッチのグルーピングなし。閲覧・削除の単位は `Project` のみ。上記「削除の可否判定」と [商品面の決定](product-decisions.md) が正本）。`Batch` は処理と勘定の単位であり、履歴の表示・削除の単位ではない。
 
 ##### 履歴サムネイル
 
