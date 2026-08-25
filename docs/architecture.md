@@ -18,7 +18,7 @@
 | [書き出し Saga](export-saga.md) | 認可、`ExportJob` の状態、処理手順、中断時の後始末、起動時復旧、実体喪失時の扱い、受け渡し |
 | [正準スキーマ](canonical-schema.md) | ハッシュ定義（設定ハッシュ・`StampAssetHash`）と基本型の符号化（ADR 0005、ADR 0006） |
 | [運用](operations.md) | 更新誘導の運用、審査への配慮、診断と Sentry の運用制約 |
-| [商品面の決定](product-decisions.md) | v1 のリリース範囲、動画の扱い、課金訴求の分類、利用者向け表現 |
+| [商品面の決定](product-decisions.md) | v1 のリリース範囲、動画の扱い、課金訴求の分類、利用者向け表現、一括処理の中断・再開方針 |
 | [実装計画](implementation-plan.md) | サブプロジェクトへの分解、依存、モジュール割り当て |
 | [テスト計画](test-plan.md) | 層ごとの個別テスト項目 |
 | [ADR](adr/) | 技術選定とその理由 |
@@ -995,9 +995,6 @@ struct ExportQueueFailure: Sendable, Equatable {
 }
 
 enum QueuePauseReason: Sendable, Equatable {
-    case entitlementExpired            // Pro 契約の終了（書き出し Saga 1.4）
-    case storageInsufficient
-    case userPaused
     /// 処理用の元素材が失われた。同じ写真を選び直せば再開できる
     case sourceReselectionRequired
 }
@@ -1013,7 +1010,7 @@ extension ExportQueueState {
 }
 ```
 
-**処理用ファイルが失われた場合も新しい状態を作らず `paused(.sourceReselectionRequired)` へ遷移させる**（`paused` は「利用者操作を待って再開できる」の意で再選択要求もこれに当てはまる。バッチ全体ではなく該当項目だけが `paused` になる）。**`WorkingSourceRecord` の削除と対象キュー項目の `paused(.sourceReselectionRequired)` への更新は単一 DB トランザクションで原子的に行う**（欠損したファイル参照の `PendingFileDeletion` への登録も同じトランザクション。正本は [画像処理](image-pipeline.md) の `WorkingSourceStore.invalidateWorkingSource`）。**`isTerminal` を各所で書き下さない**（履歴削除可否判定〈7.5〉・バッチ完了判定・復旧対象選定がすべてこの 1 述語を使う。書き下すと状態追加時に一部だけ更新される事故が起こる）。
+**処理用ファイルが失われた場合も新しい状態を作らず `paused(.sourceReselectionRequired)` へ遷移させる**（`paused` は「利用者操作を待って再開できる」の意で再選択要求もこれに当てはまる。バッチ全体ではなく該当項目だけが `paused` になる）。**`WorkingSourceRecord` の削除と欠損したファイル参照の `PendingFileDeletion` への登録は単一 DB トランザクションで原子的に行う**（正本は [画像処理](image-pipeline.md) の `WorkingSourceStore.invalidateWorkingSource`）。**キュー項目の `paused` への遷移は DB を更新しない。** 進行状態はセッション内のメモリ状態であり `app.db` に行を持たない（正本は本節。DB にキューのテーブルが無いことは 7.1）。`Application` の `BatchItemStartOutcome.itemPaused`（[書き出し Saga](export-saga.md) の 1.6）が該当項目だけをこの状態にする。**`isTerminal` を各所で書き下さない**（バッチ完了判定と UI の進行表示がこの 1 述語を使う。書き下すと状態追加時に一部だけ更新される事故が起こる。キュー状態はセッション内のメモリにしか存在しないため、DB を対象とする履歴削除可否判定〈7.5〉や起動時復旧はこの述語を使わない）。
 
 **キューの進行状態と 6.1 の 2 軸は別物。**
 
@@ -1038,7 +1035,7 @@ case .oneByOne:
 
 ##### 開始時の設定を固定する
 
-**実行中のバッチは開始時点の設定定数（10 章）のスナップショットで動く**（アプリ更新をまたいで再開しても枚数上限や並列数が変わらない）。
+**実行中のバッチは開始時点の設定定数（10 章）のスナップショットで動く**（作成後に設定定数を読み直さないため、バッチ内の全項目が同じ上限・並列数で扱われる）。
 
 ```swift
 struct BatchPolicySnapshot: Sendable, Equatable {
@@ -1056,7 +1053,7 @@ enum BatchKind: UInt32, Sendable, Hashable {
 }
 ```
 
-`Batch` の行が保持し再起動後も同じ値を使う（読み直して適用すると復元したバッチの上限が実行中に変わってしまう）。
+`Batch` の行が保持する。作成時に確定し、実行中は設定変更を反映しない（読み直して適用すると同一バッチの実行中に上限が変わってしまう）。
 
 **列値を固定する**（値は上記コードブロックの raw value が正本。`Batch` の DB 列としてスキーマ移行をまたぐため、`case` 宣言順に依存させると版によって `trial` のバッチが `proBatch` として上限 50 でクランプされうる。`OutputState` と同じ規則。7.5）。新しいバッチの作成時は、その時点の設定定数（10 章）から作る。
 
@@ -1086,7 +1083,7 @@ enum BatchKind: UInt32, Sendable, Hashable {
 - 1 バッチ最大 50 枚
 - 同時並列処理は **v1 では 1 固定**（初期値・hard max とも 1）。2 へ引き上げる場合は開始順序と勘定の再設計が要る（v2 検討時）
 - 一枚の失敗でバッチ全体を停止しない
-- **アプリ再起動後に未完了キューを復元する**（[画像処理](image-pipeline.md) の `WorkingSourceRecord`）
+- **アプリ再起動後、未完了のバッチは復元しない。** 最初からやり直しになる。起動時復旧が、どの `ExportRecord` からも参照されない `Batch` 行（未 settle のまま中断されたバッチの残骸）を削除する（削除条件と手順の正本は [書き出し Saga](export-saga.md) の 5 章。処理用素材は [画像処理](image-pipeline.md) の `WorkingSourceRecord`）
 - 元素材へのアクセス権限を失った場合は再選択を求める
 - バックグラウンド処理は OS の実行制限に従う。`BGProcessingTask` は使わず、フォアグラウンド継続を前提とする
 
@@ -1204,11 +1201,12 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `ExportJob` | 書き出しの進行中を表す（状態列を持たず、行の存在そのものが進行中を示す。完了操作または破棄で削除する。[書き出し Saga](export-saga.md) が正本）。`settingsHash` 列（startExport 時点の `ProjectSettingsHash`。settle で `ExportedSettingsEntry` へコピーする Persistence 内部列）を持つ |
 | `OutputRecord` | 写真ごとの出力状態。`exportID` で書き出しと対応づける |
 | `ExportedSettingsEntry` | 「変更せず再書き出し」免除の確定記録（6.3）。`projectID` ごとに 1 件 |
-| `ExportQueueItem` | 一括処理のキュー状態（6.4） |
 | `WorkingSourceRecord` | 処理用にアプリ領域へ複製した元素材（[画像処理](image-pipeline.md)） |
 | `PendingFileDeletion` | 参照 0 になった実体の削除候補（7.5） |
 | **`UsageLedger`** | **クォータ・トライアル台帳（6.3）。平文行（ADR 0005）** |
 | **`SubscriptionState`** | **購入状態キャッシュ（6.2）。平文行（ADR 0005）** |
+
+**一括処理のキュー進行状態（`ExportQueueState`）はセッション内のメモリ状態であり、この表にテーブルを持たない**（6.4）。
 
 **`app.db` 全体がバックアップ対象外**（7.4）。復元してはいけない理由（DB を分けても解消しない）:
 
@@ -1221,7 +1219,7 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 
 | 帰結 | 内容 |
 | --- | --- |
-| **実の外部キー制約** | `OutputRecord.projectID` → `Project`、`ExportQueueItem.batchID` → `Batch` を SQLite が強制する。アプリ側の起動時検査が不要になる |
+| **実の外部キー制約** | `OutputRecord.projectID` → `Project`、`ExportJob.batchID` → `Batch` を SQLite が強制する。アプリ側の起動時検査が不要になる |
 | 単一トランザクション | [書き出し Saga](export-saga.md) の確定処理が `ATTACH` なしで成立する |
 | 単一の `DatabaseMigrator` | 2 つの DB のスキーマバージョンが食い違う状態が存在しない |
 
@@ -1256,7 +1254,6 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `ProjectStampAsset(projectID, assetHash)` | **UNIQUE** |
 | `StampAsset.contentHash` | **PRIMARY KEY** |
 | `CustomStamp.customStampID` | **PRIMARY KEY** |
-| `ExportQueueItem(batchID, projectID)` | **UNIQUE** |
 | `DeliveryAttempt.exportID` | **PRIMARY KEY** |
 | `UnknownLibrarySave.exportID` | **PRIMARY KEY** |
 | `ExportedSettingsEntry.projectID` | **PRIMARY KEY**（免除の確定記録は projectID ごとに 1 件。6.3） |
@@ -1275,8 +1272,6 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `EffectSetting.projectID` | `Project` | CASCADE |
 | `EffectSetting.faceTrackID` | `FaceTrack` | CASCADE |
 | `ExportSetting.projectID` | `Project` | CASCADE |
-| `ExportQueueItem.projectID` | `Project` | CASCADE |
-| `ExportQueueItem.batchID` | `Batch` | CASCADE |
 | `ExportRecord.projectID` | `Project` | CASCADE |
 | `ExportedSettingsEntry.projectID` | `Project` | CASCADE |
 | `ExportRecord.batchID` | `Batch` | SET NULL |
@@ -1310,7 +1305,7 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 
 ##### 耐久性の水準
 
-**SQLite の標準設定（`synchronous = EXTRA`）にそのまま任せる。** 個別の耐久性保証や電源断対策は追加しない。整合の回復は起動時復旧が担う（未確定の `ExportJob` / `OutputRecord` の削除と孤児ファイルの GC。[書き出し Saga](export-saga.md) が正本）。会計は完了操作でしか確定しないため、それより前に中断した書き出しは会計への影響なくやり直せる。
+**SQLite の標準設定（`synchronous = EXTRA`）にそのまま任せる。** 個別の耐久性保証や電源断対策は追加しない。整合の回復は起動時復旧が担う（未確定の `ExportJob` / `OutputRecord` の削除、未 settle の `Batch` 残骸の削除、孤児ファイルの GC。[書き出し Saga](export-saga.md) が正本）。会計は完了操作でしか確定しないため、それより前に中断した書き出しは会計への影響なくやり直せる。
 
 ### 7.2 台帳・購入状態の保存
 
@@ -1442,7 +1437,7 @@ Library/Caches/stamp-thumbnails/
 tmp/raster/
 ```
 
-**処理中ファイルを `tmp/` に置かない**（OS がいつでも削除でき再起動のたびにキュー復元が失敗する。[画像処理](image-pipeline.md)）。`raster/` は `tmp/` のまま（1 回の `render` 呼び出し内でのみ有効で消えて困る状況が無い）。
+**処理中ファイルを `tmp/` に置かない**（OS がいつでも削除でき、再編集や履歴からの再開に必要な実体が失われる。[画像処理](image-pipeline.md)）。`raster/` は `tmp/` のまま（1 回の `render` 呼び出し内でのみ有効で消えて困る状況が無い）。
 
 ##### バックアップ
 
@@ -1537,7 +1532,7 @@ protocol ProtectedDataAvailability: Sendable {
 - **履歴のサムネイルには加工後の画像のみを使用する**（隠す前の顔が一覧に並ばないように）
 - **アプリ専用領域へ元画像の完全コピーを永続保存しない**（保持するのは写真ライブラリへの参照と編集設定のみ。処理用コピーは書き出し完了後に削除する）
 
-元素材が削除・権限喪失した場合、過去の設定情報は表示できるが再編集はできない（仕様 18.3）。**再編集には素材の再接続が要る**（処理用ファイルは 24 時間で消えるため履歴から開いた `Project` はほぼ常に素材を持たず、利用者が写真を選び直すことで再接続する。再接続の判定は [画像処理](image-pipeline.md) の `WorkingSourceRecord` が正本であり、勘定には使わない。ADR 0006）。
+元素材が削除・権限喪失した場合、過去の設定情報は表示できるが再編集はできない（仕様 18.3）。**再編集には素材の再接続が要る**（`WorkingSourceRecord` は完了操作（settle）で削除されるため、履歴から開いた `Project` はほぼ常に素材を持たず、利用者が写真を選び直すことで再接続する。再接続の判定は [画像処理](image-pipeline.md) の `WorkingSourceRecord` が正本であり、勘定には使わない。ADR 0006）。
 
 ##### 保存期間と容量
 
@@ -1555,7 +1550,7 @@ protocol ProtectedDataAvailability: Sendable {
 - プロジェクト設定、検出結果、サムネイル、加工用の中間ファイル
 - `ProjectSourceLocator`（`Project` と同じ行なので同時に消える）
 - `WorkingSourceRecord` と処理用ファイル
-- `ExportRecord`、完了済みの `ExportQueueItem`
+- `ExportRecord`
 
 **v1 では履歴サムネイルの生成コード自体が無く、削除対象になる実体が存在しない**（7.5「履歴サムネイル」が正本。生成・削除経路・孤児 GC は Issue #26 で同時に導入する）。
 
@@ -1568,18 +1563,13 @@ protocol ProtectedDataAvailability: Sendable {
 
 ##### やり直しのための保持保証
 
-**履歴を保存する設定では、保存期間の長短にかかわらず直近の作業を 24 時間保持する。**
+**履歴を保存する設定では、保存期間の長短にかかわらず、完了操作から 24 時間以内は対応する `Project` を自動削除（容量超過・保存期限）の対象にしない。** 判定は `ExportRecord.exportedAt`（完了時の `settledAt`。[書き出し Saga](export-saga.md) の 3 章）だけを見て `Project` ごとに独立に行い、`Batch` への所属は問わない（`Project` と `Batch` の所属関係は DB 上に列を持たない。下記「`Project` 削除 Saga」）。
 
-| 処理 | 保持対象 |
-| --- | --- |
-| 単体処理 | 直近 1 プロジェクト |
-| 一括処理 | 直近 1 バッチと、そのバッチに属する全プロジェクト（最大 50 件） |
-
-一括処理で「直近 1 プロジェクト」だけを保持すると、バッチ内の残り 49 枚が失われ再編集が成立しない。保持の目的は編集のやり直し全般であるため**プランを問わず同一の扱いとする**（期間は `WorkingSourceRecord` の保持期間と一致させる。処理用ファイル自体が 24 時間で消えるため）。
+一括処理は `settleBatch` がバッチ内の全確定項目へ同じ `settledAt` を設定するため（[書き出し Saga](export-saga.md) の 3 章）、この規則の帰結としてバッチの全 `Project`（最大 50 件）が同じ 24 時間の窓で保護される。単体処理でも同じ規則がそのまま「直近 1 プロジェクト」の保護として働く。**完了前（未 settle）の `Project` はこの規則の対象ではない。** `WorkingSourceRecord` が存在する間は時間経過にかかわらず自動削除では常に保護されるため（下記「削除の可否判定」の上書き可能な参照）、一括処理の未処理項目（`waiting`）を含め、settle 前の項目は既にこの節と無関係に保護されている。保持の目的は編集のやり直し全般であるため**プランを問わず同一の扱いとする**。
 
 ##### 未受け渡し出力の状態
 
-**消費は完了操作（単一トランザクション）で確定するため、生成そのものは何も消費しない**（ADR 0006）。**完了前（`settledAt == nil`）の出力は永続保護しない。** アプリの再起動やフローからの離脱で破棄する（消費していないため損失は操作の手間だけ。起動時復旧が未確定の `OutputRecord` を削除する）。**24 時間の保持規則は完了済みで未受け渡しの出力にのみ適用する。**
+**消費は完了操作（単一トランザクション）で確定するため、生成そのものは何も消費しない**（ADR 0006）。**完了前（`settledAt == nil`）の出力は永続保護しない。** アプリの再起動やフローからの離脱で破棄する（消費していないため損失は操作の手間だけ。起動時復旧が未確定の `OutputRecord` を削除する）。**`OutputRecord` 自体（実体ファイルと行）に対する 24 時間の保持規則は、完了済みで未受け渡しの出力にのみ適用する**（完了前は対象外。`Project`/`ExportRecord` 側の 24 時間保護は上記「やり直しのための保持保証」が別に定める）。
 
 ```swift
 // raw value は DB 列値（スキーマ移行をまたぐため固定。下表）
@@ -1687,7 +1677,6 @@ struct DeletionContext: Sendable {
     let trigger: DeletionTrigger
     let isFavorite: Bool
     let isBeingEdited: Bool
-    let hasNonTerminalQueueItem: Bool
     let hasUndeliveredOutputRecord: Bool   // isUndelivered のみ（settledAt != nil の出力が対象）。delivered は保護しない
     let hasRunningExportJob: Bool
     let hasWorkingSourceRecord: Bool
@@ -1699,21 +1688,22 @@ struct DeletionContext: Sendable {
 
 **v1 では `Project` に `isFavorite` / `isBeingEdited` の列が無く、お気に入り・編集中の上書き可能保護は機能しない（常に非保護扱い）。** 列の追加と判定の有効化は Issue #23 で行う（`WorkingSourceRecord` による保護は列を必要としないため v1 でも機能する）。
 
-**履歴は写真アプリ型のフラットな写真グリッドであり、閲覧・削除の単位は `Project` のみとする**（バッチのグルーピングは処理の単位としてのみ存在し、閲覧・削除の単位ではない。[商品面の決定](product-decisions.md)）。`Batch` 行自体は利用者が直接削除する対象ではなく、所属する `Project` がすべて削除されたときに自動的に消える（下記「`Project` 削除 Saga」）。
+**履歴は写真アプリ型のフラットな写真グリッドであり、閲覧・削除の単位は `Project` のみとする**（バッチのグルーピングは処理の単位としてのみ存在し、閲覧・削除の単位ではない。[商品面の決定](product-decisions.md)）。`Batch` 行自体は利用者が直接削除する対象ではなく、その `batchID` を参照する `ExportRecord` / `OutputRecord` / `ExportJob` の残数が合計 0 になったときに自動的に消える（条件と手順の正本は下記「`Project` 削除 Saga」。起動時点でどの `ExportRecord` からも参照されない未 settle の残骸は、これとは別経路の起動時復旧が削除する。[書き出し Saga](export-saga.md) の 5 章）。
 
 **参照元は 2 種類に分かれます。**
 
 | 分類 | 参照元 | 巻き込んだ場合に起こること |
 | --- | --- | --- |
-| **絶対保護**（どの契機でも削除しない） | **非終端のキュー項目**（`isTerminal == false`。6.4） | 処理中のバッチが消える |
-| 同上 | **`ExportJob` の行**（[書き出し Saga](export-saga.md) の 2 章） | 進行中の書き出しが宙に浮く |
+| **絶対保護**（どの契機でも削除しない） | **`ExportJob` の行**（[書き出し Saga](export-saga.md) の 2 章） | 進行中の書き出しが宙に浮く |
 | 同上 | **`isUndelivered` の `OutputRecord`**（`hasUndeliveredOutputRecord`） | 利用者が受け取っていない成果物が消える |
 | 同上 | **試行中の `DeliveryAttempt`**（`hasDeliveryAttemptInProgress`。[書き出し Saga](export-saga.md) の 7.0） | 写真ライブラリ保存の試行中に出力記録が失われ、結果を追跡できなくなる |
 | **利用者が上書きできる** | お気に入り（v1 では機能しない。上記） | 利用者が明示的に保護した履歴が消える |
 | 同上 | 編集中のプロジェクト（v1 では機能しない。上記） | 編集画面が参照先を失う |
-| 同上 | `WorkingSourceRecord`（[画像処理](image-pipeline.md)） | 処理用の元素材が消え、キューを復元できない |
+| 同上 | `WorkingSourceRecord`（[画像処理](image-pipeline.md)） | `Project` ごと消えるため（FK CASCADE）、該当項目は行欠損として失敗する（`itemFailed`・`AppErrorCode.sourceMissing`。[書き出し Saga](export-saga.md) の 1.6 手順 3）。バッチ全体は止めない |
 
-**絶対保護は 4 つ**（「消すと復旧できない」「利用者がまだ受け取っていない」「進行中の受け渡し試行と競合する」のいずれかに該当し、確認を出しても意味がない）。残りは利用者の明示操作で上書きできる。**契機ごとに扱いを変える**（「閲覧と削除は常に可能」という原則〈6.2〉と自動削除の安全性を両立させるため）。
+**非終端のキュー項目は絶対保護に含めない**（キューの進行状態はセッション内のメモリ状態であり、削除可否判定が読む DB トランザクションの対象にならない。6.4）。`waiting` 中の `Project` が削除された場合、`WorkingSourceRecord` は FK CASCADE で行ごと消えるため、その項目は行欠損として失敗し（`itemFailed`・`AppErrorCode.sourceMissing`。実体ファイル欠損の `itemPaused`〈再選択で復帰可能〉とは区別する。[書き出し Saga](export-saga.md) の 1.6 手順 3）、「一枚の失敗でバッチ全体を止めない」既存則（6.4）で吸収する（ADR 0005 の受容）。
+
+**絶対保護は 3 つ**（「消すと復旧できない」「利用者がまだ受け取っていない」「進行中の受け渡し試行と競合する」のいずれかに該当し、確認を出しても意味がない）。残りは利用者の明示操作で上書きできる。**契機ごとに扱いを変える**（「閲覧と削除は常に可能」という原則〈6.2〉と自動削除の安全性を両立させるため）。
 
 | 契機 | 絶対保護 | 上書き可能な参照 |
 | --- | --- | --- |
@@ -1740,11 +1730,13 @@ struct DeletionContext: Sendable {
 | 順 | 操作 |
 | --- | --- |
 | 1 | 削除可否判定（7.5）を満たすことを確認する |
-| 2 | **同一 DB トランザクション**で `Project` と関連行（`ExportRecord` / `OutputRecord` / キュー項目 / `WorkingSourceRecord` / 検出・レビュー結果 / `ProjectStampAsset` / `ExportedSettingsEntry`）を削除し、実体を `PendingFileDeletion` へ積む |
-| 3 | 削除した `Project` が `Batch` に属しており、そのトランザクション内で数えた **残り所属 `Project` 数が 0** になった場合、**同じトランザクションで `Batch` 行も削除する** |
+| 2 | 削除対象 `Project` が持つ全 `ExportRecord` の `batchID`（1 件も無ければ空集合）を読む。**同一 DB トランザクション**で `Project` と関連行（`ExportRecord` / `OutputRecord` / `WorkingSourceRecord` / 検出・レビュー結果 / `ProjectStampAsset` / `ExportedSettingsEntry`）を削除し、実体を `PendingFileDeletion` へ積む |
+| 3 | 手順 2 で読んだ `batchID` の集合それぞれについて、削除後に同一トランザクション内で数えた**その `batchID` を参照する `ExportRecord` / `OutputRecord` / `ExportJob` の残数が合計 0** になっていれば、**同じトランザクションでその `Batch` 行も削除する** |
 | 4 | `PendingFileDeletion` に従って実体を削除する |
 
-中断すればトランザクションはロールバックされ削除は成立しない（他の `app.db` 更新と同じ）。手順 3 と 4 の間で中断した場合は、`PendingFileDeletion` の起動時 GC が実体を回収する。**`Batch` 行の削除は利用者操作の対象ではなく、`Project` 削除の副次的な後始末に過ぎない**（`ExportQueueItem.projectID` は `Project` へ `CASCADE` するため、この時点でそのバッチのキュー項目は既に存在しない。7.1）。`ExportRecord` / `OutputRecord` / `ExportJob` が保持する `batchID` は `SET NULL` になる（7.1）。
+`Project` と `Batch` の所属関係は DB 上に列を持たない。**手順 3 の判定は既存の `batchID` 参照（`ExportRecord` / `OutputRecord` / `ExportJob`。いずれも 7.1 の FK 表にある）だけで行う**（`Project`/`WorkingSourceRecord` は `batchID` を持たないため。取込は `Batch` と独立であり、`ExportJob.batchID` は書き出し開始時に `StartExportInput` から入る。[書き出し Saga](export-saga.md) の 0 章）。**`OutputRecord` / `ExportJob` も確認するのは、同じバッチの他の項目がまだ処理中（未 settle）の場合に `Batch` 行を早期に消さないため**（削除する `Project` 自身の分は手順 2 で既に削除済みであり、ここで残数を数えるのは同じ `batchID` を持つ**他の** `Project` の行）。**1 つの `Project` が複数の `ExportRecord`（再書き出しのたびに増える）を持つ場合、手順 2 は重複を除いた `batchID` の集合を読む**（`Project` は初回インポート時にしか `Batch` へ加わらないため、実務上この集合は高々 1 件になる。再書き出しは常に単体書き出し〈`batchID == nil`〉のため）。**一度も書き出していない（`ExportRecord` を持たない）`Project` を削除しても、この自動削除は発生しない**（そのバッチ自体が `ExportRecord` から一度も参照されておらず、未 settle の残骸として起動時復旧が別途削除する。[書き出し Saga](export-saga.md) の 5 章）。
+
+中断すればトランザクションはロールバックされ削除は成立しない（他の `app.db` 更新と同じ）。手順 3 と 4 の間で中断した場合は、`PendingFileDeletion` の起動時 GC が実体を回収する。**`Batch` 行の削除は利用者操作の対象ではなく、`Project` 削除の副次的な後始末に過ぎない**（キューの進行状態はセッション内のメモリ状態であり `app.db` に行を持たないため、`Project` 削除に追従して消すべきキュー項目の行は無い。7.1）。`ExportRecord` / `OutputRecord` / `ExportJob` が保持する `batchID` は `SET NULL` になる（7.1）。
 
 ##### 編集中 `Project` の破棄
 
@@ -1764,7 +1756,7 @@ protocol HistoryDeletionStore: Sendable {
     ) async throws -> DeletionInspection
 
     /// DB トランザクション内で DeletionContext を再取得し、
-    /// 削除可否判定を再評価してから削除する（所属 Batch が空になった場合の自動削除を含む）
+    /// 削除可否判定を再評価してから削除する（参照する ExportRecord が尽きた Batch の自動削除を含む）
     func deleteHistoryUnit(
         _ unit: HistoryUnit,
         trigger: DeletionTrigger
@@ -1779,7 +1771,6 @@ struct DeletionInspection: Sendable {
 }
 
 enum AbsoluteProtection: Sendable, Hashable {
-    case nonTerminalQueueItem
     case exportJobRunning
     case undeliveredOutput
     /// 試行中の DeliveryAttempt（写真ライブラリ保存）が存在するため削除を拒否する
@@ -1787,7 +1778,7 @@ enum AbsoluteProtection: Sendable, Hashable {
 }
 ```
 
-**`DeletionContext` を呼び出し側から渡さない**（渡せる形だと context 読み取り後に新しい `ExportJob`/キュー項目が作られ古い context で削除が通る競合が残る）。**`deleteHistoryUnit` は `trigger` だけを受け取り `DeletionContext` を DB トランザクションの内側で読み直す**（`inspectDeletion` の結果は確認文言のためだけに使い削除の根拠にしない。再評価で不可になった場合は throw し理由を提示する）。**`DeletionInspection` と `DeletionContext` は別の型**（同じ型だと表示用に読んだ値を削除へ渡す実装が書けてしまう）。
+**`DeletionContext` を呼び出し側から渡さない**（渡せる形だと context 読み取り後に新しい `ExportJob` が作られ古い context で削除が通る競合が残る）。**`deleteHistoryUnit` は `trigger` だけを受け取り `DeletionContext` を DB トランザクションの内側で読み直す**（`inspectDeletion` の結果は確認文言のためだけに使い削除の根拠にしない。再評価で不可になった場合は throw し理由を提示する）。**`DeletionInspection` と `DeletionContext` は別の型**（同じ型だと表示用に読んだ値を削除へ渡す実装が書けてしまう）。
 
 ##### 出力の削除経路
 
@@ -1813,7 +1804,7 @@ enum AbsoluteProtection: Sendable, Hashable {
 | 7 日 / 30 日 | 期限で削除する |
 | 保存期限なし | 容量上限に達したら古いものから削除する |
 
-**`ExportRecord` は対応する `Project` または `Batch` と同じトランザクションで削除する**（別々だと記録の食い違いが生じる）。完了済みキュー項目も同じ扱い、未完了は削除しない。一括処理した写真は履歴へ 50 件並べず**バッチ単位で 1 件に集約する**（開くと個別写真を確認でき、エラーのみの再試行へ遷移できる）。
+**`ExportRecord` は対応する `Project` と同じトランザクションで削除する**（別々だと記録の食い違いが生じる）。**`Batch` の削除では `ExportRecord` を削除しない**（外部キーの `SET NULL` により `batchID` だけが消える。7.1）。一括処理した写真も履歴では個別の `Project` として表示する（バッチのグルーピングなし。閲覧・削除の単位は `Project` のみ。上記「削除の可否判定」と [商品面の決定](product-decisions.md) が正本）。`Batch` は処理と勘定の単位であり、履歴の表示・削除の単位ではない。
 
 ##### 履歴サムネイル
 
@@ -2093,7 +2084,7 @@ struct OutputMetadata: Sendable, Equatable {
 | **確定境界** | 会計の計上・枠の確定・成果物の公開はすべて完了操作の単一トランザクションただ 1 点。それ以前は何も消費せず、成果物も公開しない |
 | **完了前の出力** | 永続保護しない。アプリの再起動・フローからの離脱で破棄する（消費していないため損失は操作の手間だけ。ADR 0006） |
 | **未受け渡し出力の保護**（完了済み） | 保存前に消えない。更新誘導より受け渡しを優先する（ADR 0005） |
-| **復旧の開始条件** | 起動時復旧（未確定の `ExportJob` / `OutputRecord` の一律削除・孤児ファイル GC）を終えるまで新しい書き出しを開始しない |
+| **復旧の開始条件** | 起動時復旧（未確定の `ExportJob` / `OutputRecord` の一律削除・未 settle の `Batch` 残骸の削除・孤児ファイル GC）を終えるまで新しい書き出しを開始しない |
 
 `ExportJob` / `ExportAuthorization` / `ExportAccountingMode` / `OutputRecord` の型定義も [書き出し Saga](export-saga.md) が正本です。
 
@@ -2264,7 +2255,7 @@ struct CrashContext: Sendable, Equatable {
 
 ## 12. 未決事項
 
-v1 のリリース範囲、動画の扱い、課金訴求の分類、利用者向け表現は [商品面の決定](product-decisions.md) が正本です。
+v1 のリリース範囲、動画の扱い、課金訴求の分類、利用者向け表現、一括処理の中断・再開方針は [商品面の決定](product-decisions.md) が正本です。
 
 | 項目 | 内容 | 決定時期 |
 | --- | --- | --- |

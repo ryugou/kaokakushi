@@ -172,7 +172,8 @@
 
 - ストレージ必要量計算、`ExportQueueState` 状態機械
 - **履歴の保存期間と容量判定。容量超過時にも、完了前のやり直しは無制限のまま保たれ、完了済み未受け渡し出力（`isUndelivered`）の 24 時間保護は絶対保護として維持されること**
-- **絶対保護（非終端キュー項目 / 処理中の `ExportJob` / `isUndelivered` の `OutputRecord` / 試行中の `DeliveryAttempt`）が、手動削除でも拒否されること**
+- **絶対保護（処理中の `ExportJob` / `isUndelivered` の `OutputRecord` / 試行中の `DeliveryAttempt`）が、手動削除でも拒否されること**
+- **`waiting` 中の `Project` が削除されたバッチ項目は、`WorkingSourceRecord` の行欠損（FK CASCADE）として失敗し（`itemFailed`・`AppErrorCode.sourceMissing`。実体ファイル欠損の `itemPaused` ではない）、バッチ全体を止めないこと**（ADR 0005）
 - **お気に入り・編集中・`WorkingSourceRecord`（`OverridableProtection` の 3 値）が、自動削除では保護され、明示確認付きの手動削除では上書きできること**（お気に入り・編集中は v1 では `Project` に列が無く検証不能。Issue #23 で有効化。`WorkingSourceRecord` は v1 でも検証可能）
 - **上書き対象ごとに、失われるものを示す確認文言が選ばれること**
 - 未保存バッチが 1 件までに制限されること
@@ -195,20 +196,20 @@
 - `reviewRequired` かつ `unreviewed` の写真が残っていれば開始しないこと
 - `WorkingSourceRecord` の実体は `ManagedFileStore.exists` で確認すること。`false`（実体無し）でのみ無効化して再選択導線へ倒し、確認自体の失敗（保護データ利用不可・I/O 障害）による `throw` は欠損として扱わないこと
 - 権限とクォータの評価で `.blocked` なら `ExportJob` を作らず、生成も開始しないこと
+- **バッチの項目で 1.6 の手順 1・2・4・5（確認の一致・能力・権限とクォータ・revision）のいずれかが不成立の場合、または手順 3 で `WorkingSourceRecord` の行自体が存在しない場合、該当項目が `BatchItemStartOutcome.itemFailed` としてセッション内で扱われ、バッチの残り項目が続行すること。単体書き出しでは同じ不成立がそのまま書き出し全体の不開始になること**（[書き出し Saga](export-saga.md) の 1.6）
 - 手順 0：`startExport` が `expectedProjectRevision` と不一致なら `throw` し、一致すれば `ExportJob` を挿入すること
 - **生成の完了時点（`recordGeneratedOutput`）では `OutputRecord`（`settledAt: nil`）と出力ファイルだけが作られること。月間枠・トライアルクレジットのいずれも消費されないこと**（ADR 0006）
 - **生成の完了時点で `ExportRecord` が作成されないこと。確定記録（`ExportedSettingsEntry`）も更新されないこと**
-- **生成の完了時点でキュー項目が確定されないこと**
 - **生成の完了時点で `WorkingSourceRecord` が削除されず保持され、素材を再レンダリングできること**
 - **健全性確認**: `OutputFileVerifier.verify` が存在確認・サイズが 0 でないこと・簡易デコード成功の3検査を行うこと。3検査のいずれかの不成立、または一時的な I/O 障害（`.ioFailure`）による確認失敗のいずれでも中断として扱うこと
 - 生成の失敗（レンダリング・移動・健全性確認の不成立）・利用者によるキャンセルが、`ExportJob` の削除と生成済みファイルのベストエフォート削除で後始末されること。**まだ何も消費していないため返還処理は不要であること**
-- 開始後に契約の失効・月間上限への到達が起きても、`running` の写真は開始時の権限のまま生成を完了すること。`waiting` の写真は開始しないこと
-- **直列実行キュー1本（並列数1）が、同時に処理中の `ExportJob` を 1 件までに保つこと**（ADR 0005）
+- **開始後に契約の失効・月間上限への到達・昇格が起きても無視され、バッチ内の全項目がバッチ開始時の認可スナップショットのまま生成を完了すること**
+- **直列実行キュー1本（並列数1）が、手順1〜3（レンダリング〜健全性確認）を処理中のジョブを常に 0 件か 1 件に保つこと**（生成済み・確認待ち（`OutputRecord.settledAt == nil`）の `ExportJob` はバッチでは複数同時に存在しうる。[書き出し Saga](export-saga.md) の冒頭が正本。ADR 0005）
 - `startExport` が `expectedProjectRevision` つきで `ExportJob` 行を挿入し、revision が変わっていれば失敗すること
 
 ### 3.2 完了（`settleExport` / `settleBatch`）
 
-- **`settleExport` が単一トランザクションで、消費（月間枠またはクレジット）・`settledAt` の設定・`ExportRecord` の作成・確定記録の更新・キュー項目の確定・`WorkingSourceRecord` の削除・`ExportJob` の削除を同時に行うこと**（ADR 0006）
+- **`settleExport` が単一トランザクションで、消費（月間枠またはクレジット）・`settledAt` の設定・`ExportRecord` の作成・確定記録の更新・`WorkingSourceRecord` の削除・`ExportJob` の削除を同時に行うこと**（ADR 0006）
 - 一度設定した `settledAt` は変更されないこと。二重に完了操作を呼んでも消費が重複しないこと
 - **`settleBatch` が結果一覧画面での完了操作 1 回で、対象バッチ内の確定対象の全出力を同一トランザクションで確定し、確定対象の枚数分だけクレジットを消費すること**（ADR 0006）
 - 完了操作の付近に「完了すると 1 枚として確定し、以降の作り直しは新しい 1 枚になる」旨が明示されること
@@ -235,7 +236,9 @@
 
 ### 3.5 起動時復旧
 
-- **起動時復旧が次の順序で実行されること**: (1) `running` の `ExportJob` を削除する (2) `settledAt == nil` の未確定出力（`OutputRecord` と出力ファイル）を削除する (3) 孤児ファイルを GC で回収する (4) `resolveOrphanedAttempts` で残存 `DeliveryAttempt` を解決する (5) `UnknownLibrarySave` を読み込む (6) 復旧案内を提示する
+- **起動時復旧が次の相対順序で実行されること**（正本の手順は [書き出し Saga](export-saga.md) の 5 章）: `running` の `ExportJob` と対応する未確定出力（`settledAt == nil` の `OutputRecord` と出力ファイル）の削除は、どの `ExportRecord` からも参照されない `Batch` 行（未 settle の残骸）の削除より前。`Batch` 残骸の削除は、孤児ファイルの GC より前。孤児ファイル GC は `resolveOrphanedAttempts` による残存 `DeliveryAttempt` の解決より前。`DeliveryAttempt` の解決は `UnknownLibrarySave` の読み込み・復旧案内の提示より前
+- **未 settle の `Batch` 行が起動時に削除され、settle 済みの `Batch`（`ExportRecord` が存在する）は残ること**
+- **`deleteUnsettledBatches()` を連続で 2 回実行しても 2 回目が成功し、settle 済みの `Batch` と関連記録に変化がないこと**（冪等。[書き出し Saga](export-saga.md) の 0 章が正本）
 - 復旧が完了するまで新しい書き出しを開始させないこと
 - `DeliveryAttempt` が残っている場合、`previousState == generated` なら `deliveryUnknown` へ、`previousState == delivered` なら `delivered` を維持したうえで「保存結果が不明」を別途提示すること。状態を後退させないこと
 - `resolveOrphanedAttempts` が解決後の全出力の受け渡し状態を返すこと。復旧案内はこの戻り値を使うこと
@@ -248,8 +251,10 @@
 - 異常終了後の起動時、`isUndelivered` では復旧案内が出て、`delivered` では出ないこと
 - 「履歴を保存しない」設定で、未受け渡し出力・保存結果不明の注記が付いた `delivered` 出力・`UsageLedger` の消費記録・処理中の `ExportJob` とその生成済み出力の 4 つ以外が残らないこと
 - `HistoryDeletionStore.deleteHistoryUnit` の拒否（throw）を Saga が利用者へのエラー提示まで伝播すること（判定そのものの検証は 4.2）
-- **`Project` 削除時、それが `Batch` の最後の所属 `Project` なら `Batch` 行が同一トランザクションで削除されること**
-- **所属 `Project` が残る場合は `Batch` 行が残ること**
+- **`Project` 削除時、その `Project` の `ExportRecord.batchID` を参照する他の `ExportRecord` / `OutputRecord` / `ExportJob` が 1 件も残らなければ、`Batch` 行が同一トランザクションで削除されること**（`Project` と `Batch` の所属関係は DB 上に列を持たず、既存の `batchID` 参照だけで判定する）
+- **同じ `batchID` を参照する `ExportRecord` が他に残る場合は `Batch` 行が残ること**
+- **同じバッチの他の項目がまだ未 settle（`OutputRecord` または `ExportJob` が `batchID` を参照中）の場合、そのバッチの settle 済み `Project` を 1 件削除しても `Batch` 行が削除されないこと**（処理中のバッチを早期に失わせない）
+- **`ExportRecord` を一度も持たない（未書き出しの）`Project` を削除しても `Batch` 行の自動削除は発生しないこと**（未 settle の `Batch` 残骸は起動時復旧が別途削除する）
 - **`deleteHistoryUnit` が `DeletionContext` を受け取らず、DB トランザクション内で読み直して再判定すること**
 - **`inspectDeletion` の後・削除の前に新しい `ExportJob` が作られた場合、削除が throw すること**
 - **`hasUndeliveredOutputRecord` が `delivered` の出力を保護せず、`isUndelivered` のみを見ること**
@@ -261,7 +266,7 @@
 - **保存値の `referenceCount` が導出値と一致すること。不一致なら導出値を正として書き直すこと**
 - 一括削除が `CustomStamp` のみを対象とし、参照中の `StampAsset` を消さないこと
 - 削除で DB が先に更新され、`PendingFileDeletion` が同じトランザクションへ記録されること
-- `WorkingSourceRecord` の実体が欠けたとき、そのキュー項目が `paused(.sourceReselectionRequired)` へ遷移すること。バッチ全体が止まらないこと
+- `WorkingSourceRecord` の実体が欠けたとき、`invalidateWorkingSource` が DB 側の行を削除し、`BatchItemStartOutcome.itemPaused` により該当項目だけがセッション内で `paused(.sourceReselectionRequired)` として扱われること。バッチ全体が止まらないこと
 - **`WorkingSourceRecord` の削除契機が、完了操作（`settleExport` / `settleBatch`）・プロジェクト破棄・実体欠損の 3 つに限られ、時間経過では削除されないこと**（[画像処理](image-pipeline.md) が正本）
 - **`Project` の `capture` / `sourceRepresentation` / `libraryCreationDate` が、書き出しの完了や `WorkingSourceRecord` の削除では消えず、`Project` 自体の削除でのみ失われること**
 - `WorkingSourceRecord` の有無で `replaceWorkingSource` と `attachWorkingSourceToExistingProject` が選ばれること
@@ -270,7 +275,7 @@
 - **再接続が `detectionRevision` / `projectRevision` を増やし、検出結果を再利用しないこと**
 - **再選択が顔検出をやり直し、`detectionRevision` と `projectRevision` を増やし、旧 `FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` を破棄すること**
 - **`PreviewConfirmation` が DB に存在せず、`detectionRevision` の増加だけで確認が無効になること**
-- **`isTerminal` が `completed` / `failed` / `canceled` のみ真であり、履歴削除の保護と完了判定が同じ述語を使うこと**
+- **`isTerminal` が `completed` / `failed` / `canceled` のみ真であり、バッチ完了判定と UI の進行表示が同じ述語を使うこと。履歴削除の可否判定・起動時復旧がこの述語を参照しないこと**（キュー状態はセッション内のメモリにしか存在しない。[アーキテクチャ設計](architecture.md) の 6.4）
 
 ### 3.7 更新誘導との順序（[アーキテクチャ設計](architecture.md) の 6.6）
 
@@ -290,12 +295,12 @@
 
 ### 4.2 永続化の原子性（[アーキテクチャ設計](architecture.md) の 7.1）
 
-- **`settleExport` / `settleBatch` の DB トランザクションが原子的であり、`OutputRecord.settledAt` の設定・`ExportRecord` / キュー状態 / `Project` / `WorkingSourceRecord` の更新・`ExportJob` の削除が同時に成立すること**
+- **`settleExport` / `settleBatch` の DB トランザクションが原子的であり、`OutputRecord.settledAt` の設定・`ExportRecord` / `Project` / `WorkingSourceRecord` の更新・`ExportJob` の削除が同時に成立すること**
 - **完了操作の成功後にのみ `OutputRecord.settledAt` が確定していること。途中状態（消費だけ・`settledAt` だけ等）が観測されないこと**
 - `synchronous = EXTRA` と `foreign_keys = ON` が設定され、起動時に読み返して検証されること
 - スキーマ移行が単一トランザクションで確定し、途中適用が観測されないこと
-- **`HistoryDeletionStore.inspectDeletion` / `deleteHistoryUnit` が、列挙された全絶対保護（非終端キュー項目 / 処理中の `ExportJob` / `isUndelivered` の `OutputRecord` / 試行中の `DeliveryAttempt`）を見ること**（[アーキテクチャ設計](architecture.md) の 7.5「削除の可否判定」が正本）
-- **外部キー制約が有効であり、`Project` の削除が `OutputRecord`（非終端）/ 処理中の `ExportJob` の存在で RESTRICT されること**
+- **`HistoryDeletionStore.inspectDeletion` / `deleteHistoryUnit` が、列挙された全絶対保護（処理中の `ExportJob` / `isUndelivered` の `OutputRecord` / 試行中の `DeliveryAttempt`）を見ること**（[アーキテクチャ設計](architecture.md) の 7.5「削除の可否判定」が正本）
+- **外部キー制約が有効であり、`Project` の削除が `OutputRecord` / 処理中の `ExportJob` の存在で RESTRICT されること**
 - **`Batch` の削除で `OutputRecord.batchID` / `ExportRecord.batchID` / `ExportJob.batchID` が SET NULL になること**
 - **`OutputRecord.projectID` の部分 UNIQUE インデックス（`settledAt IS NULL`）が未確定出力を 1 プロジェクトにつき 1 件へ制限すること**
 - **`journal_mode` が `DELETE` であり、`TRUNCATE` / `PERSIST` / `WAL` なら復旧エラーになること**

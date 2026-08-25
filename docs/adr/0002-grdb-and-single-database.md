@@ -8,7 +8,7 @@ Accepted
 
 本設計の中核は書き出しコミットジャーナル（[書き出し Saga](../export-saga.md)）であり、次を要求する。
 
-- **明示的なトランザクション境界。** 出力確認画面の完了操作（`settleExport` / `settleBatch`）は、消費（月間枠またはクレジット）、`ExportRecord` の insert、確定記録の更新、キュー項目の確定、`WorkingSourceRecord` の delete、`ExportJob` の delete を単一トランザクションで実行する
+- **明示的なトランザクション境界。** 出力確認画面の完了操作（`settleExport` / `settleBatch`）は、消費（月間枠またはクレジット）、`ExportRecord` の insert、確定記録の更新、`WorkingSourceRecord` の delete、`ExportJob` の delete を単一トランザクションで実行する
 - **原子性の検証可能性。** 状態機械のユニットテストで、トランザクションが途中適用されないことを確認する（[書き出し Saga](../export-saga.md) の状態数が少ないため実機の process-death 注入を伴わずに検証できる。ADR 0005）
 - **ヘッドレス実行。** ドメインに近い層のテストをシミュレータ起動なしで走らせる
 
