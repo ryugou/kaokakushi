@@ -19,7 +19,7 @@ extension ExportSagaStoreLive {
     /// ExportedSettingsEntry更新に使うためExportJob本体と同じSELECTで読む。
     /// +Recovery.swiftから参照するためprivateにしていない（他のstatic funcと同じ流儀）。
     static let exportJobColumns = """
-    exportID, projectID, batchID, queueItemID, authorizedAt, accountingMode,
+    exportID, projectID, batchID, authorizedAt, accountingMode,
         entitlementPlan, entitlementStatus, entitlementExpiresAt,
         entitlementLastVerifiedAt, entitlementIsSandbox, deliveryFormat,
         deliverySuggestedCreationDate, settingsHash
@@ -70,12 +70,10 @@ extension ExportSagaStoreLive {
     /// `ExportJob`へデコードする。
     static func makeExportJob(_ row: Row) throws -> ExportJob {
         let batchIDRaw: UUID? = row["batchID"]
-        let queueItemIDRaw: UUID? = row["queueItemID"]
         return ExportJob(
             exportID: ExportID(rawValue: row["exportID"]),
             projectID: ProjectID(rawValue: row["projectID"]),
             batchID: batchIDRaw.map(BatchID.init(rawValue:)),
-            queueItemID: queueItemIDRaw.map(ExportQueueItemID.init(rawValue:)),
             authorization: try Self.decodeAuthorization(row),
             delivery: try Self.decodeDelivery(row)
         )

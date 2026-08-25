@@ -5,11 +5,9 @@ import Domain
 
 // ExportSagaStoreLive.settleExportのテスト（export-saga.md 3章「手順」手順5が正本）。
 // 事前条件違反のテストは、テストの意図が「その条件だけ」を検証するように、raw SQL挿入
-// ヘルパー（SchemaTestSupport.swift）でExportJob/OutputRecord/ExportQueueItemの行を直接
-// 組み立てるものと、実際のstartExport→recordGeneratedOutputパイプラインを通すものを
-// 使い分ける（queueItemIDの事前条件はExportJob.batchIDが非nilである必要があるため、
-// 判定ロジックを正しく通すには後者が必要）。settleBatch固有のテストは
-// ExportSagaStoreSettleBatchTests.swiftへ分離した（400行制限）。
+// ヘルパー（SchemaTestSupport.swift）でExportJob/OutputRecordの行を直接組み立てるものと、
+// 実際のstartExport→recordGeneratedOutputパイプラインを通すものを使い分ける。settleBatch
+// 固有のテストはExportSagaStoreSettleBatchTests.swiftへ分離した（400行制限）。
 
 @Suite("ExportSagaStoreLive.settleExport")
 struct ExportSagaStoreSettleTests {
@@ -136,48 +134,6 @@ struct ExportSagaStoreSettleTests {
         let fields = try outputRecordFields(database, exportID: exportID.rawValue)
         #expect(fields?.settledAt == schemaTestReferenceDate)
     }
-
-    @Test("queueItemIDに対応するExportQueueItem行が無ければsettleQueueItemPreconditionFailedでthrowすること")
-    func rejectsWhenQueueItemMissing() async throws {
-        let (database, url) = try makeTestAppDatabase()
-        defer { try? FileManager.default.removeItem(at: url) }
-        let store = makeExportSagaStore(database: database)
-        let projectID = ProjectID(rawValue: UUID())
-        let exportID = ExportID(rawValue: UUID())
-        let queueItemID = ExportQueueItemID(rawValue: UUID())
-        try await database.dbQueue.write { connection in
-            try insertProject(connection, projectID: projectID.rawValue)
-            try insertQueueBackedExportJobWithoutBatch(
-                connection, exportID: exportID.rawValue, projectID: projectID.rawValue,
-                queueItemID: queueItemID.rawValue
-            )
-        }
-        try await store.recordGeneratedOutput(RecordOutputInput(
-            exportID: exportID, outputFile: makeOutputFileRefFixture(), outputByteSize: 1_024,
-            outputSHA256: Data(repeating: 0x21, count: 32)
-        ))
-
-        do {
-            try await store.settleExport(exportID)
-            Issue.record("対応するExportQueueItemが無いのにsettleExportが成功した")
-        } catch let error as ExportSagaStoreError {
-            guard case .settleQueueItemPreconditionFailed = error else {
-                Issue.record("期待したエラーケース(settleQueueItemPreconditionFailed)ではない: \(error)")
-                return
-            }
-        } catch {
-            Issue.record("ExportSagaStoreError以外がthrowされた: \(error)")
-        }
-
-        #expect(try exportJobExists(database, exportID: exportID.rawValue))
-    }
-
-    // queueItemのstate不一致・projectID不一致は、job.batchIDが非nilでなければ意味を成さない
-    // （validateQueueItemForSettleはjob.batchIDがnilならstate/projectIDを見るより前に
-    // 「batchIDが一致し得ない」でthrowする。ExportQueueItem.batchIDはNOT NULL制約のため）。
-    // settleExportはExportJob.batchID == nilが事前条件のため、これらの個別ケースは
-    // job.batchIDが非nilになり得るsettleBatch側で検証する
-    // （ExportSagaStoreSettleBatchTests.swift）。
 
     @Test("settle済みのexportIDへ再度settleExportを呼ぶとExportJob不在(settleExportJobNotFound)でthrowすること")
     func rejectsReapplyOnAlreadySettledExportID() async throws {

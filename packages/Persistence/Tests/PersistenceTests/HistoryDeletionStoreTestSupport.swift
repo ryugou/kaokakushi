@@ -7,10 +7,10 @@ import Domain
 // HistoryDeletionStoreStampReleaseTests / HistoryDeletionStoreBatchCleanupTests /
 // HistoryDeletionStoreOverrideTestsが共有するヘルパー群。makeTestAppDatabase()
 // （WorkingSourceStoreTestSupport.swift）・insertProject/insertBatch/insertFaceTrack/
-// insertEffectSetting/insertExportSetting/insertWorkingSourceRecord/insertExportQueueItem/
+// insertEffectSetting/insertExportSetting/insertWorkingSourceRecord/
 // insertExportRecord/insertExportJob/insertOutputRecord/insertStampAsset/insertCustomStamp/
 // insertProjectStampAsset/insertExportedSettingsEntry/countXxxRows（SchemaTestSupport.swift）・
-// insertExportQueueItemWithState/pendingFileDeletionExists/projectRowExists
+// pendingFileDeletionExists/projectRowExists
 // （WorkingSourceStoreTestSupport.swift）・outputRecordFields/outputRecordRowCount
 // （ExportSagaStoreTestSupport.swift）・insertDeliveryOutputRecord
 // （OutputDeliveryStoreTestSupport.swift）・stampAssetFileID（StampStoreTestSupport.swift）は
@@ -21,7 +21,7 @@ func makeHistoryDeletionStore(database: AppDatabase) -> HistoryDeletionStoreLive
     HistoryDeletionStoreLive(database: database)
 }
 
-// CASCADE連鎖の検証用に、Projectへ連鎖する8テーブルの行数をまとめて読む
+// CASCADE連鎖の検証用に、Projectへ連鎖する7テーブルの行数をまとめて読む
 // （cascade検証テストが1テーブルずつ読むと冗長になるため。SchemaTestSupport.swiftの
 // countXxxRowsを束ねるだけで、新しいSQLは書かない）。
 // swiftlint:disable large_tuple
@@ -29,7 +29,7 @@ func cascadeRowCounts(
     _ database: AppDatabase, projectID: UUID
 ) throws -> (
     faceTrack: Int, effectSetting: Int, exportSetting: Int, workingSourceRecord: Int,
-    exportQueueItem: Int, exportRecord: Int, exportedSettingsEntry: Int, projectStampAsset: Int
+    exportRecord: Int, exportedSettingsEntry: Int, projectStampAsset: Int
 ) {
     // swiftlint:enable large_tuple
     try database.dbQueue.read { connection in
@@ -38,7 +38,6 @@ func cascadeRowCounts(
             effectSetting: try countEffectSettingRows(connection, projectID: projectID),
             exportSetting: try countExportSettingRows(connection, projectID: projectID),
             workingSourceRecord: try countWorkingSourceRecordRows(connection, projectID: projectID),
-            exportQueueItem: try countExportQueueItemRows(connection, projectID: projectID),
             exportRecord: try countExportRecordRows(connection, projectID: projectID),
             exportedSettingsEntry: try countExportedSettingsEntryRows(connection, projectID: projectID),
             projectStampAsset: try countProjectStampAssetRows(connection, projectID: projectID)
@@ -56,11 +55,12 @@ func batchRowExists(_ database: AppDatabase, batchID: UUID) throws -> Bool {
     }
 }
 
-/// Projectへ連鎖する8テーブル全て（FaceTrack/EffectSetting/ExportSetting/
-/// WorkingSourceRecord/ExportQueueItem/ExportRecord/ExportedSettingsEntry/
-/// ProjectStampAsset）へ1行ずつ、CASCADE検証に必要な最小構成で行を挿入する
-/// （deletesProjectAndCascadesAllDependentsが50行のテスト関数制限に収まるよう、
-/// セットアップを1箇所へまとめる。挿入する値の中身自体はテストの関心事ではない）。
+/// Projectへ連鎖する7テーブル全て（FaceTrack/EffectSetting/ExportSetting/
+/// WorkingSourceRecord/ExportRecord/ExportedSettingsEntry/ProjectStampAsset）へ1行ずつ、
+/// CASCADE検証に必要な最小構成で行を挿入する（deletesProjectAndCascadesAllDependentsが
+/// 50行のテスト関数制限に収まるよう、セットアップを1箇所へまとめる。挿入する値の中身
+/// 自体はテストの関心事ではない）。BatchはExportRecordから参照される形で引き続き必要
+/// なため挿入する。
 func seedProjectWithCascadingDependents(
     _ database: AppDatabase, projectID: UUID, batchID: UUID, sourceFileID: UUID, assetHash: Data
 ) async throws {
@@ -72,10 +72,6 @@ func seedProjectWithCascadingDependents(
         try insertExportSetting(connection, projectID: projectID)
         try insertWorkingSourceRecord(connection, projectID: projectID, sourceFileID: sourceFileID)
         try insertBatch(connection, batchID: batchID)
-        try insertExportQueueItemWithState(
-            connection, queueItemID: UUID(), projectID: projectID, batchID: batchID,
-            state: ExportQueueStateColumn.completed.rawValue
-        )
         try insertExportRecord(connection, exportID: UUID(), projectID: projectID, batchID: batchID)
         try insertExportedSettingsEntry(connection, projectID: projectID)
         try insertStampAsset(connection, contentHash: assetHash, fileID: UUID())

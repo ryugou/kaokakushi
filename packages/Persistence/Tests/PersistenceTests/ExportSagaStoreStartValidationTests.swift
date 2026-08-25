@@ -160,33 +160,6 @@ struct ExportSagaStoreStartValidationTests {
         }
     }
 
-    @Test("queueItemIDが指定されbatchIDがnilの場合queueItemIDRequiresBatchIDでthrowすること")
-    func throwsWhenQueueItemIDPresentWithoutBatchID() async throws {
-        let (database, url) = try makeTestAppDatabase()
-        defer { try? FileManager.default.removeItem(at: url) }
-        let projectID = ProjectID(rawValue: UUID())
-        let queueItemID = ExportQueueItemID(rawValue: UUID())
-        try await database.dbQueue.write { connection in
-            try insertProject(connection, projectID: projectID.rawValue)
-            try insertSubscriptionStateRow(connection, plan: 1, status: 1)
-        }
-        let store = makeExportSagaStore(database: database)
-        let input = try makeStartExportInputFixture(projectID: projectID, batchID: nil, queueItemID: queueItemID)
-
-        do {
-            _ = try await store.startExport(input, expectedProjectRevision: 0)
-            Issue.record("queueItemIDが指定されbatchIDがnilなのにstartExportが成功した")
-        } catch let error as ExportSagaStoreError {
-            guard case .queueItemIDRequiresBatchID(let mismatchedQueueItemID) = error else {
-                Issue.record("期待したエラーケース(queueItemIDRequiresBatchID)ではない: \(error)")
-                return
-            }
-            #expect(mismatchedQueueItemID == queueItemID)
-        } catch {
-            Issue.record("ExportSagaStoreError以外がthrowされた: \(error)")
-        }
-    }
-
     @Test("Pro加入済み利用者のトライアルバッチはクレジット状態に関わらずpaidUnlimitedで認可されトライアル台帳を消費しないこと")
     func authorizesTrialBatchForProSubscriberAsPaidUnlimitedWithoutConsumingTrialLedger() async throws {
         let (database, url) = try makeTestAppDatabase()

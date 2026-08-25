@@ -31,7 +31,6 @@ extension HistoryDeletionStoreLive {
             // 最終報告でエスカレーションする）。
             isFavorite: false,
             isBeingEdited: false,
-            hasNonTerminalQueueItem: try Self.hasNonTerminalQueueItem(connection, projectID: projectID),
             hasUndeliveredOutputRecord: try Self.hasUndeliveredOutputRecord(connection, projectID: projectID),
             hasRunningExportJob: try Self.hasRunningExportJob(connection, projectID: projectID),
             hasWorkingSourceRecord: try Self.hasWorkingSourceRecord(connection, projectID: projectID),
@@ -72,7 +71,6 @@ extension HistoryDeletionStoreLive {
     /// 両方が使う共通の集計（重複判定ロジックを1か所にする）。
     static func absoluteProtections(in context: DeletionContext) -> Set<AbsoluteProtection> {
         var reasons: Set<AbsoluteProtection> = []
-        if context.hasNonTerminalQueueItem { reasons.insert(.nonTerminalQueueItem) }
         if context.hasRunningExportJob { reasons.insert(.exportJobRunning) }
         if context.hasUndeliveredOutputRecord { reasons.insert(.undeliveredOutput) }
         if context.hasDeliveryAttemptInProgress { reasons.insert(.deliveryAttemptInProgress) }
@@ -89,24 +87,7 @@ extension HistoryDeletionStoreLive {
         return reasons
     }
 
-    /// 絶対保護1: 非終端のExportQueueItemが1件でもあるか（ExportQueueStateColumnの終端3種
-    /// 〈completed/failed/canceled〉以外。WorkingSourceStoreLive.swiftの割当を再利用する。
-    /// 新たにraw value割当を作り直さない）。
-    private static func hasNonTerminalQueueItem(_ connection: Database, projectID: ProjectID) throws -> Bool {
-        let count = try Int.fetchOne(
-            connection,
-            sql: "SELECT count(*) FROM ExportQueueItem WHERE projectID = ? AND state NOT IN (?, ?, ?)",
-            arguments: [
-                projectID.rawValue,
-                ExportQueueStateColumn.completed.rawValue,
-                ExportQueueStateColumn.failed.rawValue,
-                ExportQueueStateColumn.canceled.rawValue
-            ]
-        ) ?? 0
-        return count > 0
-    }
-
-    /// 絶対保護2: ExportJob行が1件でもあるか（ExportJob行は進行中の書き出しのみ存在し、
+    /// 絶対保護1: ExportJob行が1件でもあるか（ExportJob行は進行中の書き出しのみ存在し、
     /// settle完了時〈ExportSagaStoreLive+Settle.swift〉や起動時復旧〈+Recovery.swift〉で
     /// 必ず削除される設計）。
     private static func hasRunningExportJob(_ connection: Database, projectID: ProjectID) throws -> Bool {
@@ -116,7 +97,7 @@ extension HistoryDeletionStoreLive {
         return count > 0
     }
 
-    /// 絶対保護3: settledAt確定済みかつisUndelivered（state = generated/deliveryUnknown）の
+    /// 絶対保護2: settledAt確定済みかつisUndelivered（state = generated/deliveryUnknown）の
     /// OutputRecordが1件でもあるか（Domain OutputRecord.isUndeliveredの定義と同じ）。
     private static func hasUndeliveredOutputRecord(_ connection: Database, projectID: ProjectID) throws -> Bool {
         let count = try Int.fetchOne(
@@ -136,7 +117,7 @@ extension HistoryDeletionStoreLive {
         try WorkingSourceStoreLive.loadSourceFileID(connection, projectID: projectID) != nil
     }
 
-    /// 絶対保護4: 対象Projectに属するOutputRecordのいずれかに、試行中のDeliveryAttempt行が
+    /// 絶対保護3: 対象Projectに属するOutputRecordのいずれかに、試行中のDeliveryAttempt行が
     /// あるか（export-saga.md 7.0「delivered を後退させない・直列化・保存結果不明の永続化」の
     /// 不変条件。beginDeliveryAttempt/completeLibrarySave/completeShareが課す排他ゲートと
     /// 同じ理由で、履歴削除でも絶対保護対象にする）。

@@ -29,37 +29,6 @@ extension ExportSagaStoreLive {
         return PendingOutputSnapshot(outputByteSize: row["outputByteSize"], format: formatColumn.domainValue)
     }
 
-    /// queueItemIDが指定されていれば、対応するキュー項目が存在しprojectID/batchIDが一致し
-    /// state == .exportingであることを検査する（無関係なキュー項目をcompletedにしないため。
-    /// 3章）。queueItemIDがnil（単体書き出し・キュー経路を通らない書き出し）なら何もしない。
-    static func validateQueueItemForSettle(_ connection: Database, job: ExportJob) throws {
-        guard let queueItemID = job.queueItemID else { return }
-        guard let row = try Row.fetchOne(
-            connection,
-            sql: "SELECT projectID, batchID, state FROM ExportQueueItem WHERE queueItemID = ?",
-            arguments: [queueItemID.rawValue]
-        ) else {
-            throw ExportSagaStoreError.settleQueueItemPreconditionFailed(
-                exportID: job.exportID, queueItemID: queueItemID, detail: "キュー項目が存在しません"
-            )
-        }
-        let rowProjectID: UUID = row["projectID"]
-        let rowBatchID: UUID = row["batchID"]
-        let stateRaw: Int = row["state"]
-        // ExportQueueItem.batchIDはNOT NULL制約（Schema+Queue.swift）のため常に実値を持つ。
-        // job.batchIDがnil（キュー経路のはずが単体書き出しとして認可された等の不整合）なら
-        // 一致し得ないため、この時点で不一致として扱う（Optionalの暗黙比較に頼らず明示する）。
-        guard let jobBatchID = job.batchID,
-              rowProjectID == job.projectID.rawValue,
-              rowBatchID == jobBatchID.rawValue,
-              stateRaw == ExportQueueStateColumn.exporting.rawValue else {
-            throw ExportSagaStoreError.settleQueueItemPreconditionFailed(
-                exportID: job.exportID, queueItemID: queueItemID,
-                detail: "projectID/batchIDの不一致、またはstate(\(stateRaw))がexportingではありません"
-            )
-        }
-    }
-
     /// OutputRecordのsettledAt/expiresAtを確定する。影響行数が1件であることを確認し、
     /// 不一致ならthrowする（オーケストレーター確定判断4番。TOCTOUに対する防御であり、
     /// 単一のdbQueue.write呼び出し内では通常発生しないが、事前条件検査との一貫性を
@@ -114,16 +83,6 @@ extension ExportSagaStoreLive {
             ON CONFLICT(projectID) DO UPDATE SET settingsHash = excluded.settingsHash, exportedAt = excluded.exportedAt
             """,
             arguments: [job.projectID.rawValue, settingsHash, settledAt]
-        )
-    }
-
-    /// queueItemIDがあればExportQueueItem.stateをcompletedへ更新する（3章「キュー項目の
-    /// completed更新」）。queueItemIDがnilなら何もしない。
-    static func completeQueueItemIfPresent(_ connection: Database, queueItemID: ExportQueueItemID?) throws {
-        guard let queueItemID else { return }
-        try connection.execute(
-            sql: "UPDATE ExportQueueItem SET state = ? WHERE queueItemID = ?",
-            arguments: [ExportQueueStateColumn.completed.rawValue, queueItemID.rawValue]
         )
     }
 

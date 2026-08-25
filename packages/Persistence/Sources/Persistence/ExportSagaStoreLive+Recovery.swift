@@ -2,7 +2,9 @@ import Foundation
 import Domain
 import GRDB
 
-// loadRunningJobs / deleteRunningJobs（export-saga.md 5章「起動時復旧」が正本）。
+// loadRunningJobs / deleteRunningJobs / deleteUnsettledBatches（export-saga.md 5章
+// 「起動時復旧」が正本）。deleteUnsettledBatchesは起動時復旧の手順2で、手順1
+// （deleteRunningJobs）の完了後に呼ぶ契約（`ExportSagaStore`のdocコメント参照）。
 
 extension ExportSagaStoreLive {
     /// 起動時復旧の入力（5章 手順1）。ExportJobの全行を読む。列リストはloadExportJobと
@@ -16,7 +18,7 @@ extension ExportSagaStoreLive {
 
     /// 起動時復旧（5章 手順1）。ExportJob行と、対応する未確定（settledAt IS NULL）
     /// OutputRecordをまとめて削除する。孤児ファイルはGCが別途回収する設計のため
-    /// （5章 手順2）、discardExportとは異なりPendingFileDeletionへは登録しない
+    /// （5章 手順3）、discardExportとは異なりPendingFileDeletionへは登録しない
     /// （オーケストレーター確定判断）。
     ///
     /// 削除はテーブルごとに1文（`WHERE exportID IN (...)`）へまとめる。exportIDが空の
@@ -35,6 +37,22 @@ extension ExportSagaStoreLive {
             try connection.execute(
                 sql: "DELETE FROM ExportJob WHERE exportID IN (\(placeholders))",
                 arguments: arguments
+            )
+        }
+    }
+
+    /// 起動時復旧の手順2（5章）。どのExportRecordからも参照されないBatch行（未settleのまま
+    /// 中断されたバッチの残骸）を単一DBトランザクションで削除する。手順1（deleteRunningJobs）
+    /// の完了後に呼ぶ契約（`ExportSagaStore`のdocコメント、export-saga.md 5章が正本）。
+    /// 該当行が無ければ何もしない（NOT EXISTSが0件マッチのままDELETEが0行に作用するだけの
+    /// 自然な冪等）。
+    public func deleteUnsettledBatches() async throws {
+        try await database.dbQueue.write { connection in
+            try connection.execute(
+                sql: """
+                DELETE FROM Batch
+                WHERE NOT EXISTS (SELECT 1 FROM ExportRecord WHERE ExportRecord.batchID = Batch.batchID)
+                """
             )
         }
     }

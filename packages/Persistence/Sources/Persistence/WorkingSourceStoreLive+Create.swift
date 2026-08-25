@@ -4,33 +4,17 @@ import GRDB
 
 // createProjectWithWorkingSource（インポートSagaの手順3。image-pipeline.md 5章
 // 「インポートSaga」「実装の所在」が正本）。単一トランザクションでProject・
-// （queueItemIDがあれば）ExportQueueItem・WorkingSourceRecordを作成する。
+// WorkingSourceRecordを作成する。
 
 extension WorkingSourceStoreLive {
     /// `input.initialSpec`（RenderSpec）は意図的に使わない。EffectSetting/FaceTrackへの
     /// 展開はサブプロジェクト4/5のApplication層の担当であり（Issue #25参照）、Project・
-    /// ExportQueueItem・WorkingSourceRecordの3テーブルをトランザクションで作るだけの
-    /// このPersistence層メソッドの担当範囲外である。取りこぼしではなく、EffectSetting/
-    /// FaceTrackへ書き込む処理をここに実装しないことがこのメソッドの契約そのもの。
+    /// WorkingSourceRecordの2テーブルをトランザクションで作るだけのこのPersistence層
+    /// メソッドの担当範囲外である。取りこぼしではなく、EffectSetting/FaceTrackへ書き込む
+    /// 処理をここに実装しないことがこのメソッドの契約そのもの。
     public func createProjectWithWorkingSource(_ input: CreateWorkingSourceInput) async throws {
         try await database.dbQueue.write { connection in
             try Self.insertProject(connection, input: input)
-
-            // queueItemIDが渡された場合のみExportQueueItemを作成する（キュー経由でない
-            // 単体処理では作らない）。ExportQueueItem.batchIDはNOT NULL制約のため、
-            // batchIDが欠けた組み合わせは呼び出し元の契約違反としてthrowし、トランザクション
-            // 全体をロールバックする（Projectの挿入も残さない）。
-            if let queueItemID = input.queueItemID {
-                guard let batchID = input.batchID else {
-                    throw WorkingSourceStoreError.batchIDMissingForQueueItem(queueItemID: queueItemID)
-                }
-                try Self.insertWaitingQueueItem(
-                    connection,
-                    queueItemID: queueItemID,
-                    projectID: input.projectID,
-                    batchID: batchID
-                )
-            }
 
             try Self.insertWorkingSourceRecord(
                 connection,
@@ -64,28 +48,6 @@ extension WorkingSourceStoreLive {
                 input.capture.utcMillis,
                 input.libraryCreationDate,
                 SourceRepresentationColumn(input.representation).rawValue
-            ]
-        )
-    }
-
-    /// キュー経由の取り込み時のみ作成するExportQueueItem。初期状態は必ずwaitingで、
-    /// 失敗・一時停止関連の列はすべてNULL（まだ何も起きていないため）。
-    private static func insertWaitingQueueItem(
-        _ connection: Database,
-        queueItemID: ExportQueueItemID,
-        projectID: ProjectID,
-        batchID: BatchID
-    ) throws {
-        try connection.execute(
-            sql: """
-            INSERT INTO ExportQueueItem (
-                queueItemID, projectID, batchID, state, failureErrorCode,
-                failureIsRetryable, failureOccurredAt, pauseReason
-            ) VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL)
-            """,
-            arguments: [
-                queueItemID.rawValue, projectID.rawValue, batchID.rawValue,
-                ExportQueueStateColumn.waiting.rawValue
             ]
         )
     }

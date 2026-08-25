@@ -47,7 +47,7 @@ extension WorkingSourceStoreLive {
         }
     }
 
-    /// 実体欠損時の無効化。doc コメント(a)(b)(c)の順で実行する（image-pipeline.md 5章
+    /// 実体欠損時の無効化。doc コメント(a)(b)の順で実行する（image-pipeline.md 5章
     /// 「実装の所在」`WorkingSourceStore.invalidateWorkingSource`、「実体の存在確認」）。
     public func invalidateWorkingSource(_ projectID: ProjectID) async throws {
         try await database.dbQueue.write { connection in
@@ -60,27 +60,7 @@ extension WorkingSourceStoreLive {
                 arguments: [projectID.rawValue]
             )
 
-            // (b) 同じprojectIDの非終端ExportQueueItemをpaused(.sourceReselectionRequired)へ
-            // 更新する。終端状態（completed/failed/canceled）の行は対象外とし変化させない
-            // （終わった項目を無効化理由で上書きしない）。
-            try connection.execute(
-                sql: """
-                UPDATE ExportQueueItem SET
-                    state = ?,
-                    pauseReason = ?
-                WHERE projectID = ? AND state NOT IN (?, ?, ?)
-                """,
-                arguments: [
-                    ExportQueueStateColumn.paused.rawValue,
-                    QueuePauseReasonColumn.sourceReselectionRequired.rawValue,
-                    projectID.rawValue,
-                    ExportQueueStateColumn.completed.rawValue,
-                    ExportQueueStateColumn.failed.rawValue,
-                    ExportQueueStateColumn.canceled.rawValue
-                ]
-            )
-
-            // (c) 欠損したファイル参照をPendingFileDeletionへ登録する。実体が無くても
+            // (b) 欠損したファイル参照をPendingFileDeletionへ登録する。実体が無くても
             // 行ってよい（参照の掃除であり、孤児GCが空振りで行を消すだけで無害。
             // architecture.md 7.5「出力の削除経路」と同じ単一経路に揃える）。fileIDが
             // 取れなかった場合（WorkingSourceRecordが元から無かった場合）は登録しない。

@@ -84,23 +84,6 @@ func insertWorkingSourceRecord(_ database: Database, projectID: UUID, sourceFile
     )
 }
 
-func insertExportQueueItem(
-    _ database: Database,
-    queueItemID: UUID,
-    projectID: UUID,
-    batchID: UUID
-) throws {
-    try database.execute(
-        sql: """
-        INSERT INTO ExportQueueItem (
-            queueItemID, projectID, batchID, state, failureErrorCode,
-            failureIsRetryable, failureOccurredAt, pauseReason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        arguments: [queueItemID, projectID, batchID, 0, nil, nil, nil, nil]
-    )
-}
-
 func insertExportRecord(_ database: Database, exportID: UUID, projectID: UUID, batchID: UUID?) throws {
     try database.execute(
         sql: """
@@ -127,14 +110,14 @@ func insertExportJob(
     try database.execute(
         sql: """
         INSERT INTO ExportJob (
-            exportID, projectID, batchID, queueItemID, authorizedAt, accountingMode,
+            exportID, projectID, batchID, authorizedAt, accountingMode,
             entitlementPlan, entitlementStatus, entitlementExpiresAt,
             entitlementLastVerifiedAt, entitlementIsSandbox, deliveryFormat,
             deliverySuggestedCreationDate, settingsHash
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         arguments: [
-            exportID, projectID, batchID, nil, schemaTestReferenceDate, 1,
+            exportID, projectID, batchID, schemaTestReferenceDate, 1,
             1, 1, nil, schemaTestReferenceDate, false, 1, nil, settingsHash
         ]
     )
@@ -227,14 +210,6 @@ func countWorkingSourceRecordRows(_ database: Database, projectID: UUID) throws 
     try Int.fetchOne(
         database,
         sql: "SELECT count(*) FROM WorkingSourceRecord WHERE projectID = ?",
-        arguments: [projectID]
-    ) ?? -1
-}
-
-func countExportQueueItemRows(_ database: Database, projectID: UUID) throws -> Int {
-    try Int.fetchOne(
-        database,
-        sql: "SELECT count(*) FROM ExportQueueItem WHERE projectID = ?",
         arguments: [projectID]
     ) ?? -1
 }

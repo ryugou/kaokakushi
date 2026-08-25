@@ -9,7 +9,7 @@ import GRDB
 
 @Suite("HistoryDeletionStoreLive.deleteHistoryUnit")
 struct HistoryDeletionStoreDeleteTests {
-    @Test("許可される削除でProjectと関連8テーブルが全てCASCADEで消え、残存ファイルがPendingFileDeletionへ登録されること")
+    @Test("許可される削除でProjectと関連7テーブルが全てCASCADEで消え、残存ファイルがPendingFileDeletionへ登録されること")
     func deletesProjectAndCascadesAllDependents() async throws {
         let (database, url) = try makeTestAppDatabase()
         defer { try? FileManager.default.removeItem(at: url) }
@@ -45,7 +45,6 @@ struct HistoryDeletionStoreDeleteTests {
         #expect(counts.effectSetting == 0)
         #expect(counts.exportSetting == 0)
         #expect(counts.workingSourceRecord == 0)
-        #expect(counts.exportQueueItem == 0)
         #expect(counts.exportRecord == 0)
         #expect(counts.exportedSettingsEntry == 0)
         #expect(counts.projectStampAsset == 0)
@@ -105,35 +104,6 @@ struct HistoryDeletionStoreDeleteTests {
             Issue.record("進行中のExportJobがあるのにdeleteHistoryUnitが成功した")
         } catch let error as HistoryDeletionStoreError {
             #expect(error == .blockedByAbsoluteProtection(unit: .project(projectID), reasons: [.exportJobRunning]))
-        } catch {
-            Issue.record("HistoryDeletionStoreError以外がthrowされた: \(error)")
-        }
-        #expect(try projectRowExists(database, projectID: projectID.rawValue))
-    }
-
-    @Test("非終端のExportQueueItemがあるとblockedByAbsoluteProtectionをthrowしProjectが消えないこと")
-    func rejectsWhenNonTerminalQueueItemExists() async throws {
-        let (database, url) = try makeTestAppDatabase()
-        defer { try? FileManager.default.removeItem(at: url) }
-        let projectID = ProjectID(rawValue: UUID())
-        let batchID = UUID()
-        try await database.dbQueue.write { connection in
-            try insertProject(connection, projectID: projectID.rawValue)
-            try insertBatch(connection, batchID: batchID)
-            try insertExportQueueItemWithState(
-                connection, queueItemID: UUID(), projectID: projectID.rawValue, batchID: batchID,
-                state: ExportQueueStateColumn.exporting.rawValue
-            )
-        }
-        let store = makeHistoryDeletionStore(database: database)
-
-        do {
-            try await store.deleteHistoryUnit(.project(projectID), trigger: .userInitiated(confirmedOverrides: []))
-            Issue.record("非終端のExportQueueItemがあるのにdeleteHistoryUnitが成功した")
-        } catch let error as HistoryDeletionStoreError {
-            #expect(
-                error == .blockedByAbsoluteProtection(unit: .project(projectID), reasons: [.nonTerminalQueueItem])
-            )
         } catch {
             Issue.record("HistoryDeletionStoreError以外がthrowされた: \(error)")
         }

@@ -11,27 +11,6 @@ import GRDB
 
 @Suite("HistoryDeletionStoreLive.inspectDeletion")
 struct HistoryDeletionStoreInspectTests {
-    @Test("非終端のExportQueueItemがあるとblockedByAbsoluteProtectionにnonTerminalQueueItemが入ること")
-    func reportsNonTerminalQueueItem() async throws {
-        let (database, url) = try makeTestAppDatabase()
-        defer { try? FileManager.default.removeItem(at: url) }
-        let projectID = ProjectID(rawValue: UUID())
-        let batchID = UUID()
-        try await database.dbQueue.write { connection in
-            try insertProject(connection, projectID: projectID.rawValue)
-            try insertBatch(connection, batchID: batchID)
-            try insertExportQueueItemWithState(
-                connection, queueItemID: UUID(), projectID: projectID.rawValue, batchID: batchID,
-                state: ExportQueueStateColumn.waiting.rawValue
-            )
-        }
-        let store = makeHistoryDeletionStore(database: database)
-
-        let inspection = try await store.inspectDeletion(.project(projectID), trigger: .storagePressure)
-
-        #expect(inspection.blockedByAbsoluteProtection == [.nonTerminalQueueItem])
-    }
-
     @Test("進行中のExportJobがあるとblockedByAbsoluteProtectionにexportJobRunningが入ること")
     func reportsRunningExportJob() async throws {
         let (database, url) = try makeTestAppDatabase()

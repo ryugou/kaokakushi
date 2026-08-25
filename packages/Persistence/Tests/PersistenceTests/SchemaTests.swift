@@ -18,7 +18,7 @@ struct SchemaTests {
             .appendingPathComponent("SchemaTests-\(UUID().uuidString).sqlite")
     }
 
-    @Test("実運用のマイグレーションが完走し、全20テーブルが揃うこと")
+    @Test("実運用のマイグレーションが完走し、全19テーブルが揃うこと")
     func productionMigratorCreatesAllTables() throws {
         let url = makeTemporaryDatabaseURL()
         defer { try? FileManager.default.removeItem(at: url) }
@@ -29,10 +29,10 @@ struct SchemaTests {
             "Project", "FaceTrack", "EffectSetting", "ExportSetting", "CustomStamp",
             "StampAsset", "ProjectStampAsset", "ExportRecord", "Batch", "BatchPreset",
             "DeliveryAttempt", "UnknownLibrarySave", "ExportJob", "OutputRecord",
-            "ExportQueueItem", "WorkingSourceRecord", "PendingFileDeletion",
+            "WorkingSourceRecord", "PendingFileDeletion",
             "UsageLedger", "SubscriptionState", "ExportedSettingsEntry"
         ]
-        #expect(expectedTables.count == 20)
+        #expect(expectedTables.count == 19)
 
         try appDatabase.dbQueue.read { database in
             for tableName in expectedTables {

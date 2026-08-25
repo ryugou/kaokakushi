@@ -3,10 +3,10 @@ import Testing
 import Domain
 @testable import Persistence
 
-// ExportSagaStoreLive.loadRunningJobs / deleteRunningJobsのテスト（export-saga.md 5章
-// 「起動時復旧」が正本）。
+// ExportSagaStoreLive.loadRunningJobs / deleteRunningJobs / deleteUnsettledBatchesの
+// テスト（export-saga.md 5章「起動時復旧」が正本）。
 
-@Suite("ExportSagaStoreLive.loadRunningJobs/deleteRunningJobs")
+@Suite("ExportSagaStoreLive.loadRunningJobs/deleteRunningJobs/deleteUnsettledBatches")
 struct ExportSagaStoreRecoveryTests {
     @Test("loadRunningJobsが全ExportJob行をExportJobとして返すこと")
     func returnsAllExportJobRows() async throws {
@@ -49,7 +49,6 @@ struct ExportSagaStoreRecoveryTests {
         }
         #expect(loadedJob.projectID == createdJob.projectID)
         #expect(loadedJob.batchID == createdJob.batchID)
-        #expect(loadedJob.queueItemID == createdJob.queueItemID)
         #expect(loadedJob.authorization.accountingMode == createdJob.authorization.accountingMode)
         #expect(loadedJob.authorization.authorizedAt == createdJob.authorization.authorizedAt)
         #expect(loadedJob.authorization.entitlementSnapshot == createdJob.authorization.entitlementSnapshot)
@@ -99,5 +98,95 @@ struct ExportSagaStoreRecoveryTests {
         #expect(try !exportJobExists(database, exportID: job.exportID.rawValue))
         #expect(try outputRecordRowCount(database, exportID: job.exportID.rawValue) == 0)
         #expect(try !pendingFileDeletionExists(database, kind: ManagedFileKind.output.rawValue, fileID: outputFileID))
+    }
+
+    @Test("どのExportRecordからも参照されないBatch行がdeleteUnsettledBatchesで削除されること")
+    func deletesBatchNotReferencedByAnyExportRecord() async throws {
+        let (database, url) = try makeTestAppDatabase()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = makeExportSagaStore(database: database)
+        let batchID = UUID()
+        try await database.dbQueue.write { connection in
+            try insertBatch(connection, batchID: batchID)
+        }
+
+        try await store.deleteUnsettledBatches()
+
+        #expect(try !batchRowExists(database, batchID: batchID))
+    }
+
+    @Test("ExportRecordが存在するBatch行はdeleteUnsettledBatchesで削除されないこと")
+    func keepsBatchReferencedByExportRecord() async throws {
+        let (database, url) = try makeTestAppDatabase()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = makeExportSagaStore(database: database)
+        let projectID = ProjectID(rawValue: UUID())
+        let batchID = UUID()
+        try await database.dbQueue.write { connection in
+            try insertProject(connection, projectID: projectID.rawValue)
+            try insertBatch(connection, batchID: batchID)
+            try insertExportRecord(connection, exportID: UUID(), projectID: projectID.rawValue, batchID: batchID)
+        }
+
+        try await store.deleteUnsettledBatches()
+
+        #expect(try batchRowExists(database, batchID: batchID))
+    }
+
+    @Test("deleteUnsettledBatchesを連続で2回実行しても2回目が成功し、settle済みのBatchと関連記録に変化がないこと（冪等）")
+    func deleteUnsettledBatchesIsIdempotent() async throws {
+        let (database, url) = try makeTestAppDatabase()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = makeExportSagaStore(database: database)
+        let projectID = ProjectID(rawValue: UUID())
+        let settledBatchID = UUID()
+        let unsettledBatchID = UUID()
+        try await seedIdempotencyFixture(
+            database, projectID: projectID, settledBatchID: settledBatchID, unsettledBatchID: unsettledBatchID
+        )
+
+        // 1回目: 未settle Batch（ExportRecordを持たない）が削除され、settle済みBatchと
+        // その関連記録（Project/ExportRecord）は不変であること。
+        try await store.deleteUnsettledBatches()
+        try assertUnsettledBatchDeletedAndSettledStateUnchanged(
+            database, projectID: projectID, settledBatchID: settledBatchID, unsettledBatchID: unsettledBatchID
+        )
+
+        // 2回目: 1回目で既に消えた未settle Batchに対する再実行が成功し、結果が変わらないこと
+        // （冪等性の本体）。
+        try await store.deleteUnsettledBatches()
+        try assertUnsettledBatchDeletedAndSettledStateUnchanged(
+            database, projectID: projectID, settledBatchID: settledBatchID, unsettledBatchID: unsettledBatchID
+        )
+    }
+
+    /// deleteUnsettledBatchesIsIdempotentのセットアップ: 削除対象の未settle Batch
+    /// （ExportRecordを持たない）と、保護対象の settle済み Batch（Project + batchID付き
+    /// ExportRecord）を1件ずつ用意する。
+    private func seedIdempotencyFixture(
+        _ database: AppDatabase, projectID: ProjectID, settledBatchID: UUID, unsettledBatchID: UUID
+    ) async throws {
+        try await database.dbQueue.write { connection in
+            try insertProject(connection, projectID: projectID.rawValue)
+            try insertBatch(connection, batchID: settledBatchID)
+            try insertBatch(connection, batchID: unsettledBatchID)
+            try insertExportRecord(
+                connection, exportID: UUID(), projectID: projectID.rawValue, batchID: settledBatchID
+            )
+        }
+    }
+
+    /// deleteUnsettledBatches実行後に共通して確認する3点: 未settle Batchが消えていること、
+    /// settle済みBatchと関連記録（Project/ExportRecord）が不変であること。
+    private func assertUnsettledBatchDeletedAndSettledStateUnchanged(
+        _ database: AppDatabase, projectID: ProjectID, settledBatchID: UUID, unsettledBatchID: UUID
+    ) throws {
+        #expect(try !batchRowExists(database, batchID: unsettledBatchID))
+        #expect(try batchRowExists(database, batchID: settledBatchID))
+        #expect(try projectRowExists(database, projectID: projectID.rawValue))
+        let exportRecordCount = try database.dbQueue.read { connection in
+            try countExportRecordRows(connection, projectID: projectID.rawValue)
+        }
+        #expect(exportRecordCount == 1)
     }
 }

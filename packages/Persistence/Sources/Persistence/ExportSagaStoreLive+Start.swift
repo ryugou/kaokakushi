@@ -21,7 +21,6 @@ extension ExportSagaStoreLive {
         expectedProjectRevision: Int64
     ) async throws -> ExportStartDecision {
         try Self.validatePreviewConfirmationProjectID(input)
-        try Self.validateQueueItemRequiresBatchID(input)
         let authorizedAt = now()
         return try await database.dbQueue.write { connection in
             try Self.validateProjectRevision(
@@ -60,13 +59,6 @@ extension ExportSagaStoreLive {
                 projectID: input.projectID, previewConfirmationProjectID: input.previewConfirmation.projectID
             )
         }
-    }
-
-    /// queueItemIDが指定される場合はbatchIDも必須であることを検査する。DBアクセスを
-    /// 伴わない純粋な入力検査のため、書き込みトランザクションを開く前に行う。
-    private static func validateQueueItemRequiresBatchID(_ input: StartExportInput) throws {
-        guard let queueItemID = input.queueItemID, input.batchID == nil else { return }
-        throw ExportSagaStoreError.queueItemIDRequiresBatchID(queueItemID: queueItemID)
     }
 
     /// Project行のprojectRevisionを読み、expectedProjectRevisionと比較する（1.6 手順5）。
@@ -180,14 +172,14 @@ extension ExportSagaStoreLive {
         try connection.execute(
             sql: """
             INSERT INTO ExportJob (
-                exportID, projectID, batchID, queueItemID, authorizedAt, accountingMode,
+                exportID, projectID, batchID, authorizedAt, accountingMode,
                 entitlementPlan, entitlementStatus, entitlementExpiresAt,
                 entitlementLastVerifiedAt, entitlementIsSandbox, deliveryFormat,
                 deliverySuggestedCreationDate, settingsHash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             arguments: [
-                exportID.rawValue, input.projectID.rawValue, input.batchID?.rawValue, input.queueItemID?.rawValue,
+                exportID.rawValue, input.projectID.rawValue, input.batchID?.rawValue,
                 authorizedAt, ExportAccountingModeColumn(accountingMode).rawValue,
                 entitlement.plan.rawValue, entitlement.status.rawValue, entitlement.expiresAt,
                 entitlement.lastVerifiedAt, entitlement.isSandbox,
@@ -199,7 +191,6 @@ extension ExportSagaStoreLive {
             exportID: exportID,
             projectID: input.projectID,
             batchID: input.batchID,
-            queueItemID: input.queueItemID,
             authorization: authorization,
             delivery: delivery
         )

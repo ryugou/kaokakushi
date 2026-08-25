@@ -51,7 +51,6 @@ func makeOutputFileRefFixture(fileID: UUID = UUID()) -> OutputFileRef {
 func makeStartExportInputFixture(
     projectID: ProjectID,
     batchID: BatchID? = nil,
-    queueItemID: ExportQueueItemID? = nil,
     outputFormat: ImageFormat = .jpeg,
     previewConfirmationProjectID: ProjectID? = nil
 ) throws -> StartExportInput {
@@ -71,7 +70,6 @@ func makeStartExportInputFixture(
     return StartExportInput(
         projectID: projectID,
         batchID: batchID,
-        queueItemID: queueItemID,
         renderSpec: try makeRenderSpecFixture(),
         exportSetting: exportSetting,
         previewConfirmation: previewConfirmation

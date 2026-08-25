@@ -71,16 +71,12 @@ func makeRenderSpecFixtureWithRegion() throws -> RenderSpec {
 /// 上書きする。
 func makeCreateWorkingSourceInput(
     projectID: ProjectID = ProjectID(rawValue: UUID()),
-    batchID: BatchID? = nil,
-    queueItemID: ExportQueueItemID? = nil,
     sourceFile: WorkingSourceFileRef = makeWorkingSourceFileRef(),
     createdAt: Date = schemaTestReferenceDate,
     representation: SourceRepresentation = .original
 ) throws -> CreateWorkingSourceInput {
     CreateWorkingSourceInput(
         projectID: projectID,
-        batchID: batchID,
-        queueItemID: queueItemID,
         sourceFile: sourceFile,
         createdAt: createdAt,
         sourceLocator: ProjectSourceLocator(photoLibraryLocalIdentifier: "asset-identifier"),
@@ -88,28 +84,6 @@ func makeCreateWorkingSourceInput(
         libraryCreationDate: createdAt,
         representation: representation,
         initialSpec: try makeRenderSpecFixture()
-    )
-}
-
-/// ExportQueueItemを任意のstate raw valueで挿入する。SchemaTestSupport.insertExportQueueItem
-/// はstateを固定値(0)にしているため、terminal/non-terminalを打ち分けるこのテストでは
-/// 使えない。新しいテーブルを作らず既存テーブルへ挿入するだけの薄いヘルパー。
-func insertExportQueueItemWithState(
-    _ connection: Database,
-    queueItemID: UUID,
-    projectID: UUID,
-    batchID: UUID,
-    state: Int,
-    pauseReason: Int? = nil
-) throws {
-    try connection.execute(
-        sql: """
-        INSERT INTO ExportQueueItem (
-            queueItemID, projectID, batchID, state, failureErrorCode,
-            failureIsRetryable, failureOccurredAt, pauseReason
-        ) VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?)
-        """,
-        arguments: [queueItemID, projectID, batchID, state, pauseReason]
     )
 }
 
@@ -158,22 +132,6 @@ func projectPhotoLibraryLocalIdentifier(
             sql: "SELECT photoLibraryLocalIdentifier FROM Project WHERE projectID = ?",
             arguments: [projectID]
         )
-    }
-}
-
-func exportQueueItemStateAndPauseReason(
-    _ database: AppDatabase,
-    queueItemID: UUID
-) throws -> (state: Int, pauseReason: Int?)? {
-    try database.dbQueue.read { connection in
-        guard let row = try Row.fetchOne(
-            connection,
-            sql: "SELECT state, pauseReason FROM ExportQueueItem WHERE queueItemID = ?",
-            arguments: [queueItemID]
-        ) else {
-            return nil
-        }
-        return (row["state"], row["pauseReason"])
     }
 }
 

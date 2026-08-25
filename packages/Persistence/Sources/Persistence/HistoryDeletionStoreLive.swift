@@ -33,10 +33,10 @@ import GRDB
 //     Issue #26で有効化する。
 
 /// HistoryDeletionStoreLiveが送出する専用エラー。運用者が次のアクションを判断できるよう、
-/// どの保護が原因で削除を拒否したかを持つ（OutputDeliveryStoreError/WorkingSourceStoreError
-/// と同じ方針: Sendable, Equatable, LocalizedError）。
+/// どの保護が原因で削除を拒否したかを持つ（OutputDeliveryStoreErrorと同じ方針:
+/// Sendable, Equatable, LocalizedError）。
 public enum HistoryDeletionStoreError: Error, Sendable, Equatable {
-    /// 絶対保護（非終端キュー項目・進行中のExportJob・未受け渡しのOutputRecordのいずれか）に
+    /// 絶対保護（進行中のExportJob・未受け渡しのOutputRecordのいずれか）に
     /// 該当したため、triggerの種類に関わらず削除を拒否した（architecture.md「削除の可否判定」）。
     case blockedByAbsoluteProtection(unit: HistoryUnit, reasons: Set<AbsoluteProtection>)
     /// 上書き可能な保護（favorite/beingEdited/workingSource）に該当し、`.storagePressure`/

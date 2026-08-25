@@ -70,31 +70,6 @@ func makeExportIDs(count: Int) -> Set<ExportID> {
     Set((0..<count).map { _ in ExportID(rawValue: UUID()) })
 }
 
-/// queueItemID付き・batchID nilのExportJob行を直接構築する（settleExportのキュー項目
-/// 事前条件チェック〈対応するキュー項目が存在しない〉をピンポイントで再現するテスト専用
-/// フィクスチャ）。startExportのqueueItemIDRequiresBatchID検査によりこの組み合わせは
-/// startExport経由では作成不能になったため、raw SQLで直接構築する（データ不整合に対する
-/// settleExport側の防御が機能することを確認する。他の事前条件違反テストと同じ方針。
-/// ExportSagaStoreSettleTests.swiftのrejectsWhenExportJobHasBatchID等）。
-func insertQueueBackedExportJobWithoutBatch(
-    _ connection: Database, exportID: UUID, projectID: UUID, queueItemID: UUID
-) throws {
-    try connection.execute(
-        sql: """
-        INSERT INTO ExportJob (
-            exportID, projectID, batchID, queueItemID, authorizedAt, accountingMode,
-            entitlementPlan, entitlementStatus, entitlementExpiresAt,
-            entitlementLastVerifiedAt, entitlementIsSandbox, deliveryFormat,
-            deliverySuggestedCreationDate, settingsHash
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        arguments: [
-            exportID, projectID, nil, queueItemID, schemaTestReferenceDate, 1,
-            1, 1, nil, schemaTestReferenceDate, false, 1, nil, schemaTestHash(seed: 0xEE)
-        ]
-    )
-}
-
 func exportedSettingsEntryFields(
     _ database: AppDatabase, projectID: UUID
 ) throws -> (settingsHash: Data, exportedAt: Date)? {
