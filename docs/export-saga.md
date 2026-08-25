@@ -283,7 +283,7 @@ enum ExportAccountingMode: Sendable, Equatable {
 1. 確認の一致を検査する（1.1）。不一致なら終える（バッチの項目はここで `itemFailed`）
 2. 設定内容の能力を検査する（1.2）。`blocked` なら終える（バッチの項目はここで `itemFailed`）
 3. `WorkingSourceRecord` を検査する（[画像処理](image-pipeline.md)）。**行自体が存在しなければ**（`Project` が履歴削除された等。FK CASCADE で行ごと消えるため再選択で復帰できない）終える（バッチの項目はここで `itemFailed`。`AppErrorCode.sourceMissing`。[アーキテクチャ設計](architecture.md) の 9.1）。**行はあるが実体ファイルが無ければ** `invalidateWorkingSource` で無効化し、再選択導線へ倒して終える（バッチの項目については下記 `BatchItemStartOutcome.itemPaused` が結果を表す）。素材参照は `projectID` を介した `WorkingSourceRecord` を使う（素材の同一性照合は行わない。ADR 0006）
-4. 権限とクォータを評価する（1.3）。`.blocked` ならここで終える（バッチの項目はここで `itemFailed`）。**バッチの 2 件目以降の項目は、この評価をバッチの最初の項目が確定させた `ExportAuthorization` でそのまま満たし、個別に再評価しない**（1.5。開始後の失効・昇格を無視するのはこの再評価をしないことで実現する）
+4. 権限とクォータを評価する（1.3）。`.blocked` ならここで終える（バッチの項目はここで `itemFailed`）。**バッチ内で最初にこの手順へ到達した項目が `ExportAuthorization` を確定させ、以降の項目はこの評価をそのスナップショットでそのまま満たし、個別に再評価しない**（先行する項目が手順1〜3で `itemFailed` になっても、最初に到達した項目の認可がスナップショットになる。1.5。開始後の失効・昇格を無視するのはこの再評価をしないことで実現する）
 5. `startExport` で `ExportJob` を挿入する（`expectedProjectRevision` つき）。revision が変わっていれば失敗し、終える（バッチの項目はここで `itemFailed`）
 6. 処理を開始する（3 章）
 
