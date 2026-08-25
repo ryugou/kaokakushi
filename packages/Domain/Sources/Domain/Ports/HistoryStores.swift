@@ -35,7 +35,6 @@ public struct DeletionContext: Sendable {
     public let trigger: DeletionTrigger
     public let isFavorite: Bool
     public let isBeingEdited: Bool
-    public let hasNonTerminalQueueItem: Bool
     public let hasUndeliveredOutputRecord: Bool   // isUndelivered のみ（settledAt != nil の出力が対象）。delivered は保護しない
     public let hasRunningExportJob: Bool
     public let hasWorkingSourceRecord: Bool
@@ -45,7 +44,6 @@ public struct DeletionContext: Sendable {
         trigger: DeletionTrigger,
         isFavorite: Bool,
         isBeingEdited: Bool,
-        hasNonTerminalQueueItem: Bool,
         hasUndeliveredOutputRecord: Bool,
         hasRunningExportJob: Bool,
         hasWorkingSourceRecord: Bool,
@@ -54,7 +52,6 @@ public struct DeletionContext: Sendable {
         self.trigger = trigger
         self.isFavorite = isFavorite
         self.isBeingEdited = isBeingEdited
-        self.hasNonTerminalQueueItem = hasNonTerminalQueueItem
         self.hasUndeliveredOutputRecord = hasUndeliveredOutputRecord
         self.hasRunningExportJob = hasRunningExportJob
         self.hasWorkingSourceRecord = hasWorkingSourceRecord
@@ -71,7 +68,7 @@ public protocol HistoryDeletionStore: Sendable {
     ) async throws -> DeletionInspection
 
     /// DB トランザクション内で DeletionContext を再取得し、
-    /// 削除可否判定を再評価してから削除する（所属 Batch が空になった場合の自動削除を含む）
+    /// 削除可否判定を再評価してから削除する（参照する ExportRecord が尽きた Batch の自動削除を含む）
     func deleteHistoryUnit(
         _ unit: HistoryUnit,
         trigger: DeletionTrigger
@@ -96,7 +93,6 @@ public struct DeletionInspection: Sendable {
 }
 
 public enum AbsoluteProtection: Sendable, Hashable {
-    case nonTerminalQueueItem
     case exportJobRunning
     case undeliveredOutput
     /// 試行中のDeliveryAttempt（写真ライブラリ保存）が存在するため削除を拒否する

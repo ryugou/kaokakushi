@@ -41,9 +41,3 @@ public struct CustomStampID: Sendable, Hashable {
     public let rawValue: UUID
     public init(rawValue: UUID) { self.rawValue = rawValue }
 }
-
-/// エクスポートキュー項目の識別子（export-saga.md）。
-public struct ExportQueueItemID: Sendable, Hashable {
-    public let rawValue: UUID
-    public init(rawValue: UUID) { self.rawValue = rawValue }
-}

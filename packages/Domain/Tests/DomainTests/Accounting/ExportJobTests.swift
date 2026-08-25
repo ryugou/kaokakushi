@@ -4,10 +4,9 @@ import Foundation
 
 /// Task 3: 書き出しジョブの型群（export-saga.md 2 章）。
 ///
-/// `ExportJob` / `OutputDeliveryDescriptor` のフィールド保持（`batchID` / `queueItemID` の
-/// nil 許容を含む）を検証する。
+/// `ExportJob` / `OutputDeliveryDescriptor` のフィールド保持（`batchID` の nil 許容を含む）を検証する。
 
-@Test("ExportJobが全フィールドを保持しbatchIDとqueueItemIDはnilを許容する")
+@Test("ExportJobが全フィールドを保持しbatchIDはnilを許容する")
 func exportJobHoldsAllFieldsAndAllowsNilOptionals() {
     let exportID = ExportID(rawValue: UUID())
     let projectID = ProjectID(rawValue: UUID())
@@ -29,7 +28,6 @@ func exportJobHoldsAllFieldsAndAllowsNilOptionals() {
         exportID: exportID,
         projectID: projectID,
         batchID: nil,
-        queueItemID: nil,
         authorization: authorization,
         delivery: delivery
     )
@@ -37,15 +35,13 @@ func exportJobHoldsAllFieldsAndAllowsNilOptionals() {
     #expect(subject.exportID == exportID)
     #expect(subject.projectID == projectID)
     #expect(subject.batchID == nil)
-    #expect(subject.queueItemID == nil)
     #expect(subject.authorization.accountingMode == .freeMonthlyConsume)
     #expect(subject.delivery.format == .heic)
 }
 
-@Test("ExportJobはバッチ書き出しでbatchIDとqueueItemIDを保持する")
-func exportJobHoldsBatchAndQueueItemIDsWhenPresent() {
+@Test("ExportJobはバッチ書き出しでbatchIDを保持する")
+func exportJobHoldsBatchIDWhenPresent() {
     let batchID = BatchID(rawValue: UUID())
-    let queueItemID = ExportQueueItemID(rawValue: UUID())
     let entitlement = Entitlement(
         plan: .pro,
         status: .active,
@@ -62,12 +58,10 @@ func exportJobHoldsBatchAndQueueItemIDsWhenPresent() {
         exportID: ExportID(rawValue: UUID()),
         projectID: ProjectID(rawValue: UUID()),
         batchID: batchID,
-        queueItemID: queueItemID,
         authorization: authorization,
         delivery: OutputDeliveryDescriptor(format: .png, suggestedCreationDate: Date(timeIntervalSince1970: 300))
     )
     #expect(subject.batchID == batchID)
-    #expect(subject.queueItemID == queueItemID)
     #expect(subject.delivery.suggestedCreationDate == Date(timeIntervalSince1970: 300))
 }
 

@@ -7,8 +7,9 @@ import Foundation
 // 状態の集合（`ExportQueueState` / `ExportQueueFailure` / `AppErrorCode.capabilityRequired`）
 // は Queue/ExportQueueState.swift で確定済みのため、ここに新しい state/case を追加しない
 // （正本の「状態を増やさない」原則）。`isTerminal` も同ファイルの1箇所を再利用し、独自の
-// 終端判定を書き下さない（architecture.md 6.4「isTerminal を各所で書き下さない」。
-// 履歴削除可否判定・バッチ完了判定・復旧対象選定がすべてこの1述語を使う）。
+// 終端判定を書き下さない（architecture.md 6.4「isTerminal を各所で書き下さない」。バッチ完了
+// 判定と UI の進行表示がこの1述語を使う。キュー状態はセッション内のメモリにしか存在しない
+// ため、DB を対象とする履歴削除可否判定〈7.5〉や起動時復旧はこの述語を使わない）。
 //
 // 正本に明記が無く判断した点（確定済み）:
 // - `queueStateAfterAuthorization` は `.authorized` の場合 nil を返す（このタイミングでは

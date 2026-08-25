@@ -45,7 +45,6 @@ private func makeExportJob(exportID: ExportID, projectID: ProjectID) -> ExportJo
         exportID: exportID,
         projectID: projectID,
         batchID: nil,
-        queueItemID: nil,
         authorization: ExportAuthorization(
             entitlementSnapshot: entitlement,
             accountingMode: .freeMonthlyConsume,
@@ -57,7 +56,7 @@ private func makeExportJob(exportID: ExportID, projectID: ProjectID) -> ExportJo
 
 // MARK: - StartExportInput / RecordOutputInput のフィールド保持
 
-@Test("StartExportInputが全フィールドを保持し単体書き出しではbatchIDとqueueItemIDにnilを許容する")
+@Test("StartExportInputが全フィールドを保持し単体書き出しではbatchIDにnilを許容する")
 func startExportInputHoldsAllFieldsAndAllowsNilForSingleExport() throws {
     let projectID = makeProjectID()
     let renderSpec = try makeRenderSpec()
@@ -67,7 +66,6 @@ func startExportInputHoldsAllFieldsAndAllowsNilForSingleExport() throws {
     let subject = StartExportInput(
         projectID: projectID,
         batchID: nil,
-        queueItemID: nil,
         renderSpec: renderSpec,
         exportSetting: exportSetting,
         previewConfirmation: previewConfirmation
@@ -75,29 +73,25 @@ func startExportInputHoldsAllFieldsAndAllowsNilForSingleExport() throws {
 
     #expect(subject.projectID == projectID)
     #expect(subject.batchID == nil)
-    #expect(subject.queueItemID == nil)
     #expect(subject.renderSpec == renderSpec)
     #expect(subject.exportSetting == exportSetting)
     #expect(subject.previewConfirmation == previewConfirmation)
 }
 
-@Test("StartExportInputはバッチ書き出しでbatchIDとqueueItemIDを保持する")
-func startExportInputHoldsBatchAndQueueItemIDsWhenPresent() throws {
+@Test("StartExportInputはバッチ書き出しでbatchIDを保持する")
+func startExportInputHoldsBatchIDWhenPresent() throws {
     let projectID = makeProjectID()
     let batchID = BatchID(rawValue: UUID())
-    let queueItemID = ExportQueueItemID(rawValue: UUID())
 
     let subject = StartExportInput(
         projectID: projectID,
         batchID: batchID,
-        queueItemID: queueItemID,
         renderSpec: try makeRenderSpec(),
         exportSetting: makeExportSetting(),
         previewConfirmation: try makePreviewConfirmation(projectID: projectID)
     )
 
     #expect(subject.batchID == batchID)
-    #expect(subject.queueItemID == queueItemID)
 }
 
 @Test("RecordOutputInputが全フィールドを保持する")
@@ -153,6 +147,7 @@ private actor FakeExportSagaStore: ExportSagaStore {
     private(set) var discardExportCalls: [(exportID: ExportID, temporaryFiles: [ManagedFileRef])] = []
     private(set) var loadRunningJobsCallCount = 0
     private(set) var deleteRunningJobsCalls: [[ExportID]] = []
+    private(set) var deleteUnsettledBatchesCallCount = 0
 
     var startExportResult: ExportStartDecision
     var loadRunningJobsResult: [ExportJob] = []
@@ -190,6 +185,10 @@ private actor FakeExportSagaStore: ExportSagaStore {
     func deleteRunningJobs(_ exportIDs: [ExportID]) async throws {
         deleteRunningJobsCalls.append(exportIDs)
     }
+
+    func deleteUnsettledBatches() async throws {
+        deleteUnsettledBatchesCallCount += 1
+    }
 }
 
 @Test("ExportSagaStoreへの最小準拠が全メソッドの引数を渡された値どおりに記録する")
@@ -201,7 +200,6 @@ func fakeExportSagaStoreForwardsArguments() async throws {
     let input = StartExportInput(
         projectID: projectID,
         batchID: nil,
-        queueItemID: nil,
         renderSpec: try makeRenderSpec(),
         exportSetting: makeExportSetting(),
         previewConfirmation: try makePreviewConfirmation(projectID: projectID)
@@ -249,7 +247,7 @@ func fakeExportSagaStoreForwardsArguments() async throws {
     #expect(settleBatchCalls[0].settledAt == settledAt)
 }
 
-@Test("ExportSagaStoreへの最小準拠がdiscard/loadRunningJobs/deleteRunningJobsの引数を記録する")
+@Test("ExportSagaStoreへの最小準拠がdiscard/loadRunningJobs/deleteRunningJobs/deleteUnsettledBatchesの呼び出しを記録する")
 func fakeExportSagaStoreForwardsJobMaintenanceArguments() async throws {
     let store = FakeExportSagaStore(startExportResult: .blocked(
         ExportStartBlock(reason: .trialCreditsUnavailable, limit: nil)))
@@ -266,6 +264,8 @@ func fakeExportSagaStoreForwardsJobMaintenanceArguments() async throws {
     let deletedIDs = [ExportID(rawValue: UUID()), ExportID(rawValue: UUID())]
     try await store.deleteRunningJobs(deletedIDs)
 
+    try await store.deleteUnsettledBatches()
+
     let discardCalls = await store.discardExportCalls
     #expect(discardCalls.count == 1)
     #expect(discardCalls[0].exportID == discardedID)
@@ -276,4 +276,7 @@ func fakeExportSagaStoreForwardsJobMaintenanceArguments() async throws {
 
     let deleteCalls = await store.deleteRunningJobsCalls
     #expect(deleteCalls == [deletedIDs])
+
+    let deleteUnsettledBatchesCallCount = await store.deleteUnsettledBatchesCallCount
+    #expect(deleteUnsettledBatchesCallCount == 1)
 }

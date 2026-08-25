@@ -11,7 +11,6 @@ public struct ExportJob: Sendable {
     public let exportID: ExportID
     public let projectID: ProjectID
     public let batchID: BatchID?
-    public let queueItemID: ExportQueueItemID?      // 単体書き出しでは nil。手順 0 で固定する
     public let authorization: ExportAuthorization   // 開始時に固定する（1.5）
     public let delivery: OutputDeliveryDescriptor   // 認可時に確定。生成時に OutputRecord へコピーする
 
@@ -19,14 +18,12 @@ public struct ExportJob: Sendable {
         exportID: ExportID,
         projectID: ProjectID,
         batchID: BatchID?,
-        queueItemID: ExportQueueItemID?,
         authorization: ExportAuthorization,
         delivery: OutputDeliveryDescriptor
     ) {
         self.exportID = exportID
         self.projectID = projectID
         self.batchID = batchID
-        self.queueItemID = queueItemID
         self.authorization = authorization
         self.delivery = delivery
     }

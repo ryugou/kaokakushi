@@ -56,7 +56,6 @@ func deletionContextHoldsAllFields() {
         trigger: .storagePressure,
         isFavorite: true,
         isBeingEdited: false,
-        hasNonTerminalQueueItem: true,
         hasUndeliveredOutputRecord: false,
         hasRunningExportJob: true,
         hasWorkingSourceRecord: false,
@@ -69,7 +68,6 @@ func deletionContextHoldsAllFields() {
     }
     #expect(subject.isFavorite == true)
     #expect(subject.isBeingEdited == false)
-    #expect(subject.hasNonTerminalQueueItem == true)
     #expect(subject.hasUndeliveredOutputRecord == false)
     #expect(subject.hasRunningExportJob == true)
     #expect(subject.hasWorkingSourceRecord == false)
@@ -92,10 +90,15 @@ func deletionInspectionHoldsAllFields() {
 }
 
 @Test(
-    "AbsoluteProtectionはnonTerminalQueueItem/exportJobRunning/undeliveredOutputの3ケースを持ちHashableである",
-    arguments: [AbsoluteProtection.nonTerminalQueueItem, .exportJobRunning, .undeliveredOutput]
+    "AbsoluteProtectionはexportJobRunning/undeliveredOutput/deliveryAttemptInProgressの3ケースを持ちHashableである",
+    arguments: [AbsoluteProtection.exportJobRunning, .undeliveredOutput, .deliveryAttemptInProgress]
 )
 func absoluteProtectionHasThreeCases(protectionCase: AbsoluteProtection) {
+    // 網羅的な switch であるため、正本に無い4つめの case が追加されればコンパイルが壊れ検出できる。
+    switch protectionCase {
+    case .exportJobRunning, .undeliveredOutput, .deliveryAttemptInProgress:
+        break
+    }
     #expect(Set([protectionCase]).contains(protectionCase))
 }
 

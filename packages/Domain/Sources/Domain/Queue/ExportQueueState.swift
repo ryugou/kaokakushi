@@ -29,9 +29,6 @@ public struct ExportQueueFailure: Sendable, Equatable {
 }
 
 public enum QueuePauseReason: Sendable, Equatable {
-    case entitlementExpired            // Pro 契約の終了（書き出し Saga 1.4）
-    case storageInsufficient
-    case userPaused
     /// 処理用の元素材が失われた。同じ写真を選び直せば再開できる
     case sourceReselectionRequired
 }
