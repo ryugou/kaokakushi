@@ -1033,9 +1033,9 @@ case .oneByOne:
 
 1 枚ずつ確認では `normal` の写真も確認を待つため `review_required` になる（「警告あり」定義では未確認の `normal` 写真がキュー上そう見えなくなる）。
 
-##### 開始時の設定を固定する
+##### 作成時の設定と認可を固定する
 
-**実行中のバッチは開始時点の設定定数（10 章）のスナップショットで動く**（作成後に設定定数を読み直さないため、バッチ内の全項目が同じ上限・並列数で扱われる）。
+**実行中のバッチは作成時点の設定定数（10 章）のスナップショットで動く**（作成後に設定定数を読み直さないため、バッチ内の全項目が同じ上限・並列数で扱われる）。
 
 ```swift
 struct BatchPolicySnapshot: Sendable, Equatable {
@@ -1053,7 +1053,7 @@ enum BatchKind: UInt32, Sendable, Hashable {
 }
 ```
 
-`Batch` の行が保持する。作成時に確定し、実行中は設定変更を反映しない（読み直して適用すると同一バッチの実行中に上限が変わってしまう）。
+`Batch` の行が保持する。作成時に確定し、実行中は設定変更を反映しない（読み直して適用すると同一バッチの実行中に上限が変わってしまう）。認可（`ExportAuthorization`）も同様に作成時（`createBatch`）に確定し `Batch` 行が保持する（再評価しない）。作成の契約の正本は [書き出し Saga](export-saga.md) の 0 章 `createBatch` と 1.3 とする。
 
 **列値を固定する**（値は上記コードブロックの raw value が正本。`Batch` の DB 列としてスキーマ移行をまたぐため、`case` 宣言順に依存させると版によって `trial` のバッチが `proBatch` として上限 50 でクランプされうる。`OutputState` と同じ規則。7.5）。新しいバッチの作成時は、その時点の設定定数（10 章）から作る。
 
@@ -1194,7 +1194,7 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `StampAsset` | プロジェクトが参照する不変の画像実体のメタデータ。内容ハッシュを主キーとする（7.5） |
 | `ProjectStampAsset` | プロジェクトと `StampAsset` の対応（7.5） |
 | `ExportRecord` | 仕様 19.7。`batchID` を追加 |
-| `Batch` | バッチ単位の履歴。`BatchPolicySnapshot` を持つ（6.4） |
+| `Batch` | バッチ単位の履歴。`BatchPolicySnapshot` と認可スナップショットを持つ（6.4） |
 | `BatchPreset` | 一括設定プリセット |
 | `DeliveryAttempt` | 写真ライブラリ保存の試行中を表す。`previousState` を持つ（[書き出し Saga](export-saga.md) が正本） |
 | `UnknownLibrarySave` | 保存結果が不明のまま `delivered` を維持したことの記録 |
@@ -2269,3 +2269,4 @@ v1 のリリース範囲、動画の扱い、課金訴求の分類、利用者�
 | カスタムスタンプの保存解像度 | 長辺 1,024px は暫定。顔が大きく写る素材での見え方を実機で確認（7.5） | v1 実機検証時 |
 | トライアルのクレジット数 | 5 枚は暫定。転換率を見て調整可能な設定値とする | リリース後 |
 | 一括処理の同時並列数を 2 へ引き上げるか | v1 は 1 固定。引き上げには開始順序の再設計と実機計測が要る | v2 検討時 |
+| `createBatch` / `startExport` の認可評価に要る入力の型設計 | `CreateBatchInput`（[書き出し Saga](export-saga.md) 0 章）と `StartExportInput`（同）に、`capabilityVerificationRequired` の判定へ要る能力・権限の解決結果（`CapabilityResolution` / `Entitlement` 等）を渡す入力が無く、現状の型のままでは実装できない。単体（`StartExportInput`）とバッチ（`CreateBatchInput`）の両方を対称に閉じる必要がある。**暫定運用: v1 実装着手前に、両入力へ渡す評価済み値の型設計を別途確定する（本改訂の範囲外）** | v1 実装着手前 |
