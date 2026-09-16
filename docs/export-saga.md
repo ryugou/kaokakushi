@@ -279,7 +279,7 @@ enum ExportAccountingMode: Sendable, Equatable {
 
 認可を確定する時点は**単体 = `startExport` 時／バッチ = `createBatch` 時（作成された `Batch` 行が保持する）**。`blocked` なら単体は `ExportJob` を作らず、バッチは `Batch` 行自体を作らない。**この時点では何も消費しない。** 消費は完了操作（3 章の手順5）で初めて発生する。
 
-**評価入力の出所**: 評価に使う能力・契約状態・台帳は、`CreateBatchInput` / `StartExportInput` では渡さず、実装が同一 DB トランザクション内で `app.db` の行（`SubscriptionState`〈[アーキテクチャ設計](architecture.md) の 6.2〉・`UsageLedger`〈同 6.3〉）から読んで解決する。設定定数（月間上限・クランプ上限）は実装の生成時に注入する。評価と行の挿入が同一トランザクションであることが、認可と勘定の錨の不可分性を保証する。
+**評価入力の出所**: 評価に使う能力・契約状態・台帳は、`CreateBatchInput` / `StartExportInput` では渡さず、実装が同一 DB トランザクション内で `app.db` の行から読んで解決する。能力・契約状態は**永続化済みの `SubscriptionState` 行のみ**を `resolveCapabilities`（[アーキテクチャ設計](architecture.md) の 6.2）へ `loaded`（行あり）/ `missing`（行なし）として渡し、解決が `verificationRequired` なら `capabilityVerificationRequired` の `blocked` へ倒す（安全側）。6.2 にある RevenueCat への問い合わせとメモリ上の検証済み `Entitlement` による維持は**セッションの能力解決（UI の活性判定）の規則**であり、認可はその結果が `SubscriptionState` へ永続化されてはじめて反映する（キャッシュ未検証のまま認可だけが通る経路を作らない）。台帳は `UsageLedger` 行を読む（同 6.3）。設定定数（月間上限・クランプ上限）は実装の生成時に注入する。評価と行の挿入が同一トランザクションであることが、認可と勘定の錨の不可分性を保証する。
 
 ### 1.4 勘定の使い分け
 
