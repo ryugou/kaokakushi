@@ -4,32 +4,30 @@ import Domain
 @testable import Application
 
 // ExportCoordinator.startBatchItem — 1項目の帰結がバッチ全体を止めないことの検証
-// （Issue #7 Task 7 追補。正本は下記の architecture.md 6.4・export-saga.md 1.5 のとおり）。
+// （Issue #7 Task 7 追補。正本は下記の architecture.md 6.4・export-saga.md 1.5 のとおり。
+// 一括処理キュー簡素化 Issue #40 決定1）。
 //
 // 正本: architecture.md 6.4「一枚の失敗でバッチ全体を停止しない」、export-saga.md 1.5
-// （まだ認可されていない写真は開始せず、バッチを paused にする＝1.3 のブロックのみが
-// バッチを止める）、Domain/Queue/QueueMachine.swift の queueStateAfterAuthorization。
+// （開始後に有料契約の失効・月間上限への到達・昇格が起きても無視し、バッチ開始時の認可
+// スナップショットで全項目を完了させる＝batchPaused 相当のケースは存在しない）、
+// Domain/Queue/QueueMachine.swift の queueStateAfterAuthorization（1.2 の能力ブロックの
+// 判定にのみ使う）。
 //
 // ExportCoordinatorBatchTests.swift のファイル行数制約（Global Constraints）のため、
-// itemFailed / itemPaused / confirmationMismatch がバッチを継続させることの検証のみを
-// このファイルへ分離する（StartTests.swift / StartBlockedTests.swift と同じ方針）。
-// 1.1 のモード別条件・1.3 の batchPaused・直列1件は ExportCoordinatorBatchTests.swift が担う。
+// itemFailed / itemPaused がバッチを継続させることの検証のみをこのファイルへ分離する
+// （StartTests.swift / StartBlockedTests.swift と同じ方針）。1.1 のモード別条件・直列1件は
+// ExportCoordinatorBatchTests.swift が担う。
 
 // MARK: - BatchItemStartOutcome の判別ヘルパー（BatchTests.swift と同じ方針。private のため共有できない）
 
-private func isConfirmationMismatch(_ outcome: BatchItemStartOutcome) -> Bool {
-    if case .confirmationMismatch = outcome { return true }
+private func isItemFailed(_ outcome: BatchItemStartOutcome) -> Bool {
+    if case .itemFailed = outcome { return true }
     return false
 }
 
-private func itemFailedQueueState(_ outcome: BatchItemStartOutcome) -> ExportQueueState? {
-    if case .itemFailed(let state) = outcome { return state }
-    return nil
-}
-
-private func itemPausedQueueState(_ outcome: BatchItemStartOutcome) -> ExportQueueState? {
-    if case .itemPaused(let state) = outcome { return state }
-    return nil
+private func isItemPaused(_ outcome: BatchItemStartOutcome) -> Bool {
+    if case .itemPaused = outcome { return true }
+    return false
 }
 
 private func startedJob(_ outcome: BatchItemStartOutcome) -> ExportJob? {
@@ -105,7 +103,6 @@ private func makeBatchItem(
     let reviewState = BatchReviewState(batchID: batchID, overviewConfirmed: overviewConfirmed)
     return BatchExportItemRequest(
         batchID: batchID,
-        queueItemID: ExportQueueItemID(rawValue: UUID()),
         mode: mode,
         batchReviewState: reviewState,
         request: request
@@ -146,16 +143,13 @@ private func capabilityBlockedItemDoesNotStopSubsequentItems() async throws {
         stampCatalog: catalog
     )
     let capabilities = makeResolvedCapabilities(canUsePremiumStamps: false)
-    let expectedFailure = ExportQueueFailure(
-        errorCode: .capabilityRequired, isRetryable: false, occurredAt: Date(timeIntervalSince1970: 1_700_000_000)
-    )
 
     let firstOutcome = try await coordinator.startBatchItem(firstItem, capabilities: capabilities)
     let blockedOutcome = try await coordinator.startBatchItem(blockedItem, capabilities: capabilities)
     let thirdOutcome = try await coordinator.startBatchItem(thirdItem, capabilities: capabilities)
 
     #expect(startedJob(firstOutcome) != nil)
-    #expect(itemFailedQueueState(blockedOutcome) == .failed(expectedFailure))
+    #expect(isItemFailed(blockedOutcome))
     #expect(startedJob(thirdOutcome) != nil)
     #expect(await exportSagaStore.startExportCalls.count == 2)
 }
@@ -183,7 +177,7 @@ private func missingWorkingSourceReturnsItemPausedAndBatchContinues() async thro
     let missingOutcome = try await coordinator.startBatchItem(missingItem, capabilities: makeResolvedCapabilities())
     let nextOutcome = try await coordinator.startBatchItem(nextItem, capabilities: makeResolvedCapabilities())
 
-    #expect(itemPausedQueueState(missingOutcome) == .paused(.sourceReselectionRequired))
+    #expect(isItemPaused(missingOutcome))
     #expect(await workingSourceStore.invalidateWorkingSourceCalls == [missingItem.request.projectID])
     #expect(startedJob(nextOutcome) != nil)
 }
@@ -211,6 +205,40 @@ private func confirmationMismatchDoesNotStopBatch() async throws {
     let mismatchOutcome = try await coordinator.startBatchItem(mismatchedItem, capabilities: makeResolvedCapabilities())
     let nextOutcome = try await coordinator.startBatchItem(nextItem, capabilities: makeResolvedCapabilities())
 
-    #expect(isConfirmationMismatch(mismatchOutcome))
+    #expect(isItemFailed(mismatchOutcome))
+    #expect(startedJob(nextOutcome) != nil)
+}
+
+// MARK: - 1.3 権限クォータブロック（itemFailed。batchPaused 相当のケースは無くなった）
+
+@Test("1.3の権限・クォータブロックはitemFailedを返し、次の写真の開始は妨げられない")
+private func quotaBlockedItemDoesNotStopSubsequentItems() async throws {
+    let batchID = makeBatchID()
+    let blockedItem = try makeBatchItem(batchID: batchID, mode: .overview)
+    let nextItem = try makeBatchItem(batchID: batchID, mode: .overview)
+    let workingSourceStore = FakeWorkingSourceStore()
+    let managedFileStore = FakeManagedFileStore()
+    for item in [blockedItem, nextItem] {
+        try await seedWorkingSource(
+            projectID: item.request.projectID,
+            workingSourceStore: workingSourceStore,
+            managedFileStore: managedFileStore
+        )
+    }
+    let exportSagaStore = FakeExportSagaStore(startExportHandler: { input, _ in
+        input.projectID == blockedItem.request.projectID
+            ? .blocked(ExportStartBlock(reason: .monthlyLimitReached, limit: 5))
+            : .authorized(makeExportJob(exportID: makeExportID(), projectID: input.projectID, batchID: batchID))
+    })
+    let coordinator = makeCoordinator(
+        exportSagaStore: exportSagaStore,
+        workingSourceStore: workingSourceStore,
+        managedFileStore: managedFileStore
+    )
+
+    let blockedOutcome = try await coordinator.startBatchItem(blockedItem, capabilities: makeResolvedCapabilities())
+    let nextOutcome = try await coordinator.startBatchItem(nextItem, capabilities: makeResolvedCapabilities())
+
+    #expect(isItemFailed(blockedOutcome))
     #expect(startedJob(nextOutcome) != nil)
 }

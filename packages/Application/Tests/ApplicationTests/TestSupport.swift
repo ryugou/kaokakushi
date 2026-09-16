@@ -73,7 +73,6 @@ func makeExportJob(
         exportID: exportID,
         projectID: projectID,
         batchID: batchID,
-        queueItemID: nil,
         authorization: ExportAuthorization(
             entitlementSnapshot: makeEntitlement(),
             accountingMode: accountingMode,

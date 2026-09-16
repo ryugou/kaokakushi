@@ -14,6 +14,15 @@ import GRDB
 // deviceTimeZoneとauthorizedAt（usageNow）をAccountingModeContext経由で+Accounting.swiftへ
 // 渡し、Domainのevaluate関数（evaluateMonthlyQuota）で評価する（+Accounting.swiftの
 // コメント参照）。
+//
+// 一括処理キュー簡素化 Issue #40 決定2（1.5「開始後に有料契約の失効・月間上限への到達・
+// 昇格が起きても無視し、バッチ開始時の認可スナップショットで全項目を完了させる」）:
+// バッチ内で最初にstartExportへ到達した項目がExportAuthorizationを確定させ、以降の同一
+// batchIDの項目はそのスナップショットをそのまま使い、resolveVerifiedCapabilities /
+// resolveAccountingModeのfresh評価を行わない（開始後の失効・昇格を無視するのはこの
+// 再評価をしないことで実現する。export-saga.md 1.6手順4のコメント）。同一batchIDの
+// ExportJob行が無い場合（先行項目が手順1〜3でitemFailedになっていた等）はfresh評価に
+// フォールバックする。単体書き出し（batchID == nil）は対象外で常にfresh評価する。
 
 extension ExportSagaStoreLive {
     public func startExport(
@@ -26,6 +35,15 @@ extension ExportSagaStoreLive {
             try Self.validateProjectRevision(
                 connection, projectID: input.projectID, expectedProjectRevision: expectedProjectRevision
             )
+
+            if let batchID = input.batchID,
+               let snapshot = try Self.loadBatchAuthorizationSnapshot(connection, batchID: batchID) {
+                let job = try Self.insertExportJob(
+                    connection, input: input, entitlement: snapshot.entitlementSnapshot,
+                    accountingMode: snapshot.accountingMode, authorizedAt: snapshot.authorizedAt
+                )
+                return .authorized(job)
+            }
 
             guard let (subscriptionState, capabilities) = try Self.resolveVerifiedCapabilities(
                 connection, usageNow: authorizedAt, enabledStampPacks: enabledStampPacks
@@ -48,6 +66,26 @@ extension ExportSagaStoreLive {
                 return .authorized(job)
             }
         }
+    }
+
+    /// 同一batchIDを持つ既存のExportJob行を1件探し、その`authorization`をスナップショットと
+    /// して返す（決定2）。行が複数あっても任意の1件で構わない（1.5の要求は「バッチ開始時の
+    /// 認可スナップショット」であり、バッチ内の全ExportJob行は同一のauthorizationを持つ契約
+    /// のため、どれを読んでも結果は同じ）。行が無ければnilを返し、呼び出し元がfresh評価へ
+    /// フォールバックする。デコードはmakeExportJob（+Mapping.swift。loadExportJob /
+    /// loadRunningJobsと共有する行デコード）を再利用し、Entitlement再構成ロジックを
+    /// このファイルへ重複させない。
+    private static func loadBatchAuthorizationSnapshot(
+        _ connection: Database, batchID: BatchID
+    ) throws -> ExportAuthorization? {
+        guard let row = try Row.fetchOne(
+            connection,
+            sql: "SELECT \(Self.exportJobColumns) FROM ExportJob WHERE batchID = ? LIMIT 1",
+            arguments: [batchID.rawValue]
+        ) else {
+            return nil
+        }
+        return try Self.makeExportJob(row).authorization
     }
 
     /// previewConfirmation.projectIDがinput.projectIDと一致することを検査する（1.1

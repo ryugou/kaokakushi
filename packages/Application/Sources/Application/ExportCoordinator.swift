@@ -146,14 +146,13 @@ public actor ExportCoordinator {
 
     // MARK: - 実体確認・startExport 呼び出し（SerialTaskQueue 経由）
 
-    /// 単体は batchID / queueItemID とも nil のまま呼ぶ。バッチ項目の開始
-    /// （ExportCoordinator+Batch.swift の startBatchItem）はこの同じ経路を batchID /
-    /// queueItemID つきで再利用する（1.6 の実体確認・startExport 呼び出し順序は単体・バッチで
+    /// 単体は batchID nil のまま呼ぶ。バッチ項目の開始
+    /// （ExportCoordinator+Batch.swift の startBatchItem）はこの同じ経路を batchID
+    /// つきで再利用する（1.6 の実体確認・startExport 呼び出し順序は単体・バッチで
     /// 変わらないため重複させない）。
     func authorizeAndStart(
         _ request: SingleExportRequest,
-        batchID: BatchID? = nil,
-        queueItemID: ExportQueueItemID? = nil
+        batchID: BatchID? = nil
     ) async throws -> AuthorizeAndStartOutcome {
         guard try await workingSourceExists(for: request.projectID) else {
             try await workingSourceStore.invalidateWorkingSource(request.projectID)
@@ -163,7 +162,6 @@ public actor ExportCoordinator {
         let input = StartExportInput(
             projectID: request.projectID,
             batchID: batchID,
-            queueItemID: queueItemID,
             renderSpec: request.renderSpec,
             exportSetting: request.exportSetting,
             previewConfirmation: request.previewConfirmation

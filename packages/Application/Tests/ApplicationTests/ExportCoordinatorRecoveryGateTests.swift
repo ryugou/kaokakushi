@@ -186,7 +186,6 @@ private func startBatchItemWaitsForRecoveryGateThenProceeds() async throws {
     )
     let item = BatchExportItemRequest(
         batchID: batchID,
-        queueItemID: ExportQueueItemID(rawValue: UUID()),
         mode: .perPhoto,
         batchReviewState: BatchReviewState(batchID: batchID, overviewConfirmed: true),
         request: request

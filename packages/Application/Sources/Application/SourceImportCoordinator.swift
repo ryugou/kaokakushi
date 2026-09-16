@@ -58,15 +58,13 @@ import Domain
 // （両ファイルとも Persistence 側の同じガード、WorkingSourceStoreLive+Replace.swift:93-103、を
 // 参照している）。
 //
-// 【実装中の判断: queueItemID / batchID】importPickedPhoto は PickedPhotoInput のみを受け取り
-// バッチ関連の引数を持たない（計画書 147行目）ため、両方とも nil を渡す。
-// packages/Persistence/Sources/Persistence/WorkingSourceStoreLive.swift の
-// `WorkingSourceStoreError.batchIDMissingForQueueItem` は「queueItemID が非nilなのに
-// batchID が nil」の組み合わせのみを契約違反として拒否しており、両方 nil はこの制約に
-// 抵触しない。単体インポートで queueItemID を必ず新規発行するという規約は正本のどこにも
-// 無いため、推測で仕様を拡張しない。この帰結として、この Saga 単体では ExportQueueItem が
-// 作られず、取り込んだ写真は書き出しキューに載らない（キューへ載せる操作は別 Saga の責務。
-// reviewer 指摘 S7）。
+// 【実装中の判断: queueItemID / batchID（PR 1 後の正本追随）】一括処理キュー簡素化
+// （Issue #40）により、一括処理のキュー進行状態はセッション内のメモリ状態へ一本化され、
+// `queueItemID` / `ExportQueueItem` は永続化層から削除された（architecture.md 6.4「一括処理の
+// キュー進行状態（ExportQueueState）はセッション内のメモリ状態であり、DB にテーブルを持たない」）。
+// `CreateWorkingSourceInput`（WorkingSourceStore.swift）はこれに伴い `batchID` / `queueItemID`
+// フィールド自体を持たない。このコメントが記述していた「両方 nil を渡す」という判断は
+// 対象フィールドの消滅により意味を失ったため、正本参照へ置き換える。
 //
 // 【実装中の判断: initialSpec のプレースホルダー】CreateWorkingSourceInput.initialSpec は
 // EffectSetting/FaceTrack への展開（Issue #25 待ち）まではこの Saga のスコープ外だが、
@@ -212,8 +210,6 @@ public actor SourceImportCoordinator {
             let projectID = ProjectID(rawValue: UUID())
             let createInput = CreateWorkingSourceInput(
                 projectID: projectID,
-                batchID: nil,
-                queueItemID: nil,
                 sourceFile: normalizedSourceFile,
                 createdAt: now(),
                 sourceLocator: ProjectSourceLocator(photoLibraryLocalIdentifier: input.providerAssetIdentifier),

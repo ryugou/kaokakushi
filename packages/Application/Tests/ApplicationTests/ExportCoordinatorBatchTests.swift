@@ -3,29 +3,25 @@ import Testing
 import Domain
 @testable import Application
 
-// ExportCoordinator.startBatchItem（Issue #7 Task 7「バッチ進行」+ 追補: batch-progression spec）。
+// ExportCoordinator.startBatchItem（Issue #7 Task 7「バッチ進行」+ 追補: batch-progression spec、
+// 一括処理キュー簡素化 Issue #40 決定1）。
 //
 // 正本: export-saga.md 1.1（バッチの開始条件: BatchReviewState と モード別条件）・
-// 1.5（開始後の権限変化: 開始済みは開始時の権限で完了、未認可は開始せず paused）、
-// architecture.md 6.4「一枚の失敗でバッチ全体を停止しない」、test-plan.md 2.4 / 3.1。
+// 1.5（開始後の権限変化: 有料契約の失効・月間上限への到達・昇格が起きても無視し、バッチ開始時の
+// 認可スナップショットで全項目を完了させる）、architecture.md 6.4「一枚の失敗でバッチ全体を
+// 停止しない」、test-plan.md 2.4 / 3.1 / :206。
 //
 // startBatchItem 自身は1写真分の認可・開始のみを担う（ExportCoordinator+Batch.swift 冒頭
-// コメント参照）。「バッチ進行」は呼び出し元が写真を順番に呼び、`batchPaused` を受け取った
-// 時点で残りの waiting を呼ばないことで実現されるため、そのループを模してテストする。
-// itemFailed / itemPaused / confirmationMismatch が次の写真の開始を妨げないことの検証は
+// コメント参照）。「バッチ進行」は呼び出し元が写真を順番に呼ぶループのため、そのループを
+// 模してテストする。itemFailed / itemPaused が次の写真の開始を妨げないことの検証は
 // ファイル行数制約（Global Constraints）のため ExportCoordinatorBatchProgressionTests.swift
 // に分離する（ExportCoordinatorStartTests.swift / StartBlockedTests.swift と同じ方針）。
 
 // MARK: - BatchItemStartOutcome の判別ヘルパー（StartTests.swift と同じ方針）
 
-private func isConfirmationMismatch(_ outcome: BatchItemStartOutcome) -> Bool {
-    if case .confirmationMismatch = outcome { return true }
+private func isItemFailed(_ outcome: BatchItemStartOutcome) -> Bool {
+    if case .itemFailed = outcome { return true }
     return false
-}
-
-private func blockReason(_ outcome: BatchItemStartOutcome) -> ExportStartBlockReason? {
-    if case .batchPaused(let block) = outcome { return block.reason }
-    return nil
 }
 
 private func startedJob(_ outcome: BatchItemStartOutcome) -> ExportJob? {
@@ -109,7 +105,6 @@ private func makeBatchItem(
     )
     return BatchExportItemRequest(
         batchID: batchID,
-        queueItemID: ExportQueueItemID(rawValue: UUID()),
         mode: mode,
         batchReviewState: reviewState,
         request: request
@@ -147,7 +142,7 @@ private func overviewModeBlocksWhenOverviewConfirmedFalse() async throws {
 
     let outcome = try await coordinator.startBatchItem(item, capabilities: makeResolvedCapabilities())
 
-    #expect(isConfirmationMismatch(outcome))
+    #expect(isItemFailed(outcome))
     let startExportCalls = await exportSagaStore.startExportCalls
     #expect(startExportCalls.isEmpty)
 }
@@ -181,7 +176,7 @@ private func perPhotoModeBlocksWhenIsReviewedFalse() async throws {
 
     let outcome = try await coordinator.startBatchItem(item, capabilities: makeResolvedCapabilities())
 
-    #expect(isConfirmationMismatch(outcome))
+    #expect(isItemFailed(outcome))
     let startExportCalls = await exportSagaStore.startExportCalls
     #expect(startExportCalls.isEmpty)
 }
@@ -198,18 +193,18 @@ private func batchReviewStateBatchIDMismatchBlocksRegardlessOfMode() async throw
 
     let outcome = try await coordinator.startBatchItem(item, capabilities: makeResolvedCapabilities())
 
-    #expect(isConfirmationMismatch(outcome))
+    #expect(isItemFailed(outcome))
     let startExportCalls = await exportSagaStore.startExportCalls
     #expect(startExportCalls.isEmpty)
 }
 
-// MARK: - 1.2 能力検査・batchID / queueItemID の受け渡し
+// MARK: - 1.2 能力検査・batchID の受け渡し
 //
 // itemFailed / itemPaused / confirmationMismatch がバッチを止めないことの検証は
 // ExportCoordinatorBatchProgressionTests.swift に分離する（ファイル行数制約）。
 
-@Test("全条件が成立する場合、StartExportInputへbatchIDとqueueItemIDが渡りExportJobを挿入する")
-private func fullyAuthorizedBatchItemPassesBatchIDAndQueueItemID() async throws {
+@Test("全条件が成立する場合、StartExportInputへbatchIDが渡りExportJobを挿入する")
+private func fullyAuthorizedBatchItemPassesBatchID() async throws {
     let batchID = makeBatchID()
     let item = try makeBatchItem(batchID: batchID, mode: .perPhoto, isReviewed: true)
     let workingSourceStore = FakeWorkingSourceStore()
@@ -229,7 +224,6 @@ private func fullyAuthorizedBatchItemPassesBatchIDAndQueueItemID() async throws 
     let startExportCalls = await exportSagaStore.startExportCalls
     #expect(startExportCalls.count == 1)
     #expect(startExportCalls.first?.input.batchID == batchID)
-    #expect(startExportCalls.first?.input.queueItemID == item.queueItemID)
 }
 
 // MARK: - 直列1件（ADR 0005）・1.5 開始後の権限変化
@@ -282,8 +276,8 @@ private func concurrentBatchItemsNeverOverlapInProcessing() async throws {
     #expect(await pipeline.renderer.maxObservedConcurrency == 1)
 }
 
-@Test("権限喪失後、開始済みの写真は生成を完了しwaitingの写真は開始しない")
-private func startedItemCompletesWhileNotYetStartedItemStaysWaitingAfterPermissionLoss() async throws {
+@Test("先行項目の開始後に契約の失効が起きても無視され、waitingの写真もバッチ開始時の認可スナップショットのまま生成を完了する")
+private func batchItemsCompleteWithStartSnapshotDespitePermissionLossAfterFirstStarts() async throws {
     let batchID = makeBatchID()
     let runningItem = try makeBatchItem(batchID: batchID, mode: .perPhoto, isReviewed: true)
     let waitingItem = try makeBatchItem(batchID: batchID, mode: .perPhoto, isReviewed: true)
@@ -300,9 +294,15 @@ private func startedItemCompletesWhileNotYetStartedItemStaysWaitingAfterPermissi
         managedFileStore: managedFileStore
     )
     let runningJob = makeExportJob(exportID: makeExportID(), projectID: runningItem.request.projectID, batchID: batchID)
+    let waitingJob = makeExportJob(exportID: makeExportID(), projectID: waitingItem.request.projectID, batchID: batchID)
+    // Persistence 側のスナップショット再利用（一括処理キュー簡素化 Issue #40 決定2）は、
+    // 同一 batchID の先行 ExportJob の authorization をそのまま使って2件目以降も authorized を
+    // 返す。開始後の契約失効・月間上限到達・昇格を無視するため、この Fake は projectID に
+    // 関わらず authorized を返す形でその挙動をシミュレートする（test-plan.md :206、
+    // export-saga.md 1.5）。
     let exportSagaStore = FakeExportSagaStore(startExportHandler: { input, _ in
-        input.queueItemID == waitingItem.queueItemID
-            ? .blocked(ExportStartBlock(reason: .monthlyLimitReached, limit: 5))
+        input.projectID == waitingItem.request.projectID
+            ? .authorized(waitingJob)
             : .authorized(runningJob)
     })
     let pipeline = makeSucceedingGenerationPipeline()
@@ -321,13 +321,12 @@ private func startedItemCompletesWhileNotYetStartedItemStaysWaitingAfterPermissi
     let job = try #require(startedJob(runningOutcome))
     try await coordinator.generateOutput(try makeGenerateExportInput(job: job))
 
-    // ここで契約の失効・月間上限への到達が起きたとみなす（FakeExportSagaStore の
-    // startExportHandler が waitingItem.queueItemID をブロックへ倒す）。
+    // ここで契約の失効・月間上限への到達・昇格が起きたとしても、1.5「バッチ開始時の認可
+    // スナップショットで全項目を完了させる」により waitingItem も started で開始できる。
     let waitingOutcome = try await coordinator.startBatchItem(waitingItem, capabilities: makeResolvedCapabilities())
+    let waitingStartedJob = try #require(startedJob(waitingOutcome))
+    try await coordinator.generateOutput(try makeGenerateExportInput(job: waitingStartedJob))
 
-    #expect(blockReason(waitingOutcome) == .monthlyLimitReached)
     let recordCalls = await exportSagaStore.recordGeneratedOutputCalls
-    #expect(recordCalls.map(\.exportID) == [job.exportID])
-    let runningJobs = try await exportSagaStore.loadRunningJobs()
-    #expect(runningJobs.map(\.exportID) == [job.exportID])
+    #expect(Set(recordCalls.map(\.exportID)) == Set([job.exportID, waitingStartedJob.exportID]))
 }

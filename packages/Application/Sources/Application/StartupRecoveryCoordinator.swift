@@ -13,12 +13,18 @@ import Domain
 // loadRunningJobs → deleteRunningJobs の順で呼ぶ。完了済み（settledAt != nil）の出力には
 // この手順で一切触れない（deleteRunningJobs の対象は running な ExportJob 行のみ）。
 //
-// 手順2「孤児ファイルのGC」は architecture.md 7.5 の手順(1)〜(3)をそのまま実行する
+// 手順2「どの ExportRecord からも参照されない Batch 行の削除」は
+// ExportSagaStore.deleteUnsettledBatches が単一 DB トランザクションで行う（export-saga.md
+// 5章、ポートの doc コメント）。手順1（deleteRunningJobs）の完了後、手順3（孤児ファイルGC）の
+// 前に呼ぶ契約（一括処理キュー簡素化 Issue #40 PR2 Task 3）。変更系操作のため
+// SerialTaskQueue 経由で直列化する（他の復旧手順と同じ扱い）。
+//
+// 手順3「孤児ファイルのGC」は architecture.md 7.5 の手順(1)〜(3)をそのまま実行する
 // （Task 11。実装は StartupRecoveryCoordinator+FileGC.swift）。手順(1)で削除を試みた ref の
 // 集合を、手順(3)（(2)が登録した ref の削除）の対象から除外する。これが無いと、(1)で
 // 削除に失敗した ref の実体はディスクに残ったままのため、(2)の差集合が同じ ref を孤児として
 // 再登録し、(3)が同一起動内で同じ ref を2回目の削除試行にかけてしまう
-// （Task 11 レビュー C-1）。5章の順序に従い deleteRunningJobs の後、resolveOrphanedAttempts の
+// （Task 11 レビュー C-1）。5章の順序に従い deleteUnsettledBatches の後、resolveOrphanedAttempts の
 // 前に実行する。
 //
 // `.historyThumbnail` は孤児GC対象の種別（orphanGCKinds）に含めない（architecture.md 7.5 の
@@ -230,6 +236,10 @@ public actor StartupRecoveryCoordinator {
         let runningJobs = try await exportSagaStore.loadRunningJobs()
         let runningExportIDs = runningJobs.map(\.exportID)
         try await queue.run { try await self.exportSagaStore.deleteRunningJobs(runningExportIDs) }
+
+        // 手順2（5章）。手順1（deleteRunningJobs）の完了後、手順3（孤児ファイルGC）の前に呼ぶ
+        // 契約（ExportSagaStore.deleteUnsettledBatches のポート doc コメント）。
+        try await queue.run { try await self.exportSagaStore.deleteUnsettledBatches() }
 
         let fileGC = await runOrphanFileGC()
 

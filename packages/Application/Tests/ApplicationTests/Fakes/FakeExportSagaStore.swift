@@ -68,6 +68,7 @@ actor FakeExportSagaStore: ExportSagaStore {
     private(set) var discardExportCalls: [FakeDiscardExportCall] = []
     private(set) var loadRunningJobsCallCount = 0
     private(set) var deleteRunningJobsCalls: [[ExportID]] = []
+    private(set) var deleteUnsettledBatchesCallCount = 0
 
     // MARK: - 注入可能な失敗
 
@@ -78,6 +79,7 @@ actor FakeExportSagaStore: ExportSagaStore {
     var discardExportFailure: Error?
     var loadRunningJobsFailure: Error?
     var deleteRunningJobsFailure: Error?
+    var deleteUnsettledBatchesFailure: Error?
 
     // MARK: - in-memory 状態
 
@@ -118,6 +120,7 @@ actor FakeExportSagaStore: ExportSagaStore {
     func setDiscardExportFailure(_ value: Error?) { discardExportFailure = value }
     func setLoadRunningJobsFailure(_ value: Error?) { loadRunningJobsFailure = value }
     func setDeleteRunningJobsFailure(_ value: Error?) { deleteRunningJobsFailure = value }
+    func setDeleteUnsettledBatchesFailure(_ value: Error?) { deleteUnsettledBatchesFailure = value }
     func setDiscardExportChecksCancellation(_ value: Bool) { discardExportChecksCancellation = value }
 
     /// テストが起動時復旧シナリオ等のために ExportJob を直接注入する（startExport を経由しない）
@@ -236,6 +239,14 @@ actor FakeExportSagaStore: ExportSagaStore {
             runningJobs.removeValue(forKey: exportID)
             pendingOutputsByExportID.removeValue(forKey: exportID)
         }
+    }
+
+    /// 起動時復旧の手順2（export-saga.md 5章）。この偽実装は `Batch` 行の in-memory 状態を
+    /// 持たない（Coordinator テストは呼び出し順序・失敗伝播のみを検証すればよく、Batch 行の
+    /// 実削除は Persistence 側テストの担当のため）。呼び出し記録と注入可能な失敗のみを提供する。
+    func deleteUnsettledBatches() async throws {
+        deleteUnsettledBatchesCallCount += 1
+        if let failure = deleteUnsettledBatchesFailure { throw failure }
     }
 
     /// settleExport / settleBatch 共通の確定処理（消費カウンタ加算・OutputRecord 確定・

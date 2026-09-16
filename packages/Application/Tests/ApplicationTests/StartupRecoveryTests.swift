@@ -24,7 +24,7 @@ private struct Boom: Error, Equatable {}
 
 // MARK: - 実行順序とreport生成
 
-@Test("起動時復旧はloadRunningJobs→deleteRunningJobs→resolveOrphanedAttempts→loadUnknownLibrarySavesの順で実行されreportへ反映する")
+@Test("起動時復旧はdeleteRunningJobs後にdeleteUnsettledBatchesを経て孤児GC以降を実行する")
 private func recoveryExecutesStoreCallsInOrderAndBuildsReport() async throws {
     let job = makeExportJob(exportID: makeExportID())
     let exportSagaStore = FakeExportSagaStore()
@@ -40,6 +40,9 @@ private func recoveryExecutesStoreCallsInOrderAndBuildsReport() async throws {
 
     #expect(await exportSagaStore.loadRunningJobsCallCount == 1)
     #expect(await exportSagaStore.deleteRunningJobsCalls == [[job.exportID]])
+    // export-saga.md 5章 手順2「deleteUnsettledBatches」が手順1（deleteRunningJobs）の後、
+    // 孤児ファイルGC（手順3）の前に実行されること（一括処理キュー簡素化 Issue #40 PR2 Task 3）。
+    #expect(await exportSagaStore.deleteUnsettledBatchesCallCount == 1)
     #expect(await outputDeliveryStore.resolveOrphanedAttemptsCallCount == 1)
     #expect(await outputDeliveryStore.loadUnknownLibrarySavesCallCount == 1)
     #expect(report.deletedRunningJobCount == 1)
@@ -62,7 +65,7 @@ private func loadRunningJobsFailurePropagatesAndStopsSubsequentSteps() async thr
     #expect(await outputDeliveryStore.loadUnknownLibrarySavesCallCount == 0)
 }
 
-@Test("deleteRunningJobsのthrowは以降の手順を実行させずそのまま伝播する（孤児ファイルGCも呼ばれない）")
+@Test("deleteRunningJobsのthrowは以降の手順を実行させずそのまま伝播する（deleteUnsettledBatches・孤児ファイルGCも呼ばれない）")
 private func deleteRunningJobsFailurePropagatesAndStopsSubsequentSteps() async throws {
     let exportSagaStore = FakeExportSagaStore()
     await exportSagaStore.setDeleteRunningJobsFailure(Boom())
@@ -80,8 +83,38 @@ private func deleteRunningJobsFailurePropagatesAndStopsSubsequentSteps() async t
         try await coordinator.runStartupRecovery()
     }
 
-    // export-saga.md 5章の順序では孤児ファイルGCはdeleteRunningJobsの後に実行される
-    // ため、deleteRunningJobsが伝播した時点でGCはまだ呼ばれていない（Task 11 レビュー W-4）。
+    // export-saga.md 5章の順序ではdeleteUnsettledBatches・孤児ファイルGCはdeleteRunningJobsの
+    // 後に実行されるため、deleteRunningJobsが伝播した時点でどちらもまだ呼ばれていない
+    // （Task 11 レビュー W-4、一括処理キュー簡素化 Issue #40 PR2 Task 3で同型の検証を追加）。
+    #expect(await exportSagaStore.deleteUnsettledBatchesCallCount == 0)
+    #expect(await maintenanceStore.loadPendingFileDeletionsCallCount == 0)
+    #expect(await outputDeliveryStore.resolveOrphanedAttemptsCallCount == 0)
+    #expect(await outputDeliveryStore.loadUnknownLibrarySavesCallCount == 0)
+}
+
+@Test(
+    "deleteUnsettledBatchesのthrowは以降の手順を実行させずそのまま伝播する（孤児ファイルGCは呼ばれない）"
+)
+private func deleteUnsettledBatchesFailurePropagatesAndStopsSubsequentSteps() async throws {
+    let exportSagaStore = FakeExportSagaStore()
+    await exportSagaStore.setDeleteUnsettledBatchesFailure(Boom())
+    let outputDeliveryStore = FakeOutputDeliveryStore(now: makeFixedClock())
+    let managedFileStore = FakeManagedFileStore()
+    let maintenanceStore = FakeMaintenanceStore(managedFileStore: managedFileStore)
+    let coordinator = makeCoordinator(
+        exportSagaStore: exportSagaStore,
+        outputDeliveryStore: outputDeliveryStore,
+        maintenanceStore: maintenanceStore,
+        managedFileStore: managedFileStore
+    )
+
+    await #expect(throws: Boom.self) {
+        try await coordinator.runStartupRecovery()
+    }
+
+    // deleteRunningJobsは既に成功済み（deleteUnsettledBatchesはその後で呼ばれる契約）。
+    // deleteUnsettledBatchesが伝播した時点で孤児ファイルGC以降はまだ呼ばれていない。
+    #expect(await exportSagaStore.deleteRunningJobsCalls.count == 1)
     #expect(await maintenanceStore.loadPendingFileDeletionsCallCount == 0)
     #expect(await outputDeliveryStore.resolveOrphanedAttemptsCallCount == 0)
     #expect(await outputDeliveryStore.loadUnknownLibrarySavesCallCount == 0)
@@ -108,6 +141,8 @@ private func resolveOrphanedAttemptsFailurePropagatesAndStopsSubsequentSteps() a
     // 孤児ファイルGCはresolveOrphanedAttemptsより前に実行される設計のため、
     // resolveOrphanedAttemptsが伝播した時点でGCは既に呼ばれている（Task 11 レビュー W-4。
     // runOrphanFileGC()をresolveOrphanedAttemptsの後ろへ移動する回帰をこちらが検出する）。
+    // deleteUnsettledBatchesはさらにその前（手順2）のため、この時点で既に1回呼ばれている。
+    #expect(await exportSagaStore.deleteUnsettledBatchesCallCount == 1)
     #expect(await maintenanceStore.loadPendingFileDeletionsCallCount == 1)
     #expect(await outputDeliveryStore.loadUnknownLibrarySavesCallCount == 0)
 }
@@ -192,6 +227,7 @@ private func runningRecoveryTwiceOnlyExecutesStoreCallsOnce() async throws {
 
     #expect(await exportSagaStore.loadRunningJobsCallCount == 1)
     #expect(await exportSagaStore.deleteRunningJobsCalls.count == 1)
+    #expect(await exportSagaStore.deleteUnsettledBatchesCallCount == 1)
     #expect(await outputDeliveryStore.resolveOrphanedAttemptsCallCount == 1)
     #expect(await outputDeliveryStore.loadUnknownLibrarySavesCallCount == 1)
     #expect(firstReport.deletedRunningJobCount == secondReport.deletedRunningJobCount)

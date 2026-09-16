@@ -14,9 +14,9 @@ import Domain
 
 // MARK: - BatchItemStartOutcome の判別ヘルパー（BatchTests.swift と同じ方針。private のため共有できない）
 
-private func itemFailedQueueState(_ outcome: BatchItemStartOutcome) -> ExportQueueState? {
-    if case .itemFailed(let state) = outcome { return state }
-    return nil
+private func isItemFailed(_ outcome: BatchItemStartOutcome) -> Bool {
+    if case .itemFailed = outcome { return true }
+    return false
 }
 
 private func startedJob(_ outcome: BatchItemStartOutcome) -> ExportJob? {
@@ -109,7 +109,6 @@ private func makeBatchItem(
     let reviewState = BatchReviewState(batchID: batchID, overviewConfirmed: true)
     return BatchExportItemRequest(
         batchID: batchID,
-        queueItemID: ExportQueueItemID(rawValue: UUID()),
         mode: .overview,
         batchReviewState: reviewState,
         request: request
@@ -183,10 +182,7 @@ private func missingEntryDoesNotExemptBatchItem() async throws {
 
     let outcome = try await coordinator.startBatchItem(item, capabilities: scenario.capabilities)
 
-    let expectedFailure = ExportQueueFailure(
-        errorCode: .capabilityRequired, isRetryable: false, occurredAt: Date(timeIntervalSince1970: 1_700_000_000)
-    )
-    #expect(itemFailedQueueState(outcome) == .failed(expectedFailure))
+    #expect(isItemFailed(outcome))
     let startExportCalls = await exportSagaStore.startExportCalls
     #expect(startExportCalls.isEmpty)
 }
@@ -220,7 +216,9 @@ private func exemptionStillDelegatesAccountingModeEvaluationForBatchItem() async
 
     // FakeExportSagaStore の既定ハンドラは .blocked(.monthlyLimitReached) を返す
     // （Fakes/FakeExportSagaStore.swift 冒頭コメント）。1.2 の能力ブロックを免除しても、
-    // 1.3 のクォータ評価（accountingMode）は startExport 呼び出しを経て通常どおり働くことを示す。
+    // 1.3 のクォータ評価（accountingMode）は startExport 呼び出しを経て通常どおり働き、
+    // .blocked(.monthlyLimitReached) が itemFailed に反映されることを示す
+    // （一括処理キュー簡素化 Issue #40 決定1。batchPaused 相当のケースは無くなった）。
     let exportSagaStore = FakeExportSagaStore()
     let coordinator = makeCoordinator(
         exportSagaStore: exportSagaStore,
@@ -233,11 +231,7 @@ private func exemptionStillDelegatesAccountingModeEvaluationForBatchItem() async
 
     let outcome = try await coordinator.startBatchItem(item, capabilities: scenario.capabilities)
 
-    guard case .batchPaused(let block) = outcome else {
-        Issue.record("expected .batchPaused(monthlyLimitReached) but got \(outcome)")
-        return
-    }
-    #expect(block.reason == .monthlyLimitReached)
+    #expect(isItemFailed(outcome))
     let startExportCalls = await exportSagaStore.startExportCalls
     #expect(startExportCalls.count == 1)
 }
