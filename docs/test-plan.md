@@ -205,6 +205,8 @@
 - 生成の失敗（レンダリング・移動・健全性確認の不成立）・利用者によるキャンセルが、`ExportJob` の削除と生成済みファイルのベストエフォート削除で後始末されること。**まだ何も消費していないため返還処理は不要であること**
 - **バッチ作成時に `Batch` 行へ固定された認可（1.3 の権限・クォータ）を全項目が使い、開始後の失効・昇格でこの認可が `blocked` へ変わらないこと（1.2 の能力検査は項目ごとに現在値で評価され対象外。`authorizeRenderSpec` が `blocked` を返す経路は別途 2.4 が担う）**
 - **`createBatch` が `blocked` を返す場合、`Batch` 行が作成されないこと**
+- **`Batch` 行へ固定した認可の全フィールドが、バッチ項目の `startExport` が読み戻した `ExportJob.authorization` と一致すること**
+- **バッチ項目（`batchID` あり）の `startExport` が認可を再評価しないこと。対応する `Batch` 行が無ければ fresh 評価へ落ちず throw すること**
 - **直列実行キュー1本（並列数1）が、手順1〜3（レンダリング〜健全性確認）を処理中のジョブを常に 0 件か 1 件に保つこと**（生成済み・確認待ち（`OutputRecord.settledAt == nil`）の `ExportJob` はバッチでは複数同時に存在しうる。[書き出し Saga](export-saga.md) の冒頭が正本。ADR 0005）
 - `startExport` が `expectedProjectRevision` つきで `ExportJob` 行を挿入し、revision が変わっていれば `staleProjectRevision` を返し（throw しない）、バッチの項目は `itemFailed` としてバッチが継続すること
 
@@ -296,6 +298,7 @@
 
 ### 4.2 永続化の原子性（[アーキテクチャ設計](architecture.md) の 7.1）
 
+- **`createBatch` の認可評価と `Batch` 行の挿入が単一トランザクションで成立すること（`blocked` なら行が存在しないこと）**
 - **`settleExport` / `settleBatch` の DB トランザクションが原子的であり、`OutputRecord.settledAt` の設定・`ExportRecord` / `Project` / `WorkingSourceRecord` の更新・`ExportJob` の削除が同時に成立すること**
 - **完了操作の成功後にのみ `OutputRecord.settledAt` が確定していること。途中状態（消費だけ・`settledAt` だけ等）が観測されないこと**
 - `synchronous = EXTRA` と `foreign_keys = ON` が設定され、起動時に読み返して検証されること

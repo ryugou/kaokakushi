@@ -126,7 +126,7 @@ struct ExportSetting: Sendable, Equatable {
     let compressionQuality: Double
     let metadataPolicy: MetadataPolicy
 }
-/// バッチ作成の入力。認可評価へ渡す入力の型設計は未決（アーキテクチャ設計 12 章）
+/// バッチ作成の入力（認可の評価材料は含めない。1.3「評価入力の出所」）
 struct CreateBatchInput: Sendable {
     let batchID: BatchID
     let policy: BatchPolicySnapshot   // 作成時の設定定数から作る（アーキテクチャ設計 6.4）
@@ -136,7 +136,7 @@ enum BatchCreateDecision: Sendable {
     case blocked(ExportStartBlock)          // バッチは作成されない
     case created(ExportAuthorization)       // Batch 行へ固定された認可
 }
-/// 手順 0 の入力。認可評価へ渡す入力の型設計は未決（アーキテクチャ設計 12 章）
+/// 手順 0 の入力（認可の評価材料は含めない。1.3「評価入力の出所」）
 struct StartExportInput: Sendable {
     let projectID: ProjectID
     let batchID: BatchID?
@@ -278,6 +278,8 @@ enum ExportAccountingMode: Sendable, Equatable {
 ```
 
 認可を確定する時点は**単体 = `startExport` 時／バッチ = `createBatch` 時（作成された `Batch` 行が保持する）**。`blocked` なら単体は `ExportJob` を作らず、バッチは `Batch` 行自体を作らない。**この時点では何も消費しない。** 消費は完了操作（3 章の手順5）で初めて発生する。
+
+**評価入力の出所**: 評価に使う能力・契約状態・台帳は、`CreateBatchInput` / `StartExportInput` では渡さず、実装が同一 DB トランザクション内で `app.db` の行（`SubscriptionState`〈[アーキテクチャ設計](architecture.md) の 6.2〉・`UsageLedger`〈同 6.3〉）から読んで解決する。設定定数（月間上限・クランプ上限）は実装の生成時に注入する。評価と行の挿入が同一トランザクションであることが、認可と勘定の錨の不可分性を保証する。
 
 ### 1.4 勘定の使い分け
 
@@ -453,7 +455,7 @@ struct ExportRecord: Sendable {
 ## 5. 起動時復旧
 
 1. `loadRunningJobs()` で `ExportJob` の全行を読み、`deleteRunningJobs` で行と対応する未確定（`settledAt IS NULL`）`OutputRecord` をまとめて削除する
-2. `deleteUnsettledBatches()` で、どの `ExportRecord` からも参照されない `Batch` 行（未 settle のまま中断されたバッチの残骸）を削除する（0 章）
+2. `deleteUnsettledBatches()` で、どの `ExportRecord` からも参照されない `Batch` 行（未 settle のまま中断されたバッチの残骸）を削除する（0 章）。セッション中に全項目が失敗するなどして参照ゼロになった `Batch` 行もセッション内では回収せず、この手順が次回起動時に回収する（残った行は勘定・表示のどちらにも影響しない）
 3. 出力先・一時ディレクトリの孤児ファイル（どの `OutputRecord` からも参照されないファイル）を GC で回収する
 4. `resolveOrphanedAttempts()` を実行し、残存 `DeliveryAttempt` を `previousState` に応じて解決する（7 章）
 5. `loadUnknownLibrarySaves()` で残っている注記を読み、未受け渡し出力（`settledAt != nil` かつ未受け渡し）の復旧案内を提示する

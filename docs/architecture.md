@@ -1194,7 +1194,7 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `StampAsset` | プロジェクトが参照する不変の画像実体のメタデータ。内容ハッシュを主キーとする（7.5） |
 | `ProjectStampAsset` | プロジェクトと `StampAsset` の対応（7.5） |
 | `ExportRecord` | 仕様 19.7。`batchID` を追加 |
-| `Batch` | バッチ単位の履歴。`BatchPolicySnapshot` と認可スナップショットを持つ（6.4） |
+| `Batch` | バッチ単位の履歴。`BatchPolicySnapshot` と認可スナップショット（`ExportAuthorization` と同内容。作成時に固定し、バッチ項目の `startExport` が読み戻して `ExportJob.authorization` へ固定する）を持つ（6.4） |
 | `BatchPreset` | 一括設定プリセット |
 | `DeliveryAttempt` | 写真ライブラリ保存の試行中を表す。`previousState` を持つ（[書き出し Saga](export-saga.md) が正本） |
 | `UnknownLibrarySave` | 保存結果が不明のまま `delivered` を維持したことの記録 |
@@ -2269,4 +2269,3 @@ v1 のリリース範囲、動画の扱い、課金訴求の分類、利用者�
 | カスタムスタンプの保存解像度 | 長辺 1,024px は暫定。顔が大きく写る素材での見え方を実機で確認（7.5） | v1 実機検証時 |
 | トライアルのクレジット数 | 5 枚は暫定。転換率を見て調整可能な設定値とする | リリース後 |
 | 一括処理の同時並列数を 2 へ引き上げるか | v1 は 1 固定。引き上げには開始順序の再設計と実機計測が要る | v2 検討時 |
-| `createBatch` / `startExport` の認可評価に要る入力の型設計 | `CreateBatchInput`（[書き出し Saga](export-saga.md) 0 章）と `StartExportInput`（同）に、`capabilityVerificationRequired` の判定へ要る能力・権限の解決結果（`CapabilityResolution` / `Entitlement` 等）を渡す入力が無く、現状の型のままでは実装できない。単体（`StartExportInput`）とバッチ（`CreateBatchInput`）の両方を対称に閉じる必要がある。**暫定運用: v1 実装着手前に、両入力へ渡す評価済み値の型設計を別途確定する（本改訂の範囲外）** | v1 実装着手前 |
