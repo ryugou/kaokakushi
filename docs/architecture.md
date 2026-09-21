@@ -1688,7 +1688,7 @@ struct DeletionContext: Sendable {
 
 **v1 では `Project` に `isFavorite` / `isBeingEdited` の列が無く、お気に入り・編集中の上書き可能保護は機能しない（常に非保護扱い）。** 列の追加と判定の有効化は Issue #23 で行う（`WorkingSourceRecord` による保護は列を必要としないため v1 でも機能する）。
 
-**履歴は写真アプリ型のフラットな写真グリッドであり、閲覧・削除の単位は `Project` のみとする**（バッチのグルーピングは処理の単位としてのみ存在し、閲覧・削除の単位ではない。[商品面の決定](product-decisions.md)）。`Batch` 行自体は利用者が直接削除する対象ではなく、自動削除の契機は 2 つに限る: **`Project` 削除 Saga の後始末**として、その `batchID` を参照する `ExportRecord` / `OutputRecord` / `ExportJob` の残数が合計 0 になったときに消える（条件と手順の正本は下記「`Project` 削除 Saga」）。それ以外の契機（全項目の失敗など）で参照ゼロになった行はセッション内では消えず、**次回起動時の起動時復旧**が回収する（[書き出し Saga](export-saga.md) の 5 章）。
+**履歴は写真アプリ型のフラットな写真グリッドであり、閲覧・削除の単位は `Project` のみとする**（バッチのグルーピングは処理の単位としてのみ存在し、閲覧・削除の単位ではない。[商品面の決定](product-decisions.md)）。`Batch` 行自体は利用者が直接削除する対象ではなく、自動削除の契機は 2 つに限る: **`Project` 削除 Saga の後始末**として、その `batchID` を参照する `ExportRecord` / `OutputRecord` / `ExportJob` の残数が合計 0 になったときに消える（条件と手順の正本は下記「`Project` 削除 Saga」）。それ以外の契機（全項目の失敗など）で参照ゼロになった行はセッション内では消えず、**次回起動時の起動時復旧**が回収する（[書き出し Saga](export-saga.md) の 5 章）。**実行中のバッチでこの後始末が発火することはない**（手順 2 の `batchID` 集合は削除対象 `Project` の `ExportRecord` から得るが、settle 前の項目の `Project` は `ExportRecord` を持たないため集合に現れず〈下記〉、生成済み項目の `Project` は `ExportJob` の絶対保護で削除自体が拒否される。settle 後に残った `paused` 項目がバッチとして再開されるフローは無い〈完了操作は結果一覧での 1 回でバッチのフローを終え（[書き出し Saga](export-saga.md) の 3 章）、以降の再処理は常に単体書き出し: 下記〉）。
 
 **参照元は 2 種類に分かれます。**
 
