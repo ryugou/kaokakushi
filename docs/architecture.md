@@ -1386,7 +1386,12 @@ protocol ManagedFileStore: Sendable {
         _ body: @Sendable (URL) async throws -> R
     ) async throws -> R
 
-    /// 新規作成。body が書いた一時ファイルを、復帰後に上の順序で確定する
+    /// 新規作成。body が書いた一時ファイルを、復帰後に上の順序で確定する。
+    /// 返す `ManagedFileRef` は常に新規であり、過去に発行したどの参照とも一致しない
+    /// （`ManagedFileID` の `UUID` を採番のたびに新しく生成することで満たす。発行済み ID の
+    /// 台帳は持たず、UUID を再利用しないことを前提とする。削除済み・削除予定の参照が新しい
+    /// ファイルとして再登場しないこと、したがって `PendingFileDeletion` に残った参照が現用の
+    /// 実体を指さないことを、参照を保持する各 Saga はこの契約に依存してよい）
     func createFile<R: Sendable>(
         kind: ManagedFileKind,
         _ body: @Sendable (URL) async throws -> R
@@ -1532,7 +1537,7 @@ protocol ProtectedDataAvailability: Sendable {
 - **履歴のサムネイルには加工後の画像のみを使用する**（隠す前の顔が一覧に並ばないように）
 - **アプリ専用領域へ元画像の完全コピーを永続保存しない**（保持するのは写真ライブラリへの参照と編集設定のみ。処理用コピーは書き出し完了後に削除する）
 
-元素材が削除・権限喪失した場合、過去の設定情報は表示できるが再編集はできない（仕様 18.3）。**再編集には素材の再接続が要る**（`WorkingSourceRecord` は完了操作（settle）で削除されるため、履歴から開いた `Project` はほぼ常に素材を持たず、利用者が写真を選び直すことで再接続する。再接続の判定は [画像処理](image-pipeline.md) の `WorkingSourceRecord` が正本であり、勘定には使わない。ADR 0006）。
+元素材が削除・権限喪失した場合、過去の設定情報は表示できるが再編集はできない（仕様 18.3）。**再編集には素材の再接続が要る**（`WorkingSourceRecord` は完了操作（settle）で削除されるため、履歴から開いた `Project` はほぼ常に素材を持たず、利用者が写真を選び直すことで再接続する。再接続の判定は [画像処理](image-pipeline.md) の `WorkingSourceRecord` が正本であり、勘定には使わない。ADR 0006）。再選択で置換された旧 `sourceFile` も、置換と同一の DB トランザクションで `PendingFileDeletion` へ登録し、コミット後に実体を削除する（旧ファイル参照の登録とコミット後の削除は `invalidateWorkingSource`〈6.4〉と同じ経路。ただし `WorkingSourceRecord` の行は削除しない。正本は [画像処理](image-pipeline.md) の `WorkingSourceStore.replaceWorkingSource`）。再接続は `WorkingSourceRecord` を新規作成する経路であり、置換対象の旧 `sourceFile` を持たない。
 
 ##### 保存期間と容量
 

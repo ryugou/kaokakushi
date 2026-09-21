@@ -277,6 +277,7 @@
 - **履歴の既存 `Project` へ `attachWorkingSourceToExistingProject` で再接続できること。選び直された写真は常に新しい素材として扱われること**（ADR 0006）
 - **再接続が `detectionRevision` / `projectRevision` を増やし、検出結果を再利用しないこと**
 - **再選択が顔検出をやり直し、`detectionRevision` と `projectRevision` を増やし、旧 `FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` を破棄すること**
+- **再選択を連続で行っても（同じ写真を選び直す A→B→A を含む。選び直しのたびに新しい参照になる）、現在の `WorkingSourceRecord` が参照する実体が削除対象にならないこと**
 - **`PreviewConfirmation` が DB に存在せず、`detectionRevision` の増加だけで確認が無効になること**
 - **`isTerminal` が `completed` / `failed` / `canceled` のみ真であり、バッチ完了判定と UI の進行表示が同じ述語を使うこと。履歴削除の可否判定・起動時復旧がこの述語を参照しないこと**（キュー状態はセッション内のメモリにしか存在しない。[アーキテクチャ設計](architecture.md) の 6.4）
 
@@ -322,7 +323,10 @@
 - **インポート Saga が `PickedPhotoInput.importedFile` を作り直さず、所有権を受け取ること**
 - **DB 確定（手順 3）の後に取り込みファイルが削除され、削除失敗時は `PendingFileDeletion` へ積まれること**
 - **DB 確定より前に取り込みファイルを削除しないこと**
-- **再選択・再接続の成功経路でも候補ファイル（正規化前の旧 `sourceFile`）が削除されること**
+- **`replaceWorkingSource` が置換と旧 `sourceFile` の `PendingFileDeletion` 登録を単一 DB トランザクションで行うこと（置換が失敗したら登録も残らないこと）**
+- **`replaceWorkingSource` のコミット前に旧実体を削除せず、コミット後に旧実体だけが削除され、成功時に対応する `PendingFileDeletion` の行が消えること。削除に失敗した場合は行が残り、起動時 GC の再試行で削除・消去されること**
+- **新旧の `sourceFile` が同一参照の場合、`PendingFileDeletion` へ登録しないこと**（現在参照中の実体を削除しない）
+- **`attachWorkingSourceToExistingProject` の経路では、置換対象の旧 `sourceFile` が無いため、旧実体の `PendingFileDeletion` 登録も削除も発生しないこと**
 - **「Free 版として複製」で新しい `projectID` の `WorkingSourceRecord` が作られ、処理用ファイルが元 `Project` と共有されないこと**
 - **複製の DB 失敗（手順 3）で、手順 2 で作成した実体ファイルが補償削除されること（`WorkingSourceRecord` 行は単一 DB トランザクション内で作られるためロールバックで消える）**
 - **元素材の実体が無い場合、`WorkingSourceRecord` を作らず複製すること**
