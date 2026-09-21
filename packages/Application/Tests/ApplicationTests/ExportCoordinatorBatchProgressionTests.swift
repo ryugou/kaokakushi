@@ -9,7 +9,7 @@ import Domain
 //
 // 正本: architecture.md 6.4「一枚の失敗でバッチ全体を停止しない」、export-saga.md 1.5
 // （開始後に有料契約の失効・月間上限への到達・昇格が起きても無視し、バッチ開始時の認可
-// スナップショットで全項目を完了させる＝batchPaused 相当のケースは存在しない）、
+// スナップショットで全項目を完了させる＝バッチ全体を止める特別なケースは存在しない）、
 // Domain/Queue/QueueMachine.swift の queueStateAfterAuthorization（1.2 の能力ブロックの
 // 判定にのみ使う）。
 //
@@ -109,13 +109,6 @@ private func makeBatchItem(
     )
 }
 
-/// projectID を問わず authorized を返す exportSagaStore（バッチ継続を検証する複数テストで共有）。
-private func makeAuthorizingExportSagaStore(batchID: BatchID) -> FakeExportSagaStore {
-    FakeExportSagaStore(startExportHandler: { input, _ in
-        .authorized(makeExportJob(exportID: makeExportID(), projectID: input.projectID, batchID: batchID))
-    })
-}
-
 // MARK: - 1.2 能力ブロック（itemFailed）
 
 @Test("1.2能力検査がblockedならitemFailedを返し、次の写真の開始は妨げられない")
@@ -134,7 +127,8 @@ private func capabilityBlockedItemDoesNotStopSubsequentItems() async throws {
             managedFileStore: managedFileStore
         )
     }
-    let exportSagaStore = makeAuthorizingExportSagaStore(batchID: batchID)
+    let exportSagaStore = FakeExportSagaStore()
+    _ = try await createAuthorizedBatch(exportSagaStore, batchID: batchID)
     let catalog = FakeStampCatalog(requirementsByCode: ["seasonal-cat": .premium(packID: "seasonal")])
     let coordinator = makeCoordinator(
         exportSagaStore: exportSagaStore,
@@ -158,18 +152,31 @@ private func capabilityBlockedItemDoesNotStopSubsequentItems() async throws {
 
 @Test("実体欠損の項目はitemPausedになりinvalidateWorkingSourceが呼ばれ、バッチは継続する")
 private func missingWorkingSourceReturnsItemPausedAndBatchContinues() async throws {
+    // 「実体欠損」= WorkingSourceRecord の行はあるが実体ファイルが無い経路（export-saga.md
+    // 1.6 手順3）。行自体が無い経路は itemFailed に写像され invalidateWorkingSource を
+    // 呼ばないため区別する（ExportCoordinatorBatchStartConditionTests.swift 参照）。
     let batchID = makeBatchID()
     let missingItem = try makeBatchItem(batchID: batchID, mode: .overview)
     let nextItem = try makeBatchItem(batchID: batchID, mode: .overview)
-    let workingSourceStore = FakeWorkingSourceStore() // missingItem は seed しない → 実体欠損
-    let managedFileStore = FakeManagedFileStore()
+    let sourceFileRef = try makeWorkingSourceFileRef()
+    let workingSourceStore = FakeWorkingSourceStore()
+    await workingSourceStore.seedWorkingSource(
+        WorkingSourceRecord(
+            projectID: missingItem.request.projectID,
+            sourceFile: sourceFileRef,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+    )
+    let managedFileStore = FakeManagedFileStore() // ref を seed しない → 実体欠損
     try await seedWorkingSource(
         projectID: nextItem.request.projectID,
         workingSourceStore: workingSourceStore,
         managedFileStore: managedFileStore
     )
+    let exportSagaStore = FakeExportSagaStore()
+    _ = try await createAuthorizedBatch(exportSagaStore, batchID: batchID)
     let coordinator = makeCoordinator(
-        exportSagaStore: makeAuthorizingExportSagaStore(batchID: batchID),
+        exportSagaStore: exportSagaStore,
         workingSourceStore: workingSourceStore,
         managedFileStore: managedFileStore
     )
@@ -196,8 +203,10 @@ private func confirmationMismatchDoesNotStopBatch() async throws {
         workingSourceStore: workingSourceStore,
         managedFileStore: managedFileStore
     )
+    let exportSagaStore = FakeExportSagaStore()
+    _ = try await createAuthorizedBatch(exportSagaStore, batchID: batchID)
     let coordinator = makeCoordinator(
-        exportSagaStore: makeAuthorizingExportSagaStore(batchID: batchID),
+        exportSagaStore: exportSagaStore,
         workingSourceStore: workingSourceStore,
         managedFileStore: managedFileStore
     )
@@ -209,36 +218,10 @@ private func confirmationMismatchDoesNotStopBatch() async throws {
     #expect(startedJob(nextOutcome) != nil)
 }
 
-// MARK: - 1.3 権限クォータブロック（itemFailed。batchPaused 相当のケースは無くなった）
-
-@Test("1.3の権限・クォータブロックはitemFailedを返し、次の写真の開始は妨げられない")
-private func quotaBlockedItemDoesNotStopSubsequentItems() async throws {
-    let batchID = makeBatchID()
-    let blockedItem = try makeBatchItem(batchID: batchID, mode: .overview)
-    let nextItem = try makeBatchItem(batchID: batchID, mode: .overview)
-    let workingSourceStore = FakeWorkingSourceStore()
-    let managedFileStore = FakeManagedFileStore()
-    for item in [blockedItem, nextItem] {
-        try await seedWorkingSource(
-            projectID: item.request.projectID,
-            workingSourceStore: workingSourceStore,
-            managedFileStore: managedFileStore
-        )
-    }
-    let exportSagaStore = FakeExportSagaStore(startExportHandler: { input, _ in
-        input.projectID == blockedItem.request.projectID
-            ? .blocked(ExportStartBlock(reason: .monthlyLimitReached, limit: 5))
-            : .authorized(makeExportJob(exportID: makeExportID(), projectID: input.projectID, batchID: batchID))
-    })
-    let coordinator = makeCoordinator(
-        exportSagaStore: exportSagaStore,
-        workingSourceStore: workingSourceStore,
-        managedFileStore: managedFileStore
-    )
-
-    let blockedOutcome = try await coordinator.startBatchItem(blockedItem, capabilities: makeResolvedCapabilities())
-    let nextOutcome = try await coordinator.startBatchItem(nextItem, capabilities: makeResolvedCapabilities())
-
-    #expect(isItemFailed(blockedOutcome))
-    #expect(startedJob(nextOutcome) != nil)
-}
+// 1.3 の権限・クォータ評価はバッチ項目ごとに再評価されない（export-saga.md 1.6 手順4:
+// バッチ項目の startExport は評価せず、Batch 行に固定された認可をそのまま ExportJob.authorization
+// へコピーする。ExportStartDecision.blocked は batchID == nil の呼び出しでのみ返り、バッチ項目
+// では起こらない）。「バッチ項目単位で1.3がblockedになり、それでもバッチが継続する」という
+// シナリオはこの契約と構造的に矛盾するため削除した。1.3のブロックはバッチ全体＝createBatch
+// 時点で一度だけ発生し、その検証は Persistence 層の ExportSagaStoreCreateBatchTests.swift が
+// 担う（Application 層は createBatch 自体を呼ぶ公開 API を持たないためスコープ外）。

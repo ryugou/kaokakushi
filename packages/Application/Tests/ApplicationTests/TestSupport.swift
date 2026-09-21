@@ -333,6 +333,33 @@ actor OneShotGate {
     }
 }
 
+/// テストセットアップの前提が崩れた場合の内部エラー（`fatalError` の代わりに throw で
+/// #expect が失敗理由を表示できるようにする）。複数のバッチ系テストファイルに同一定義が
+/// 重複していたため、createAuthorizedBatch と合わせてここへ集約する（simplify レビュー指摘）。
+enum TestSetupError: Error {
+    case createBatchNotCreated
+}
+
+/// createBatch を実際に呼び、Batch 行へ固定された認可を返す（一括処理キュー簡素化 Issue #40
+/// 決定2。バッチ項目の認可は startExport のたびに再評価されず、createBatch 時点で固定される。
+/// FakeExportSagaStore の startExport バッチ経路〈input.batchID != nil〉はこの固定済み認可を
+/// 読むだけで、無ければ本物と同じ契約で batchNotFound を throw する）。
+func createAuthorizedBatch(
+    _ exportSagaStore: FakeExportSagaStore, batchID: BatchID
+) async throws -> ExportAuthorization {
+    let decision = try await exportSagaStore.createBatch(
+        CreateBatchInput(
+            batchID: batchID,
+            policy: BatchPolicySnapshot(kind: .proBatch, batchSizeLimit: 50, trialCreditCount: 0, concurrencyLimit: 1),
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+    )
+    guard case .created(let authorization) = decision else {
+        throw TestSetupError.createBatchNotCreated
+    }
+    return authorization
+}
+
 /// 単体トライアル可・広告表示ありの標準的な ResolvedCapabilities フィクスチャ。
 func makeResolvedCapabilities(
     canUsePremiumStamps: Bool = true,

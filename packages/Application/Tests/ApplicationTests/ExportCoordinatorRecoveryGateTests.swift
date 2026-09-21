@@ -199,8 +199,8 @@ private func startBatchItemWaitsForRecoveryGateThenProceeds() async throws {
     )
     let managedFileStore = FakeManagedFileStore()
     await managedFileStore.seedExistingFile(sourceFileRef.ref)
-    let expectedJob = makeExportJob(exportID: makeExportID(), projectID: projectID, batchID: batchID)
-    let exportSagaStore = FakeExportSagaStore(startExportHandler: { _, _ in .authorized(expectedJob) })
+    let exportSagaStore = FakeExportSagaStore()
+    _ = try await createAuthorizedBatch(exportSagaStore, batchID: batchID)
     let gate = FakeRecoveryGate(isOpen: false)
     let coordinator = makeCoordinator(
         exportSagaStore: exportSagaStore,
@@ -217,5 +217,5 @@ private func startBatchItemWaitsForRecoveryGateThenProceeds() async throws {
     await gate.open()
     let outcome = try await task.value
 
-    #expect(startedBatchJob(outcome)?.exportID == expectedJob.exportID)
+    #expect(startedBatchJob(outcome)?.batchID == batchID)
 }

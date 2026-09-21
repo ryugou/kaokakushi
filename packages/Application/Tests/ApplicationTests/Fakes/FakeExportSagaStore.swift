@@ -19,8 +19,10 @@ import Domain
 
 /// `startExport` の revision 不一致など、この偽実装が検査する事前条件違反。
 enum FakeExportSagaStoreError: Error, Sendable, Equatable {
-    /// startExport: expectedProjectRevision が projectRevisions に設定した値と一致しない
-    case projectRevisionMismatch(projectID: ProjectID, expected: Int64, actual: Int64)
+    /// startExport: バッチ経路で対応する Batch 行（batchAuthorizations）が無い
+    /// （本物の ExportSagaStoreError.batchNotFound と同じ契約。createBatch が先に呼ばれている
+    /// 契約のため、無ければ異常系）
+    case batchNotFound(BatchID)
     /// recordGeneratedOutput / settleExport: 対象 exportID の ExportJob 行が無い
     /// （startExport が成功していない、または既に settle/discard/起動時復旧で削除済み）
     case exportJobNotFound(ExportID)
@@ -61,6 +63,7 @@ struct FakeDiscardExportCall: Sendable {
 actor FakeExportSagaStore: ExportSagaStore {
     // MARK: - 呼び出し記録
 
+    private(set) var createBatchCalls: [CreateBatchInput] = []
     private(set) var startExportCalls: [FakeStartExportCall] = []
     private(set) var recordGeneratedOutputCalls: [RecordOutputInput] = []
     private(set) var settleExportCalls: [ExportID] = []
@@ -72,6 +75,7 @@ actor FakeExportSagaStore: ExportSagaStore {
 
     // MARK: - 注入可能な失敗
 
+    var createBatchFailure: Error?
     var startExportFailure: Error?
     var recordGeneratedOutputFailure: Error?
     var settleExportFailure: Error?
@@ -83,10 +87,21 @@ actor FakeExportSagaStore: ExportSagaStore {
 
     // MARK: - in-memory 状態
 
-    /// startExport の可否をテストが決める（上記ファイル冒頭コメントの判断）
+    /// createBatch の可否をテストが決める（startExportHandler と同じパターン）。デフォルトは
+    /// 常に `.created` を返す（多くのテストはバッチ認可の成立だけを前提とするため）。
+    var createBatchHandler: @Sendable (CreateBatchInput) -> BatchCreateDecision
+    /// startExport の可否をテストが決める（上記ファイル冒頭コメントの判断）。単体経路
+    /// （batchID == nil）でのみ呼ばれる。バッチ経路は batchAuthorizations を使う
+    /// （下記 startExport 実装のコメント参照）。
     var startExportHandler: @Sendable (StartExportInput, Int64) -> ExportStartDecision
     /// startExport が検査する revision。テストが事前に設定する（未設定の projectID は 0 扱い）
     var projectRevisions: [ProjectID: Int64] = [:]
+    /// createBatch で `.created` になった Batch 行の固定済み認可（batchID をキーに保持。
+    /// `.blocked` は Batch 行が作られないため格納しない）。startExport のバッチ経路
+    /// （batchID != nil）はこれをそのまま使い、startExportHandler を呼ばない（Persistence 側の
+    /// 新契約 ExportSagaStoreLive+Start.swift「再評価しない」と同じ設計。一括処理キュー簡素化
+    /// Issue #40 決定2）。
+    private var batchAuthorizations: [BatchID: ExportAuthorization] = [:]
     /// ExportJob 行。startExport(.authorized) 挿入・settle/discard/起動時復旧削除で更新する
     private var runningJobs: [ExportID: ExportJob] = [:]
     /// settledAt なしの確認用 OutputRecord。recordGeneratedOutput の重複検査・settle の消費対象
@@ -106,13 +121,20 @@ actor FakeExportSagaStore: ExportSagaStore {
     init(
         startExportHandler: @escaping @Sendable (StartExportInput, Int64) -> ExportStartDecision = { _, _ in
             .blocked(ExportStartBlock(reason: .monthlyLimitReached, limit: nil))
+        },
+        createBatchHandler: @escaping @Sendable (CreateBatchInput) -> BatchCreateDecision = { input in
+            .created(ExportAuthorization(
+                entitlementSnapshot: makeEntitlement(), accountingMode: .paidUnlimited, authorizedAt: input.createdAt
+            ))
         }
     ) {
         self.startExportHandler = startExportHandler
+        self.createBatchHandler = createBatchHandler
     }
 
     // MARK: - 失敗注入セッター（actor 隔離のため外部から直接代入できない。Issue #7 Task 4 準備）
 
+    func setCreateBatchFailure(_ value: Error?) { createBatchFailure = value }
     func setStartExportFailure(_ value: Error?) { startExportFailure = value }
     func setRecordGeneratedOutputFailure(_ value: Error?) { recordGeneratedOutputFailure = value }
     func setSettleExportFailure(_ value: Error?) { settleExportFailure = value }
@@ -139,6 +161,25 @@ actor FakeExportSagaStore: ExportSagaStore {
 
     // MARK: - ExportSagaStore
 
+    /// バッチ作成（Domain の doc コメント参照）。`.created` になった認可を batchAuthorizations
+    /// へ固定する（`.blocked` は格納しない。Batch 行が作られないため）。
+    func createBatch(_ input: CreateBatchInput) async throws -> BatchCreateDecision {
+        createBatchCalls.append(input)
+        if let failure = createBatchFailure { throw failure }
+        let decision = createBatchHandler(input)
+        if case .created(let authorization) = decision {
+            batchAuthorizations[input.batchID] = authorization
+        }
+        return decision
+    }
+
+    /// expectedProjectRevision 不一致は throw ではなく `.staleProjectRevision`
+    /// （Domain の契約変更。ExportSagaStore.swift の doc コメントが正）。バッチ経路
+    /// （input.batchID != nil）は createBatch が固定した認可をそのまま使い、
+    /// startExportHandler を呼ばない（再評価しない。Persistence 側の新契約と同じ）。対応する
+    /// Batch 行（batchAuthorizations）が無ければ本物と同じ契約で batchNotFound を throw する
+    /// （createBatch が先に呼ばれている契約のため、無ければ異常系）。単体経路（batchID == nil）
+    /// は現状どおり startExportHandler を呼ぶ。
     func startExport(
         _ input: StartExportInput,
         expectedProjectRevision: Int64
@@ -147,9 +188,21 @@ actor FakeExportSagaStore: ExportSagaStore {
         if let failure = startExportFailure { throw failure }
         let storedRevision = projectRevisions[input.projectID] ?? 0
         guard storedRevision == expectedProjectRevision else {
-            throw FakeExportSagaStoreError.projectRevisionMismatch(
-                projectID: input.projectID, expected: expectedProjectRevision, actual: storedRevision
+            return .staleProjectRevision
+        }
+        if let batchID = input.batchID {
+            guard let authorization = batchAuthorizations[batchID] else {
+                throw FakeExportSagaStoreError.batchNotFound(batchID)
+            }
+            let job = ExportJob(
+                exportID: ExportID(rawValue: UUID()),
+                projectID: input.projectID,
+                batchID: batchID,
+                authorization: authorization,
+                delivery: OutputDeliveryDescriptor(format: input.exportSetting.outputFormat, suggestedCreationDate: nil)
             )
+            runningJobs[job.exportID] = job
+            return .authorized(job)
         }
         let decision = startExportHandler(input, expectedProjectRevision)
         if case .authorized(let job) = decision {
@@ -241,12 +294,15 @@ actor FakeExportSagaStore: ExportSagaStore {
         }
     }
 
-    /// 起動時復旧の手順2（export-saga.md 5章）。この偽実装は `Batch` 行の in-memory 状態を
-    /// 持たない（Coordinator テストは呼び出し順序・失敗伝播のみを検証すればよく、Batch 行の
-    /// 実削除は Persistence 側テストの担当のため）。呼び出し記録と注入可能な失敗のみを提供する。
+    /// 起動時復旧の手順2（export-saga.md 5章）。本物は `DELETE FROM Batch` で Batch 行を
+    /// 削除するため、この偽実装も `batchAuthorizations` を同じタイミングでクリアする
+    /// （reviewer指摘 W-2）。クリア後に同じ batchID で startExport のバッチ経路を呼ぶと、
+    /// 本物と同じ契約で batchNotFound になる。Coordinator テストが検証するのは主に呼び出し
+    /// 順序・失敗伝播だが、Batch 行削除の副作用まで再現しておく方が実ストアとの乖離が無い。
     func deleteUnsettledBatches() async throws {
         deleteUnsettledBatchesCallCount += 1
         if let failure = deleteUnsettledBatchesFailure { throw failure }
+        batchAuthorizations.removeAll()
     }
 
     /// settleExport / settleBatch 共通の確定処理（消費カウンタ加算・OutputRecord 確定・

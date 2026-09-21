@@ -142,8 +142,8 @@ private func exemptionAllowsBatchItemToStartWhenSettingsHashMatches() async thro
         )
     )
 
-    let expectedJob = makeExportJob(exportID: makeExportID(), projectID: item.request.projectID, batchID: batchID)
-    let exportSagaStore = FakeExportSagaStore(startExportHandler: { _, _ in .authorized(expectedJob) })
+    let exportSagaStore = FakeExportSagaStore()
+    _ = try await createAuthorizedBatch(exportSagaStore, batchID: batchID)
     let coordinator = makeCoordinator(
         exportSagaStore: exportSagaStore,
         workingSourceStore: workingSourceStore,
@@ -156,7 +156,7 @@ private func exemptionAllowsBatchItemToStartWhenSettingsHashMatches() async thro
     let outcome = try await coordinator.startBatchItem(item, capabilities: scenario.capabilities)
 
     let job = try #require(startedJob(outcome))
-    #expect(job.exportID == expectedJob.exportID)
+    #expect(job.batchID == batchID)
     let startExportCalls = await exportSagaStore.startExportCalls
     #expect(startExportCalls.count == 1)
 }
@@ -187,51 +187,10 @@ private func missingEntryDoesNotExemptBatchItem() async throws {
     #expect(startExportCalls.isEmpty)
 }
 
-// MARK: - 免除成立後もaccountingModeの消費評価は通常どおりstartExportに委ねられる
-
-@Test("バッチ項目の免除成立後もstartExportが呼ばれ、accountingModeの評価は通常どおりstoreに委ねられる")
-private func exemptionStillDelegatesAccountingModeEvaluationForBatchItem() async throws {
-    let scenario = try makeDowngradedPremiumStampScenario()
-    let batchID = makeBatchID()
-    let item = try makeBatchItem(batchID: batchID, renderSpec: scenario.renderSpec)
-
-    let workingSourceStore = FakeWorkingSourceStore()
-    let managedFileStore = FakeManagedFileStore()
-    try await seedWorkingSource(
-        projectID: item.request.projectID, workingSourceStore: workingSourceStore, managedFileStore: managedFileStore
-    )
-
-    let digest = FakeSha256Digest()
-    let matchingHash = try projectSettingsHash(
-        renderSpec: item.request.renderSpec, exportSetting: item.request.exportSetting, digest: digest
-    )
-    let entryStore = FakeExportedSettingsEntryStore()
-    await entryStore.seedEntry(
-        ExportedSettingsEntry(
-            projectID: item.request.projectID,
-            settingsHash: matchingHash,
-            exportedAt: Date(timeIntervalSince1970: 1_699_000_000)
-        )
-    )
-
-    // FakeExportSagaStore の既定ハンドラは .blocked(.monthlyLimitReached) を返す
-    // （Fakes/FakeExportSagaStore.swift 冒頭コメント）。1.2 の能力ブロックを免除しても、
-    // 1.3 のクォータ評価（accountingMode）は startExport 呼び出しを経て通常どおり働き、
-    // .blocked(.monthlyLimitReached) が itemFailed に反映されることを示す
-    // （一括処理キュー簡素化 Issue #40 決定1。batchPaused 相当のケースは無くなった）。
-    let exportSagaStore = FakeExportSagaStore()
-    let coordinator = makeCoordinator(
-        exportSagaStore: exportSagaStore,
-        workingSourceStore: workingSourceStore,
-        managedFileStore: managedFileStore,
-        stampCatalog: scenario.catalog,
-        exportedSettingsEntryStore: entryStore,
-        settingsHashDigest: digest
-    )
-
-    let outcome = try await coordinator.startBatchItem(item, capabilities: scenario.capabilities)
-
-    #expect(isItemFailed(outcome))
-    let startExportCalls = await exportSagaStore.startExportCalls
-    #expect(startExportCalls.count == 1)
-}
+// バッチ項目の startExport は 1.3（権限・クォータ／accountingMode）を評価しない
+// （export-saga.md 1.6 手順4: Batch 行に固定された認可をそのまま ExportJob.authorization へ
+// コピーするだけ。ExportStartDecision.blocked は batchID == nil の呼び出しでのみ返る）。
+// 「1.2 の能力ブロックを免除した後も 1.3 の評価が startExport 経由で働き blocked になる」という
+// シナリオはこの契約と構造的に矛盾するため削除した。1.3 の評価は createBatch 時点で一度だけ
+// 行われ、その検証は Persistence 層の ExportSagaStoreCreateBatchTests.swift が担う
+// （Application 層は createBatch 自体を呼ぶ公開 API を持たないためスコープ外）。

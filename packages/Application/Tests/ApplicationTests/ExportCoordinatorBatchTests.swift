@@ -122,15 +122,15 @@ private func overviewModeStartsWhenOverviewConfirmedTrue() async throws {
     try await seedWorkingSource(
         projectID: item.request.projectID, workingSourceStore: workingSourceStore, managedFileStore: managedFileStore
     )
-    let expectedJob = makeExportJob(exportID: makeExportID(), projectID: item.request.projectID, batchID: batchID)
-    let exportSagaStore = FakeExportSagaStore(startExportHandler: { _, _ in .authorized(expectedJob) })
+    let exportSagaStore = FakeExportSagaStore()
+    _ = try await createAuthorizedBatch(exportSagaStore, batchID: batchID)
     let coordinator = makeCoordinator(
         exportSagaStore: exportSagaStore, workingSourceStore: workingSourceStore, managedFileStore: managedFileStore
     )
 
     let outcome = try await coordinator.startBatchItem(item, capabilities: makeResolvedCapabilities())
 
-    #expect(startedJob(outcome)?.exportID == expectedJob.exportID)
+    #expect(startedJob(outcome)?.batchID == batchID)
 }
 
 @Test("おまかせ一括はoverviewConfirmed==falseならconfirmationMismatchで開始しない")
@@ -156,15 +156,15 @@ private func perPhotoModeStartsWhenIsReviewedTrue() async throws {
     try await seedWorkingSource(
         projectID: item.request.projectID, workingSourceStore: workingSourceStore, managedFileStore: managedFileStore
     )
-    let expectedJob = makeExportJob(exportID: makeExportID(), projectID: item.request.projectID, batchID: batchID)
-    let exportSagaStore = FakeExportSagaStore(startExportHandler: { _, _ in .authorized(expectedJob) })
+    let exportSagaStore = FakeExportSagaStore()
+    _ = try await createAuthorizedBatch(exportSagaStore, batchID: batchID)
     let coordinator = makeCoordinator(
         exportSagaStore: exportSagaStore, workingSourceStore: workingSourceStore, managedFileStore: managedFileStore
     )
 
     let outcome = try await coordinator.startBatchItem(item, capabilities: makeResolvedCapabilities())
 
-    #expect(startedJob(outcome)?.exportID == expectedJob.exportID)
+    #expect(startedJob(outcome)?.batchID == batchID)
 }
 
 @Test("1枚ずつ確認はisReviewed==falseならconfirmationMismatchで開始しない（reviewRequired かつ unreviewed）")
@@ -212,15 +212,15 @@ private func fullyAuthorizedBatchItemPassesBatchID() async throws {
     try await seedWorkingSource(
         projectID: item.request.projectID, workingSourceStore: workingSourceStore, managedFileStore: managedFileStore
     )
-    let expectedJob = makeExportJob(exportID: makeExportID(), projectID: item.request.projectID, batchID: batchID)
-    let exportSagaStore = FakeExportSagaStore(startExportHandler: { _, _ in .authorized(expectedJob) })
+    let exportSagaStore = FakeExportSagaStore()
+    _ = try await createAuthorizedBatch(exportSagaStore, batchID: batchID)
     let coordinator = makeCoordinator(
         exportSagaStore: exportSagaStore, workingSourceStore: workingSourceStore, managedFileStore: managedFileStore
     )
 
     let outcome = try await coordinator.startBatchItem(item, capabilities: makeResolvedCapabilities())
 
-    #expect(startedJob(outcome)?.exportID == expectedJob.exportID)
+    #expect(startedJob(outcome)?.batchID == batchID)
     let startExportCalls = await exportSagaStore.startExportCalls
     #expect(startExportCalls.count == 1)
     #expect(startExportCalls.first?.input.batchID == batchID)
@@ -246,9 +246,8 @@ private func concurrentBatchItemsNeverOverlapInProcessing() async throws {
             managedFileStore: managedFileStore
         )
     }
-    let exportSagaStore = FakeExportSagaStore(startExportHandler: { input, _ in
-        .authorized(makeExportJob(exportID: makeExportID(), projectID: input.projectID, batchID: batchID))
-    })
+    let exportSagaStore = FakeExportSagaStore()
+    _ = try await createAuthorizedBatch(exportSagaStore, batchID: batchID)
     let pipeline = makeSucceedingGenerationPipeline()
     await pipeline.renderer.setResult(pipeline.rendered)
     await pipeline.renderer.setDelayNanoseconds(2_000_000)
@@ -293,18 +292,14 @@ private func batchItemsCompleteWithStartSnapshotDespitePermissionLossAfterFirstS
         workingSourceStore: workingSourceStore,
         managedFileStore: managedFileStore
     )
-    let runningJob = makeExportJob(exportID: makeExportID(), projectID: runningItem.request.projectID, batchID: batchID)
-    let waitingJob = makeExportJob(exportID: makeExportID(), projectID: waitingItem.request.projectID, batchID: batchID)
-    // Persistence 側のスナップショット再利用（一括処理キュー簡素化 Issue #40 決定2）は、
-    // 同一 batchID の先行 ExportJob の authorization をそのまま使って2件目以降も authorized を
-    // 返す。開始後の契約失効・月間上限到達・昇格を無視するため、この Fake は projectID に
-    // 関わらず authorized を返す形でその挙動をシミュレートする（test-plan.md :206、
-    // export-saga.md 1.5）。
-    let exportSagaStore = FakeExportSagaStore(startExportHandler: { input, _ in
-        input.projectID == waitingItem.request.projectID
-            ? .authorized(waitingJob)
-            : .authorized(runningJob)
-    })
+    let exportSagaStore = FakeExportSagaStore()
+    // createBatch がバッチ開始時点の認可を Batch 行へ固定する（一括処理キュー簡素化
+    // Issue #40 決定2）。startExport のバッチ経路（FakeExportSagaStore.swift）はこの
+    // batchAuthorizations を読むだけで startExportHandler を呼ばず再評価しない。
+    // 「先行項目の開始後に契約の失効・月間上限到達・昇格が起きても無視する」（1.5）は
+    // Fake の分岐ロジックではなく、この固定済み認可がそのまま両方の項目へ使われる
+    // ことによって表現される。
+    let fixedAuthorization = try await createAuthorizedBatch(exportSagaStore, batchID: batchID)
     let pipeline = makeSucceedingGenerationPipeline()
     await pipeline.renderer.setResult(pipeline.rendered)
     await pipeline.encoder.setResult(pipeline.encoded)
@@ -322,11 +317,20 @@ private func batchItemsCompleteWithStartSnapshotDespitePermissionLossAfterFirstS
     try await coordinator.generateOutput(try makeGenerateExportInput(job: job))
 
     // ここで契約の失効・月間上限への到達・昇格が起きたとしても、1.5「バッチ開始時の認可
-    // スナップショットで全項目を完了させる」により waitingItem も started で開始できる。
+    // スナップショットで全項目を完了させる」により waitingItem も started で開始できる
+    // （createBatch 後は Fake の startExport バッチ経路が固定済み認可しか参照しないため、
+    // capabilities の再評価が構造的に起こり得ない）。
     let waitingOutcome = try await coordinator.startBatchItem(waitingItem, capabilities: makeResolvedCapabilities())
     let waitingStartedJob = try #require(startedJob(waitingOutcome))
     try await coordinator.generateOutput(try makeGenerateExportInput(job: waitingStartedJob))
 
+    #expect(job.authorization.authorizedAt == fixedAuthorization.authorizedAt)
+    #expect(waitingStartedJob.authorization.authorizedAt == fixedAuthorization.authorizedAt)
+    #expect(waitingStartedJob.authorization.accountingMode == fixedAuthorization.accountingMode)
     let recordCalls = await exportSagaStore.recordGeneratedOutputCalls
     #expect(Set(recordCalls.map(\.exportID)) == Set([job.exportID, waitingStartedJob.exportID]))
 }
+
+// 実体確認（WorkingSourceRecord 行欠損 / 実体ファイル欠損）・revision 不一致のバッチ経路検証は
+// ファイル行数制約（Global Constraints）のため ExportCoordinatorBatchStartConditionTests.swift
+// へ分離する（ExportCoordinatorBatchProgressionTests.swift と同じ方針）。
