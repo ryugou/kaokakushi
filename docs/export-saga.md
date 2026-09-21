@@ -21,7 +21,12 @@
 // Domain — Foundation のみ
 
 protocol ExportSagaStore: Sendable {
-    /// 認可を評価し ExportJob を挿入する（1 章）。expectedProjectRevision と不一致なら throw
+    /// バッチを作成する。認可（1.3）の評価と Batch 行の挿入を単一 DB トランザクションで行い、
+    /// 評価した認可を Batch 行へ固定する。blocked ならバッチを作らず理由を返す（行は挿入されない）
+    func createBatch(_ input: CreateBatchInput) async throws -> BatchCreateDecision
+    /// ExportJob を挿入する（1 章）。input.batchID == nil なら認可（1.3）をこの場で評価し、
+    /// 非 nil なら対応する Batch 行に固定済みの認可を読む（再評価しない。1.5）。
+    /// expectedProjectRevision と不一致なら `.staleProjectRevision` を返す（throw しない）
     func startExport(_ input: StartExportInput, expectedProjectRevision: Int64) async throws -> ExportStartDecision
     /// 確認用の OutputRecord(settledAt: nil) を作成する（3 章）。同じ projectID の未確定 OutputRecord が
     /// 既に存在すれば throw（部分 UNIQUE 制約。詳細は 3 章）。台帳・ExportRecord・WorkingSourceRecord には触れない
@@ -121,7 +126,17 @@ struct ExportSetting: Sendable, Equatable {
     let compressionQuality: Double
     let metadataPolicy: MetadataPolicy
 }
-/// 手順 0 の入力
+/// バッチ作成の入力（認可の評価材料は含めない。1.3「評価入力の出所」）
+struct CreateBatchInput: Sendable {
+    let batchID: BatchID
+    let policy: BatchPolicySnapshot   // 作成時の設定定数から作る（アーキテクチャ設計 6.4）
+    let createdAt: Date
+}
+enum BatchCreateDecision: Sendable {
+    case blocked(ExportStartBlock)          // バッチは作成されない
+    case created(ExportAuthorization)       // Batch 行へ固定された認可
+}
+/// 手順 0 の入力（認可の評価材料は含めない。1.3「評価入力の出所」）
 struct StartExportInput: Sendable {
     let projectID: ProjectID
     let batchID: BatchID?
@@ -138,6 +153,9 @@ struct RecordOutputInput: Sendable {
 }
 enum ExportStartDecision: Sendable {
     case blocked(ExportStartBlock)
+    /// 1.6 の手順 5: expectedProjectRevision の不一致。ExportJob は作られない。
+    /// バッチの項目は itemFailed（1.6）、単体はそのまま不開始として利用者へ返る
+    case staleProjectRevision
     case authorized(ExportJob)
 }
 // OutputDeliverySnapshot の定義はアーキテクチャ設計 7.5
@@ -151,7 +169,7 @@ enum ExportStartDecision: Sendable {
 
 ## 1. 認可
 
-認可は 1.1（確認の一致）と 1.2（能力）の検査、および 1.3（権限・クォータ）の評価を、開始時に一度だけ行う。いずれか不成立なら開始しない。`ExportJob` が存在する間、対象 `Project` の編集を禁止する（2 章）ため、開始後に設定が変わる経路は無い。
+認可は 1.1（確認の一致）と 1.2（能力）の検査を各項目の開始時に一度だけ行う。1.3（権限・クォータ）の評価は単体 = `startExport` 時／バッチ = `createBatch` 時に一度だけ行う（詳細は 1.3）。いずれか不成立なら開始しない。`ExportJob` が存在する間、対象 `Project` の編集を禁止する（2 章）ため、開始後に設定が変わる経路は無い。
 
 ### 1.1 確認済みの設定でのみ書き出す
 
@@ -178,7 +196,7 @@ struct BatchReviewState: Sendable, Equatable {
 
 保存済みの `ReviewDecision` をそのまま信頼し、`triage` を再実行して独立に再検証することはしない（利用者自身による端末内データの改変には対抗しない。[ADR 0005](adr/0005-drop-tamper-resistance-backend-and-heavy-fault-tolerance.md)）。
 
-`projectID` を含めるのは `PreviewRenderHash` が `Project` を特定しないため。`detectionRevision` を含めるのは再検出後の顔集合差し替えを検出するため。`Project.projectRevision` は別途、手順 0 で `ExportJob` の insert と同一トランザクションで比較する（変わっていれば insert が失敗し、開始しない）。
+`projectID` を含めるのは `PreviewRenderHash` が `Project` を特定しないため。`detectionRevision` を含めるのは再検出後の顔集合差し替えを検出するため。`Project.projectRevision` は別途、3 章の手順 0 で `ExportJob` の insert と同一トランザクションで比較する（変わっていれば `staleProjectRevision` を返し、`ExportJob` は作られない）。
 
 ### 1.2 設定内容の能力
 
@@ -240,9 +258,10 @@ struct ExportAuthorization: Sendable {
 }
 enum ExportStartBlockReason: Sendable, Equatable {
     case monthlyLimitReached, trialCreditsUnavailable
-    case capabilityVerificationRequired   // entitlementSnapshot.verificationRequired、
+    case capabilityVerificationRequired   // CapabilityResolution.verificationRequired、
                                           // または開始時点の能力が勘定の前提（proBatch の
-                                          // canUseProBatch）を満たさない（1.6 手順4 で評価する）。
+                                          // canUseProBatch）を満たさない
+                                          // （バッチは createBatch 時、単体は 1.6 手順 4 で評価する）。
                                           // batchTrial は能力ゲートでブロックしない
                                           // （作成時の可否は canEnterBatch が担う）
 }
@@ -258,7 +277,9 @@ enum ExportAccountingMode: Sendable, Equatable {
 }
 ```
 
-書き出し開始時点で利用権限と勘定を確定し、`ExportJob.authorization` に固定する。`blocked` なら `ExportJob` を作らず、生成も開始しない。**この時点では何も消費しない。** 消費は完了操作（3 章の手順5）で初めて発生する。
+認可を確定する時点は**単体 = `startExport` 時／バッチ = `createBatch` 時（作成された `Batch` 行が保持する）**。`blocked` なら単体は `ExportJob` を作らず、バッチは `Batch` 行自体を作らない。**この時点では何も消費しない。** 消費は完了操作（3 章の手順5）で初めて発生する。
+
+**評価入力の出所**: 評価に使う能力・契約状態・台帳は、`CreateBatchInput` / `StartExportInput` では渡さず、実装が同一 DB トランザクション内で `app.db` の行から読んで解決する。能力・契約状態は**永続化済みの `SubscriptionState` 行のみ**を `resolveCapabilities`（[アーキテクチャ設計](architecture.md) の 6.2）へ `loaded`（行あり）/ `missing`（行なし）として渡し、解決が `verificationRequired` なら `capabilityVerificationRequired` の `blocked` へ倒す（安全側）。6.2 にある RevenueCat への問い合わせとメモリ上の検証済み `Entitlement` による維持は**セッションの能力解決（UI の活性判定）の規則**であり、認可はその結果が `SubscriptionState` へ永続化されてはじめて反映する（キャッシュ未検証のまま認可だけが通る経路を作らない）。台帳は `UsageLedger` 行を読む（同 6.3）。設定定数（月間上限・クランプ上限）は実装の生成時に注入する。評価と行の挿入が同一トランザクションであることが、認可と勘定の錨の不可分性を保証する。
 
 ### 1.4 勘定の使い分け
 
@@ -274,17 +295,19 @@ enum ExportAccountingMode: Sendable, Equatable {
 
 ### 1.5 開始後の権限変化
 
-開始後に有料契約の失効・月間上限への到達・昇格が起きても無視し、バッチ開始時の認可スナップショットで全項目を完了させる。単体書き出しも同じ規則で、開始時の権限（`ExportJob.authorization`）のまま完了させる。
+バッチの認可はバッチ作成時（`createBatch`）に評価され `Batch` 行へ固定される。各項目の `startExport` はこれを読むだけで再評価しないため、開始後の失効・月間上限への到達・昇格は評価自体が起きず構造的に無視される。単体書き出しは開始時の権限（`ExportJob.authorization`）のまま完了させる。
 
 ### 1.6 開始の順序
 
-直列実行キュー1本（並列数1）が同時実行を構造的に防ぐため、専用の排他ゲートや素材単位のロックは不要。**バッチの項目で手順1・2・4・5のいずれかが不成立に終わった場合、または手順3で `WorkingSourceRecord` の行自体が存在しない場合、該当項目だけがセッション内で `failed`（`BatchItemStartOutcome.itemFailed`）として扱われ、バッチの残り項目は続行する**（一枚の失敗でバッチ全体を止めない既存則。[アーキテクチャ設計](architecture.md) の 6.4）。**単体書き出しでは、この不成立がそのまま書き出し全体の不開始として利用者へ返る**（バッチと違い継続すべき「残り項目」が無いため）。
+直列実行キュー1本（並列数1）が同時実行を構造的に防ぐため、専用の排他ゲートや素材単位のロックは不要。**バッチの項目で手順1・2・5のいずれかが不成立に終わった場合、または手順3で `WorkingSourceRecord` の行自体が存在しない場合、該当項目だけがセッション内で `failed`（`BatchItemStartOutcome.itemFailed`）として扱われ、バッチの残り項目は続行する**（一枚の失敗でバッチ全体を止めない既存則。[アーキテクチャ設計](architecture.md) の 6.4）。**単体書き出しでは、この不成立がそのまま書き出し全体の不開始として利用者へ返る**（バッチと違い継続すべき「残り項目」が無いため）。
+
+バッチでは、バッチの最初の項目が 1.6 の手順 1 に入る直前に、Coordinator が一度だけ `createBatch` を呼ぶ。`blocked` ならバッチを作らず、いずれの項目もこの手順に入らない。`created` の場合のみ、以下の手順を各項目に対して実行する。
 
 1. 確認の一致を検査する（1.1）。不一致なら終える（バッチの項目はここで `itemFailed`）
 2. 設定内容の能力を検査する（1.2）。`blocked` なら終える（バッチの項目はここで `itemFailed`）
 3. `WorkingSourceRecord` を検査する（[画像処理](image-pipeline.md)）。**行自体が存在しなければ**（`Project` が履歴削除された等。FK CASCADE で行ごと消えるため再選択で復帰できない）終える（バッチの項目はここで `itemFailed`。`AppErrorCode.sourceMissing`。[アーキテクチャ設計](architecture.md) の 9.1）。**行はあるが実体ファイルが無ければ** `invalidateWorkingSource` で無効化し、再選択導線へ倒して終える（バッチの項目については下記 `BatchItemStartOutcome.itemPaused` が結果を表す）。素材参照は `projectID` を介した `WorkingSourceRecord` を使う（素材の同一性照合は行わない。ADR 0006）
-4. 権限とクォータを評価する（1.3）。`.blocked` ならここで終える（バッチの項目はここで `itemFailed`）。**バッチ内で最初にこの手順へ到達した項目が `ExportAuthorization` を確定させ、以降の項目はこの評価をそのスナップショットでそのまま満たし、個別に再評価しない**（先行する項目が手順1〜3で `itemFailed` になっても、最初に到達した項目の認可がスナップショットになる。1.5。開始後の失効・昇格を無視するのはこの再評価をしないことで実現する）
-5. `startExport` で `ExportJob` を挿入する（`expectedProjectRevision` つき）。revision が変わっていれば失敗し、終える（バッチの項目はここで `itemFailed`）
+4. 権限とクォータを評価する（1.3）。単体は `.blocked` ならここで終える。バッチの項目は評価せず、`Batch` 行に固定された認可をそのまま `ExportJob.authorization` へコピーする（`ExportStartDecision.blocked` は `batchID == nil` の呼び出しでのみ返り、バッチ項目では起こらない）
+5. `startExport` で `ExportJob` を挿入する（`expectedProjectRevision` つき）。revision が変わっていれば `staleProjectRevision` で終える（バッチの項目はここで `itemFailed`。例外ではなく `ExportStartDecision` で返る）
 6. 処理を開始する（3 章）
 
 上記はバッチの各項目にも単体書き出しにも共通する順序。バッチの Coordinator は項目ごとの結果を次の型で扱う。
@@ -298,8 +321,8 @@ enum BatchItemStartOutcome: Sendable {
     /// 該当項目だけがセッション内で paused(.sourceReselectionRequired) として扱われる。
     /// バッチの残り項目は続行する
     case itemPaused
-    /// 手順 1・2・4・5 のいずれかが不成立（確認不一致・能力不足・権限クォータ不足・
-    /// revision 不一致）、または手順 3 で `WorkingSourceRecord` の行自体が存在しない
+    /// 手順 1・2・5 のいずれかが不成立（確認不一致・能力不足・revision 不一致）、
+    /// または手順 3 で `WorkingSourceRecord` の行自体が存在しない
     /// （AppErrorCode.sourceMissing）。該当項目だけがセッション内で failed として
     /// 扱われる。バッチの残り項目は続行する
     case itemFailed
@@ -315,7 +338,8 @@ struct ExportJob: Sendable {
     let exportID: ExportID
     let projectID: ProjectID
     let batchID: BatchID?
-    let authorization: ExportAuthorization   // 開始時に固定する（1.5）
+    let authorization: ExportAuthorization   // 単体は startExport 時に評価した値、バッチは
+                                              // Batch 行に固定された値をコピーする（1.3 / 1.5）
     let delivery: OutputDeliveryDescriptor   // 認可時に確定。生成時に OutputRecord へコピーする
 }
 struct OutputDeliveryDescriptor: Sendable {
@@ -340,7 +364,7 @@ struct OutputDeliveryDescriptor: Sendable {
 
 | 順 | 操作 | 保存先 | 結果 |
 | --- | --- | --- | --- |
-| 0 | 認可を評価し、`ExportJob` を保存する（1 章） | DB | `ExportJob` 作成 |
+| 0 | 単体は認可を評価し、バッチは `Batch` 行に固定された認可を読み、`ExportJob` を保存する（1 章） | DB | `ExportJob` 作成 |
 | 1 | レンダリングし、一時ファイルへ出力する | ファイルシステム | — |
 | 2 | 一時ファイルを出力ディレクトリへ移動する | ファイルシステム | — |
 | 3 | 出力ファイルの健全性を確認する（下記） | ファイルシステム | — |
@@ -431,7 +455,7 @@ struct ExportRecord: Sendable {
 ## 5. 起動時復旧
 
 1. `loadRunningJobs()` で `ExportJob` の全行を読み、`deleteRunningJobs` で行と対応する未確定（`settledAt IS NULL`）`OutputRecord` をまとめて削除する
-2. `deleteUnsettledBatches()` で、どの `ExportRecord` からも参照されない `Batch` 行（未 settle のまま中断されたバッチの残骸）を削除する（0 章）
+2. `deleteUnsettledBatches()` で、どの `ExportRecord` からも参照されない `Batch` 行（未 settle のまま中断されたバッチの残骸）を削除する（0 章）。セッション中に全項目が失敗するなどして参照ゼロになった `Batch` 行もセッション内では回収せず、この手順が次回起動時に回収する（残った行は勘定・表示のどちらにも影響しない）
 3. 出力先・一時ディレクトリの孤児ファイル（どの `OutputRecord` からも参照されないファイル）を GC で回収する
 4. `resolveOrphanedAttempts()` を実行し、残存 `DeliveryAttempt` を `previousState` に応じて解決する（7 章）
 5. `loadUnknownLibrarySaves()` で残っている注記を読み、未受け渡し出力（`settledAt != nil` かつ未受け渡し）の復旧案内を提示する

@@ -1033,9 +1033,9 @@ case .oneByOne:
 
 1 枚ずつ確認では `normal` の写真も確認を待つため `review_required` になる（「警告あり」定義では未確認の `normal` 写真がキュー上そう見えなくなる）。
 
-##### 開始時の設定を固定する
+##### 作成時の設定と認可を固定する
 
-**実行中のバッチは開始時点の設定定数（10 章）のスナップショットで動く**（作成後に設定定数を読み直さないため、バッチ内の全項目が同じ上限・並列数で扱われる）。
+**実行中のバッチは作成時点の設定定数（10 章）のスナップショットで動く**（作成後に設定定数を読み直さないため、バッチ内の全項目が同じ上限・並列数で扱われる）。
 
 ```swift
 struct BatchPolicySnapshot: Sendable, Equatable {
@@ -1053,7 +1053,7 @@ enum BatchKind: UInt32, Sendable, Hashable {
 }
 ```
 
-`Batch` の行が保持する。作成時に確定し、実行中は設定変更を反映しない（読み直して適用すると同一バッチの実行中に上限が変わってしまう）。
+`Batch` の行が保持する。作成時に確定し、実行中は設定変更を反映しない（読み直して適用すると同一バッチの実行中に上限が変わってしまう）。認可（`ExportAuthorization`）も同様に作成時（`createBatch`）に確定し `Batch` 行が保持する（再評価しない）。作成の契約の正本は [書き出し Saga](export-saga.md) の 0 章 `createBatch` と 1.3 とする。
 
 **列値を固定する**（値は上記コードブロックの raw value が正本。`Batch` の DB 列としてスキーマ移行をまたぐため、`case` 宣言順に依存させると版によって `trial` のバッチが `proBatch` として上限 50 でクランプされうる。`OutputState` と同じ規則。7.5）。新しいバッチの作成時は、その時点の設定定数（10 章）から作る。
 
@@ -1194,7 +1194,7 @@ GRDB（SQLite）を使います。採用理由は [ADR 0002](adr/0002-grdb-and-s
 | `StampAsset` | プロジェクトが参照する不変の画像実体のメタデータ。内容ハッシュを主キーとする（7.5） |
 | `ProjectStampAsset` | プロジェクトと `StampAsset` の対応（7.5） |
 | `ExportRecord` | 仕様 19.7。`batchID` を追加 |
-| `Batch` | バッチ単位の履歴。`BatchPolicySnapshot` を持つ（6.4） |
+| `Batch` | バッチ単位の履歴。`BatchPolicySnapshot` と認可スナップショット（`ExportAuthorization` と同内容。作成時に固定し、バッチ項目の `startExport` が読み戻して `ExportJob.authorization` へ固定する）を持つ（6.4） |
 | `BatchPreset` | 一括設定プリセット |
 | `DeliveryAttempt` | 写真ライブラリ保存の試行中を表す。`previousState` を持つ（[書き出し Saga](export-saga.md) が正本） |
 | `UnknownLibrarySave` | 保存結果が不明のまま `delivered` を維持したことの記録 |
@@ -1688,7 +1688,7 @@ struct DeletionContext: Sendable {
 
 **v1 では `Project` に `isFavorite` / `isBeingEdited` の列が無く、お気に入り・編集中の上書き可能保護は機能しない（常に非保護扱い）。** 列の追加と判定の有効化は Issue #23 で行う（`WorkingSourceRecord` による保護は列を必要としないため v1 でも機能する）。
 
-**履歴は写真アプリ型のフラットな写真グリッドであり、閲覧・削除の単位は `Project` のみとする**（バッチのグルーピングは処理の単位としてのみ存在し、閲覧・削除の単位ではない。[商品面の決定](product-decisions.md)）。`Batch` 行自体は利用者が直接削除する対象ではなく、その `batchID` を参照する `ExportRecord` / `OutputRecord` / `ExportJob` の残数が合計 0 になったときに自動的に消える（条件と手順の正本は下記「`Project` 削除 Saga」。起動時点でどの `ExportRecord` からも参照されない未 settle の残骸は、これとは別経路の起動時復旧が削除する。[書き出し Saga](export-saga.md) の 5 章）。
+**履歴は写真アプリ型のフラットな写真グリッドであり、閲覧・削除の単位は `Project` のみとする**（バッチのグルーピングは処理の単位としてのみ存在し、閲覧・削除の単位ではない。[商品面の決定](product-decisions.md)）。`Batch` 行自体は利用者が直接削除する対象ではなく、自動削除の契機は 2 つに限る: **`Project` 削除 Saga の後始末**として、その `batchID` を参照する `ExportRecord` / `OutputRecord` / `ExportJob` の残数が合計 0 になったときに消える（条件と手順の正本は下記「`Project` 削除 Saga」）。それ以外の契機（全項目の失敗など）で参照ゼロになった行はセッション内では消えず、**次回起動時の起動時復旧**が回収する（[書き出し Saga](export-saga.md) の 5 章）。**実行中のバッチでこの後始末が発火することはない**（手順 2 の `batchID` 集合は削除対象 `Project` の `ExportRecord` から得るが、settle 前の項目の `Project` は `ExportRecord` を持たないため集合に現れず〈下記〉、生成済み項目の `Project` は `ExportJob` の絶対保護で削除自体が拒否される。settle 後に残った `paused` 項目がバッチとして再開されるフローは無い〈完了操作は結果一覧での 1 回でバッチのフローを終え（[書き出し Saga](export-saga.md) の 3 章）、以降の再処理は常に単体書き出し: 下記〉）。
 
 **参照元は 2 種類に分かれます。**
 

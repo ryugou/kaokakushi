@@ -173,7 +173,7 @@
 - ストレージ必要量計算、`ExportQueueState` 状態機械
 - **履歴の保存期間と容量判定。容量超過時にも、完了前のやり直しは無制限のまま保たれ、完了済み未受け渡し出力（`isUndelivered`）の 24 時間保護は絶対保護として維持されること**
 - **絶対保護（処理中の `ExportJob` / `isUndelivered` の `OutputRecord` / 試行中の `DeliveryAttempt`）が、手動削除でも拒否されること**
-- **`waiting` 中の `Project` が削除されたバッチ項目は、`WorkingSourceRecord` の行欠損（FK CASCADE）として失敗し（`itemFailed`・`AppErrorCode.sourceMissing`。実体ファイル欠損の `itemPaused` ではない）、バッチ全体を止めないこと**（ADR 0005）
+- **`WorkingSourceRecord` の行が無い場合（`waiting` 中の `Project` が削除された場合など。FK CASCADE で行ごと消える）は `invalidateWorkingSource` を呼ばずに `itemFailed`（`AppErrorCode.sourceMissing`）として失敗し、行はあるが実体ファイルが無い場合のみ `invalidateWorkingSource` を経て `itemPaused` になること。いずれもバッチ全体を止めないこと**（ADR 0005）
 - **お気に入り・編集中・`WorkingSourceRecord`（`OverridableProtection` の 3 値）が、自動削除では保護され、明示確認付きの手動削除では上書きできること**（お気に入り・編集中は v1 では `Project` に列が無く検証不能。Issue #23 で有効化。`WorkingSourceRecord` は v1 でも検証可能）
 - **上書き対象ごとに、失われるものを示す確認文言が選ばれること**
 - 未保存バッチが 1 件までに制限されること
@@ -195,17 +195,20 @@
 - 単体の開始条件が現在の `projectID` / `detectionRevision` / `previewRenderHash` の一致であること。バッチはこれに加え `BatchReviewState.batchID` の一致とモード別の確認条件を満たすこと
 - `reviewRequired` かつ `unreviewed` の写真が残っていれば開始しないこと
 - `WorkingSourceRecord` の実体は `ManagedFileStore.exists` で確認すること。`false`（実体無し）でのみ無効化して再選択導線へ倒し、確認自体の失敗（保護データ利用不可・I/O 障害）による `throw` は欠損として扱わないこと
-- 権限とクォータの評価で `.blocked` なら `ExportJob` を作らず、生成も開始しないこと
-- **バッチの項目で 1.6 の手順 1・2・4・5（確認の一致・能力・権限とクォータ・revision）のいずれかが不成立の場合、または手順 3 で `WorkingSourceRecord` の行自体が存在しない場合、該当項目が `BatchItemStartOutcome.itemFailed` としてセッション内で扱われ、バッチの残り項目が続行すること。単体書き出しでは同じ不成立がそのまま書き出し全体の不開始になること**（[書き出し Saga](export-saga.md) の 1.6）
-- 手順 0：`startExport` が `expectedProjectRevision` と不一致なら `throw` し、一致すれば `ExportJob` を挿入すること
+- 単体の権限とクォータの評価で `.blocked` なら `ExportJob` を作らず、生成も開始しないこと
+- **バッチの項目で 1.6 の手順 1・2・5（確認の一致・能力・revision）のいずれかが不成立の場合、または手順 3 で `WorkingSourceRecord` の行自体が存在しない場合、該当項目が `BatchItemStartOutcome.itemFailed` としてセッション内で扱われ、バッチの残り項目が続行すること。単体書き出しでは同じ不成立がそのまま書き出し全体の不開始になること**（[書き出し Saga](export-saga.md) の 1.6）
+- 手順 0：`startExport` が `expectedProjectRevision` と不一致なら `staleProjectRevision` を返し（throw しない）、一致すれば `ExportJob` を挿入すること
 - **生成の完了時点（`recordGeneratedOutput`）では `OutputRecord`（`settledAt: nil`）と出力ファイルだけが作られること。月間枠・トライアルクレジットのいずれも消費されないこと**（ADR 0006）
 - **生成の完了時点で `ExportRecord` が作成されないこと。確定記録（`ExportedSettingsEntry`）も更新されないこと**
 - **生成の完了時点で `WorkingSourceRecord` が削除されず保持され、素材を再レンダリングできること**
 - **健全性確認**: `OutputFileVerifier.verify` が存在確認・サイズが 0 でないこと・簡易デコード成功の3検査を行うこと。3検査のいずれかの不成立、または一時的な I/O 障害（`.ioFailure`）による確認失敗のいずれでも中断として扱うこと
 - 生成の失敗（レンダリング・移動・健全性確認の不成立）・利用者によるキャンセルが、`ExportJob` の削除と生成済みファイルのベストエフォート削除で後始末されること。**まだ何も消費していないため返還処理は不要であること**
-- **開始後に契約の失効・月間上限への到達・昇格が起きても無視され、バッチ内の全項目がバッチ開始時の認可スナップショットのまま生成を完了すること**
+- **バッチ作成時に `Batch` 行へ固定された認可（1.3 の権限・クォータ）を全項目が使い、開始後の失効・昇格でこの認可が `blocked` へ変わらないこと（1.2 の能力検査は項目ごとに現在値で評価され対象外。`authorizeRenderSpec` が `blocked` を返す経路は別途 2.4 が担う）**
+- **`createBatch` が `blocked` を返す場合、`Batch` 行が作成されないこと**
+- **`Batch` 行へ固定した認可の全フィールドが、バッチ項目の `startExport` が読み戻した `ExportJob.authorization` と一致すること**
+- **バッチ項目（`batchID` あり）の `startExport` が認可を再評価しないこと。対応する `Batch` 行が無ければ fresh 評価へ落ちず throw すること**
 - **直列実行キュー1本（並列数1）が、手順1〜3（レンダリング〜健全性確認）を処理中のジョブを常に 0 件か 1 件に保つこと**（生成済み・確認待ち（`OutputRecord.settledAt == nil`）の `ExportJob` はバッチでは複数同時に存在しうる。[書き出し Saga](export-saga.md) の冒頭が正本。ADR 0005）
-- `startExport` が `expectedProjectRevision` つきで `ExportJob` 行を挿入し、revision が変わっていれば失敗すること
+- `startExport` が `expectedProjectRevision` つきで `ExportJob` 行を挿入し、revision が変わっていれば `staleProjectRevision` を返し（throw しない）、バッチの項目は `itemFailed` としてバッチが継続すること
 
 ### 3.2 完了（`settleExport` / `settleBatch`）
 
@@ -295,6 +298,7 @@
 
 ### 4.2 永続化の原子性（[アーキテクチャ設計](architecture.md) の 7.1）
 
+- **`createBatch` の認可評価と `Batch` 行の挿入が単一トランザクションで成立すること（`blocked` なら行が存在しないこと）**
 - **`settleExport` / `settleBatch` の DB トランザクションが原子的であり、`OutputRecord.settledAt` の設定・`ExportRecord` / `Project` / `WorkingSourceRecord` の更新・`ExportJob` の削除が同時に成立すること**
 - **完了操作の成功後にのみ `OutputRecord.settledAt` が確定していること。途中状態（消費だけ・`settledAt` だけ等）が観測されないこと**
 - `synchronous = EXTRA` と `foreign_keys = ON` が設定され、起動時に読み返して検証されること
