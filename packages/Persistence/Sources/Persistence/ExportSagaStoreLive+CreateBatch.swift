@@ -24,34 +24,28 @@ import GRDB
 // 分岐のため共有ヘルパー化しない）。
 
 extension ExportSagaStoreLive {
-    /// バッチを作成する（レビュー指摘Warning 1対応: 認可の評価時刻と記録時刻の分離）。
+    /// バッチを作成する（レビュー指摘C-1・W-1対応: authorizedAtを評価時刻`now()`に統一する）。
     ///
-    /// - 認可の評価（resolveVerifiedCapabilities・失効判定）には注入時計`now()`を使う。
-    ///   `input.createdAt`はCreateBatchInput（Domain/Ports/ExportSagaStore.swift）の
-    ///   docコメントに明記のとおり「認可の評価材料は含めない」対象であり、評価に使うと
-    ///   呼び出し元が古い時刻を渡した場合に失効済みentitlementでもバッチ作成が通ってしまう
-    ///   （ResolveCapabilities.swiftのisExpired判定が`usageNow >= expiresAt`のため、
-    ///   古いusageNowはfail-closedを崩す）。startExport（+Start.swiftの
-    ///   `let authorizedAt = now()`）と同型にするため、書き込みトランザクションを開く前に
-    ///   評価時刻を確定させる。
-    /// - 評価時刻の契約は「この関数の呼び出し開始時点」であり、`database.dbQueue.write`が
-    ///   実際にトランザクションを開始した時点ではない。そのため、DBキューが混雑して
-    ///   書き込み開始まで待機している間にentitlementが失効すると、失効直前の
-    ///   `usageNow`で評価された認可がBatch行へ固定され得る（codexレビュー指摘）。
-    ///   これはexport-saga.md 1.5「開始後に有料契約の失効・月間上限への到達・昇格が
-    ///   起きても無視し、バッチ開始時の認可スナップショットで全項目を完了させる」が
-    ///   既に明示的に受容している範囲の内側である——バッチは作成後の失効を無視して
-    ///   全項目を完走する仕様であり、その許容時間はバッチ全体の実行時間（分〜時間の
-    ///   規模）に及ぶ。DBキュー待機（ミリ秒〜秒の規模）はそれより桁違いに小さく、
-    ///   新たな損失区分を生まない。
-    /// - この評価時刻はstore自身の注入時計から取得され、呼び出し元が制御できる値では
-    ///   ない点が、`input.createdAt`を評価に使っていた旧実装との決定的な違いである。
-    ///   `now()`を`dbQueue.write`のクロージャ内へ移せばこの窓は縮小できるが、評価直後・
-    ///   コミット直前の失効は残るため除去はできない。さらにその変更はstartExportとの
-    ///   対称性を崩す（対称性の回復自体が前回の修正の目的だったため矛盾する）。ゆえに
-    ///   トランザクション外での取得を意図的に維持する。
-    /// - `input.createdAt`はBatch行の`authorizedAt`列（＝「呼び出し元が記録する作成時刻」）
-    ///   としてのみ使う。評価用時刻とは役割が異なるため、`now()`の値で上書きしない。
+    /// - 認可の評価（resolveVerifiedCapabilities・失効判定）とBatch行`authorizedAt`列の記録の
+    ///   両方に、注入時計`now()`（`usageNow`）を使う。startExport（単体経路。+Start.swiftの
+    ///   `let authorizedAt = now()`）と完全に同じ意味論——「authorizedAtは認可を評価した
+    ///   時刻」——に揃える。評価と記録を分離する理由はない: 認可はこの関数が`now()`を
+    ///   読んだ時点で確定するのであり、それ以外の時刻（呼び出し元が用意した作成時刻）を
+    ///   「認可した時刻」として記録すると、障害調査で「いつ認可されたか」を追うときに
+    ///   実際の評価時刻と乖離した値を見ることになる（運用時の追跡可能性を損なう）。
+    /// - 旧実装は`input.createdAt`（呼び出し元が渡す作成時刻）をauthorizedAt列に記録して
+    ///   いたが、この分離自体が問題の原因だったため撤回した。`CreateBatchInput.createdAt`は
+    ///   この撤回により消費者が無くなったためDomainのフィールド自体を削除した
+    ///   （Domain/Ports/ExportSagaStore.swift・docs/export-saga.md 0章）。
+    /// - `now()`は書き込みトランザクションを開く前、この関数の呼び出し開始時点で1回だけ
+    ///   読む。`database.dbQueue.write`が実際にトランザクションを開始した時点ではない。
+    ///   そのため、DBキューが混雑して書き込み開始まで待機している間にentitlementが失効
+    ///   すると、失効直前の`usageNow`で評価された認可がBatch行へ固定され得る（codexレビュー
+    ///   指摘）。これはexport-saga.md 1.5「開始後に有料契約の失効・月間上限への到達・昇格が
+    ///   起きても無視し、バッチ開始時の認可スナップショットで全項目を完了させる」が既に
+    ///   明示的に受容している範囲の内側である——バッチは作成後の失効を無視して全項目を
+    ///   完走する仕様であり、その許容時間はバッチ全体の実行時間（分〜時間の規模）に及ぶ。
+    ///   DBキュー待機（ミリ秒〜秒の規模）はそれより桁違いに小さく、新たな損失区分を生まない。
     ///
     /// 冪等性の注意: 同一batchIDでの再呼び出しは冪等ではない。BatchのbatchIDはDB側の
     /// 主キー（Schema+Queue.swift）のため、既存のbatchIDへ再度createBatchを呼ぶと
@@ -74,13 +68,12 @@ extension ExportSagaStoreLive {
             case .blocked(let block):
                 return .blocked(block)
             case .resolved(let accountingMode):
-                // authorizedAtはinput.createdAt（呼び出し元が記録する作成時刻）を使う。
-                // usageNow（評価時刻）とは役割が異なるため、ここをusageNowへ揃えない
-                // （関数doc「認可の評価時刻と記録時刻の分離」参照）。
+                // authorizedAtは認可評価に使ったusageNowをそのまま使う（startExportの
+                // 単体経路と同じ意味論。関数doc参照）。
                 let authorization = ExportAuthorization(
                     entitlementSnapshot: subscriptionState.entitlement,
                     accountingMode: accountingMode,
-                    authorizedAt: input.createdAt
+                    authorizedAt: usageNow
                 )
                 try Self.insertBatch(connection, input: input, authorization: authorization)
                 return .created(authorization)

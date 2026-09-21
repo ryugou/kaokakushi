@@ -261,8 +261,7 @@ func fakeExportSagaStoreForwardsCreateBatchArguments() async throws {
 
     let batchPolicy = BatchPolicySnapshot(kind: .proBatch, batchSizeLimit: 50, trialCreditCount: 0, concurrencyLimit: 2)
     let batchID = BatchID(rawValue: UUID())
-    let createdAt = Date(timeIntervalSince1970: 1_600_000_000)
-    let input = CreateBatchInput(batchID: batchID, policy: batchPolicy, createdAt: createdAt)
+    let input = CreateBatchInput(batchID: batchID, policy: batchPolicy)
 
     let decision = try await store.createBatch(input)
     guard case let .blocked(block) = decision else {
@@ -275,7 +274,6 @@ func fakeExportSagaStoreForwardsCreateBatchArguments() async throws {
     #expect(createBatchCalls.count == 1)
     #expect(createBatchCalls[0].batchID == batchID)
     #expect(createBatchCalls[0].policy == batchPolicy)
-    #expect(createBatchCalls[0].createdAt == createdAt)
 }
 
 @Test("ExportSagaStoreへの最小準拠が全メソッドの引数を渡された値どおりに記録する")

@@ -29,7 +29,7 @@ struct ExportSagaStoreCreateBatchTrialTests {
         let policy = BatchPolicySnapshot(kind: .trial, batchSizeLimit: 50, trialCreditCount: 3, concurrencyLimit: 1)
 
         let decision = try await store.createBatch(
-            CreateBatchInput(batchID: BatchID(rawValue: UUID()), policy: policy, createdAt: schemaTestReferenceDate)
+            CreateBatchInput(batchID: BatchID(rawValue: UUID()), policy: policy)
         )
 
         guard case let .blocked(block) = decision else {
@@ -52,7 +52,7 @@ struct ExportSagaStoreCreateBatchTrialTests {
         let policy = BatchPolicySnapshot(kind: .trial, batchSizeLimit: 50, trialCreditCount: 5, concurrencyLimit: 1)
 
         let decision = try await store.createBatch(
-            CreateBatchInput(batchID: BatchID(rawValue: UUID()), policy: policy, createdAt: schemaTestReferenceDate)
+            CreateBatchInput(batchID: BatchID(rawValue: UUID()), policy: policy)
         )
 
         guard case let .created(authorization) = decision else {
@@ -76,7 +76,7 @@ struct ExportSagaStoreCreateBatchTrialTests {
         let policy = BatchPolicySnapshot(kind: .trial, batchSizeLimit: 50, trialCreditCount: 100, concurrencyLimit: 1)
 
         let decision = try await store.createBatch(
-            CreateBatchInput(batchID: BatchID(rawValue: UUID()), policy: policy, createdAt: schemaTestReferenceDate)
+            CreateBatchInput(batchID: BatchID(rawValue: UUID()), policy: policy)
         )
 
         guard case let .blocked(block) = decision else {
@@ -105,7 +105,7 @@ struct ExportSagaStoreCreateBatchTrialTests {
         let policy = BatchPolicySnapshot(kind: .trial, batchSizeLimit: 50, trialCreditCount: 3, concurrencyLimit: 1)
 
         let decision = try await store.createBatch(
-            CreateBatchInput(batchID: BatchID(rawValue: UUID()), policy: policy, createdAt: schemaTestReferenceDate)
+            CreateBatchInput(batchID: BatchID(rawValue: UUID()), policy: policy)
         )
 
         guard case let .created(authorization) = decision else {
@@ -138,7 +138,7 @@ struct ExportSagaStoreCreateBatchTrialTests {
 
         do {
             _ = try await store.createBatch(
-                CreateBatchInput(batchID: BatchID(rawValue: UUID()), policy: policy, createdAt: schemaTestReferenceDate)
+                CreateBatchInput(batchID: BatchID(rawValue: UUID()), policy: policy)
             )
             Issue.record("BLOB長が16の倍数でないのにcreateBatchが成功した")
         } catch let error as ExportSagaStoreError {
@@ -172,7 +172,7 @@ struct ExportSagaStoreCreateBatchTrialTests {
 
         do {
             _ = try await store.createBatch(
-                CreateBatchInput(batchID: BatchID(rawValue: UUID()), policy: policy, createdAt: schemaTestReferenceDate)
+                CreateBatchInput(batchID: BatchID(rawValue: UUID()), policy: policy)
             )
             Issue.record("重複するExportIDチャンクがあるのにcreateBatchが成功した")
         } catch let error as ExportSagaStoreError {

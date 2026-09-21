@@ -86,12 +86,10 @@ public struct StartExportInput: Sendable {
 public struct CreateBatchInput: Sendable {
     public let batchID: BatchID
     public let policy: BatchPolicySnapshot   // 作成時の設定定数から作る（アーキテクチャ設計 6.4）
-    public let createdAt: Date
 
-    public init(batchID: BatchID, policy: BatchPolicySnapshot, createdAt: Date) {
+    public init(batchID: BatchID, policy: BatchPolicySnapshot) {
         self.batchID = batchID
         self.policy = policy
-        self.createdAt = createdAt
     }
 }
 

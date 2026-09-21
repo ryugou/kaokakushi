@@ -182,16 +182,12 @@ func makeCreateBatchBlockScenarios(_ database: AppDatabase) async throws -> [Cre
     return [
         CreateBatchBlockScenario(
             label: "trialCreditsUnavailable",
-            input: CreateBatchInput(
-                batchID: BatchID(rawValue: UUID()), policy: trialPolicy, createdAt: schemaTestReferenceDate
-            ),
+            input: CreateBatchInput(batchID: BatchID(rawValue: UUID()), policy: trialPolicy),
             expectedReason: .trialCreditsUnavailable
         ),
         CreateBatchBlockScenario(
             label: "capabilityVerificationRequired",
-            input: CreateBatchInput(
-                batchID: BatchID(rawValue: UUID()), policy: proBatchPolicy, createdAt: schemaTestReferenceDate
-            ),
+            input: CreateBatchInput(batchID: BatchID(rawValue: UUID()), policy: proBatchPolicy),
             expectedReason: .capabilityVerificationRequired
         )
     ]

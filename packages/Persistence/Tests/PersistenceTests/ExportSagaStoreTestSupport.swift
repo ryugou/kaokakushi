@@ -110,16 +110,13 @@ func createAuthorizedBatch(
     kind: BatchKind,
     batchSizeLimit: Int32 = 50,
     trialCreditCount: Int32 = 5,
-    concurrencyLimit: Int32 = 1,
-    createdAt: Date = schemaTestReferenceDate
+    concurrencyLimit: Int32 = 1
 ) async throws -> ExportAuthorization {
     let policy = BatchPolicySnapshot(
         kind: kind, batchSizeLimit: batchSizeLimit, trialCreditCount: trialCreditCount,
         concurrencyLimit: concurrencyLimit
     )
-    let decision = try await store.createBatch(
-        CreateBatchInput(batchID: batchID, policy: policy, createdAt: createdAt)
-    )
+    let decision = try await store.createBatch(CreateBatchInput(batchID: batchID, policy: policy))
     guard case let .created(authorization) = decision else {
         fatalError("test setup invariant violated: createBatch should authorize a freshly seeded subscription")
     }

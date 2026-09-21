@@ -39,7 +39,7 @@ struct ExportSagaStoreCreateBatchTests {
         let policy = BatchPolicySnapshot(kind: .proBatch, batchSizeLimit: 50, trialCreditCount: 0, concurrencyLimit: 1)
 
         let decision = try await store.createBatch(
-            CreateBatchInput(batchID: batchID, policy: policy, createdAt: schemaTestReferenceDate)
+            CreateBatchInput(batchID: batchID, policy: policy)
         )
 
         guard case .blocked = decision else {
@@ -70,7 +70,7 @@ struct ExportSagaStoreCreateBatchTests {
         let policy = BatchPolicySnapshot(kind: .proBatch, batchSizeLimit: 42, trialCreditCount: 7, concurrencyLimit: 3)
 
         let decision = try await store.createBatch(
-            CreateBatchInput(batchID: batchID, policy: policy, createdAt: schemaTestReferenceDate)
+            CreateBatchInput(batchID: batchID, policy: policy)
         )
 
         guard case let .created(authorization) = decision else {
@@ -114,7 +114,7 @@ struct ExportSagaStoreCreateBatchTests {
         let policy = BatchPolicySnapshot(kind: .proBatch, batchSizeLimit: 50, trialCreditCount: 0, concurrencyLimit: 1)
 
         let decision = try await store.createBatch(
-            CreateBatchInput(batchID: blockedBatchID, policy: policy, createdAt: schemaTestReferenceDate)
+            CreateBatchInput(batchID: blockedBatchID, policy: policy)
         )
 
         guard case .blocked = decision else {
@@ -139,7 +139,7 @@ struct ExportSagaStoreCreateBatchTests {
         let policy = BatchPolicySnapshot(kind: .proBatch, batchSizeLimit: 50, trialCreditCount: 0, concurrencyLimit: 1)
 
         let decision = try await store.createBatch(
-            CreateBatchInput(batchID: BatchID(rawValue: UUID()), policy: policy, createdAt: schemaTestReferenceDate)
+            CreateBatchInput(batchID: BatchID(rawValue: UUID()), policy: policy)
         )
 
         guard case let .created(authorization) = decision else {
@@ -162,7 +162,7 @@ struct ExportSagaStoreCreateBatchTests {
         let policy = BatchPolicySnapshot(kind: .proBatch, batchSizeLimit: 50, trialCreditCount: 0, concurrencyLimit: 1)
 
         let decision = try await store.createBatch(
-            CreateBatchInput(batchID: BatchID(rawValue: UUID()), policy: policy, createdAt: schemaTestReferenceDate)
+            CreateBatchInput(batchID: BatchID(rawValue: UUID()), policy: policy)
         )
 
         guard case let .blocked(block) = decision else {
@@ -172,32 +172,31 @@ struct ExportSagaStoreCreateBatchTests {
         #expect(block.reason == .capabilityVerificationRequired)
     }
 
-    // MARK: - usageNow（評価時刻）とauthorizedAt（記録時刻）の分離（レビュー指摘Warning 1対応）
+    // MARK: - authorizedAt = 認可評価時刻（usageNow）への統一
 
-    @Test("認可評価には注入時計now()を使い、input.createdAtでは失効を回避できないこと（fail-closed）")
-    func evaluatesExpirationWithInjectedClockNotCreatedAt() async throws {
+    @Test("失効判定は注入時計now()で行われ、失効済みならblockedになること（fail-closed）")
+    func evaluatesExpirationWithInjectedClock() async throws {
         let (database, url) = try makeTestAppDatabase()
         defer { try? FileManager.default.removeItem(at: url) }
-        // plan 3 = pro（active）。expiresAtはcreatedAtより1_000秒後 = createdAt時点では
-        // 未失効、now()の時点では失効済みという状況を作る。
+        // plan 3 = pro（active）。expiresAtはschemaTestReferenceDateより1_000秒後 =
+        // schemaTestReferenceDate時点では未失効、now()の時点では失効済みという状況を作る。
         try await database.dbQueue.write { connection in
             try insertSubscriptionStateRow(
                 connection, plan: 3, status: 1, expiresAt: schemaTestReferenceDate.addingTimeInterval(1_000)
             )
         }
-        // now()はexpiresAtの後（失効後）を返す。input.createdAtが評価に使われる実装だと
-        // ここが失効前と判定され誤って.created(.paidUnlimited)になってしまう
-        // （ResolveCapabilities.swiftのisExpired判定はusageNow >= expiresAtで行われる）。
+        // now()はexpiresAtの後（失効後）を返す。認可評価がこのusageNowで行われることを
+        // 確認する（ResolveCapabilities.swiftのisExpired判定はusageNow >= expiresAtで
+        // 行われる。now()以外の古い時刻で評価してしまう退行が起きればここでcreatedへ
+        // 誤って倒れる）。
         let store = makeExportSagaStore(
             database: database, now: { schemaTestReferenceDate.addingTimeInterval(5_000) }
         )
         let policy = BatchPolicySnapshot(kind: .proBatch, batchSizeLimit: 50, trialCreditCount: 0, concurrencyLimit: 1)
         let batchID = BatchID(rawValue: UUID())
 
-        // createdAtはexpiresAtより前（失効前）の古い値を渡す。評価がinput.createdAtを
-        // 使ってしまう退行を検知するのが本テストの目的。
         let decision = try await store.createBatch(
-            CreateBatchInput(batchID: batchID, policy: policy, createdAt: schemaTestReferenceDate)
+            CreateBatchInput(batchID: batchID, policy: policy)
         )
 
         guard case let .blocked(block) = decision else {
@@ -208,37 +207,40 @@ struct ExportSagaStoreCreateBatchTests {
         #expect(try readBatchRow(database, batchID: batchID.rawValue) == nil)
     }
 
-    @Test("Batch行のauthorizedAt列はinput.createdAtを記録し、注入時計now()の値は記録されないこと")
-    func recordsAuthorizedAtFromInputCreatedAtNotInjectedClock() async throws {
+    @Test("Batch行のauthorizedAt列は認可評価に使った注入時計now()（usageNow）を記録すること")
+    func recordsAuthorizedAtFromInjectedClock() async throws {
         let (database, url) = try makeTestAppDatabase()
         defer { try? FileManager.default.removeItem(at: url) }
-        // expiresAtはnil（無期限）にして、now()とcreatedAtの差が失効判定に影響しないように
-        // 切り分ける（このテストの関心はauthorizedAt列の記録元だけ）。
+        // expiresAtはnil（無期限）にして、now()の値が失効判定に影響しないように切り分ける
+        // （このテストの関心はauthorizedAt列の記録元だけ）。
         try await database.dbQueue.write { connection in
             try insertSubscriptionStateRow(connection, plan: 3, status: 1)
         }
-        // now()はcreatedAtとは異なる値を注入し、authorizedAt列がどちらの値を記録するかを
-        // 区別できるようにする。
+        // startExport（単体経路。+Start.swiftの`let authorizedAt = now()`）と同じ意味論に
+        // 揃える: authorizedAtは「認可を評価した時刻」であり、それは注入時計now()（usageNow）
+        // 以外にあり得ない。この注入時計をschemaTestReferenceDateとは別の値にして、
+        // authorizedAt列がnow()の値を記録することを区別できるようにする（レビュー指摘
+        // C-1・W-1: 呼び出し元が渡す作成時刻〈旧CreateBatchInput.createdAt〉を記録に使うと、
+        // 「認可した時刻」と「Batch行に記録された時刻」が乖離し、運用時に障害調査で誤った
+        // 時刻を追うことになる。フィールド自体をDomainから削除したため、この乖離はもう
+        // 構造的に起こり得ない）。
         let injectedNow = schemaTestReferenceDate.addingTimeInterval(9_000)
         let store = makeExportSagaStore(database: database, now: { injectedNow })
         let policy = BatchPolicySnapshot(kind: .proBatch, batchSizeLimit: 50, trialCreditCount: 0, concurrencyLimit: 1)
         let batchID = BatchID(rawValue: UUID())
 
-        let decision = try await store.createBatch(
-            CreateBatchInput(batchID: batchID, policy: policy, createdAt: schemaTestReferenceDate)
-        )
+        let decision = try await store.createBatch(CreateBatchInput(batchID: batchID, policy: policy))
 
         guard case let .created(authorization) = decision else {
             Issue.record("createdであるべき")
             return
         }
-        #expect(authorization.authorizedAt == schemaTestReferenceDate)
-        #expect(authorization.authorizedAt != injectedNow)
+        #expect(authorization.authorizedAt == injectedNow)
         guard let row = try readBatchRow(database, batchID: batchID.rawValue) else {
             Issue.record("Batch行が読み戻せなかった")
             return
         }
-        #expect(row.authorizedAt == schemaTestReferenceDate)
+        #expect(row.authorizedAt == injectedNow)
     }
 }
 

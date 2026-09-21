@@ -350,8 +350,7 @@ func createAuthorizedBatch(
     let decision = try await exportSagaStore.createBatch(
         CreateBatchInput(
             batchID: batchID,
-            policy: BatchPolicySnapshot(kind: .proBatch, batchSizeLimit: 50, trialCreditCount: 0, concurrencyLimit: 1),
-            createdAt: Date(timeIntervalSince1970: 1_700_000_000)
+            policy: BatchPolicySnapshot(kind: .proBatch, batchSizeLimit: 50, trialCreditCount: 0, concurrencyLimit: 1)
         )
     )
     guard case .created(let authorization) = decision else {

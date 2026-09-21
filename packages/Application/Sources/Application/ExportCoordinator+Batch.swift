@@ -68,6 +68,21 @@ public enum BatchItemStartOutcome: Sendable {
     case itemFailed
 }
 
+/// バッチ項目の `startExport` が `.blocked` を返した場合の契約違反（export-saga.md 1.6
+/// 手順4。正本: バッチ項目の認可は createBatch がバッチ作成時に一度だけ評価して `Batch` 行へ
+/// 固定し、各項目の startExport はその固定済み認可を読むだけで再評価しない。したがって
+/// `.blocked` はバッチ項目では正本上起こり得ない）。観測された場合は Persistence 側の契約
+/// 違反（Batch 行の認可固定が壊れている等）であり、`.itemFailed` へ丸めて握りつぶすと運用者が
+/// 原因を追えないままバッチが進行し続ける。`startBatchItem` はこのケースを throw で表面化する
+/// （codexレビュー指摘 C-2）。
+public enum BatchItemAuthorizationContractViolation: Error, Sendable, Equatable {
+    /// batchID: 契約違反が観測されたバッチ。projectID: 契約違反が観測された項目の対象
+    /// プロジェクト（同一バッチ内でどの写真が引き金だったかを運用者が特定できるようにする）。
+    /// block: Persistence が返した本来あり得ないブロック理由（`ExportStartBlock.reason`・
+    /// `limit`）。
+    case unexpectedBlock(batchID: BatchID, projectID: ProjectID, block: ExportStartBlock)
+}
+
 /// バッチ内 1 写真の開始入力。`ExportCoordinator.startBatchItem(_:capabilities:)` へ渡す。
 public struct BatchExportItemRequest: Sendable {
     public let batchID: BatchID
@@ -139,14 +154,21 @@ extension ExportCoordinator {
             return .started(job)
         case .workingSourceMissing:
             return .itemPaused
-        case .sourceRowMissing, .staleProjectRevision, .blocked:
+        case .sourceRowMissing, .staleProjectRevision:
             // 手順3（行自体が存在しない）・手順5（revision 不一致）は該当項目のみを終了させ
-            // バッチを止めない（1.6）。`.blocked` は正本 1.6 手順4によりバッチ項目では発生
-            // しない（Batch 行に固定された認可を評価せずコピーするため）が、
-            // `AuthorizeAndStartOutcome` を単体経路と共有しているため網羅として畳み込む
-            // （防御的分岐）。単体と異なり throw しない（このファイル冒頭コメント
+            // バッチを止めない（1.6）。単体と異なり throw しない（このファイル冒頭コメント
             // 「itemFailed」の定義参照）。
             return .itemFailed
+        case .blocked(let block):
+            // `.blocked` は正本 1.6 手順4によりバッチ項目では発生しない契約（Batch 行に
+            // 固定された認可を評価せずコピーするため）。`AuthorizeAndStartOutcome` を単体経路と
+            // 共有しているため型としては到達可能だが、観測された場合は Persistence 側の契約
+            // 違反であり、他の該当項目のみを終了させるケース（itemFailed）へ丸めて握りつぶす
+            // と運用者が原因を追えなくなる（レビュー指摘 C-2）。throw で表面化し、原因特定に
+            // 必要なbatchID・projectID・ブロック理由を運用者へ渡す。
+            throw BatchItemAuthorizationContractViolation.unexpectedBlock(
+                batchID: item.batchID, projectID: item.request.projectID, block: block
+            )
         }
     }
 

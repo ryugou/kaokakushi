@@ -225,3 +225,41 @@ private func confirmationMismatchDoesNotStopBatch() async throws {
 // シナリオはこの契約と構造的に矛盾するため削除した。1.3のブロックはバッチ全体＝createBatch
 // 時点で一度だけ発生し、その検証は Persistence 層の ExportSagaStoreCreateBatchTests.swift が
 // 担う（Application 層は createBatch 自体を呼ぶ公開 API を持たないためスコープ外）。
+
+// MARK: - .blocked はバッチ項目では契約違反（codexレビュー指摘 C-2）
+
+/// 上のコメントのとおり、バッチ項目の startExport で `.blocked` が返ることは正本上
+/// 起こり得ない契約である。にも関わらず観測された場合、旧実装は `.itemFailed` へ丸めて
+/// バッチを継続していた——これは Persistence 側の契約違反（Batch 行の認可固定が壊れている
+/// 等）を握りつぶし、運用者が原因を追えない状態でバッチが進行し続けることを意味する。
+/// `FakeExportSagaStore.batchStartExportOverride` で `.blocked` を注入し、
+/// `startBatchItem` が `.itemFailed` へ丸めず throw で表面化することを検証する。
+@Test(".blockedがバッチ項目で観測された場合はitemFailedへ丸めずthrowで表面化すること")
+private func unexpectedBlockedForBatchItemThrowsContractViolation() async throws {
+    let batchID = makeBatchID()
+    let item = try makeBatchItem(batchID: batchID, mode: .overview)
+    let workingSourceStore = FakeWorkingSourceStore()
+    let managedFileStore = FakeManagedFileStore()
+    try await seedWorkingSource(
+        projectID: item.request.projectID,
+        workingSourceStore: workingSourceStore,
+        managedFileStore: managedFileStore
+    )
+    let exportSagaStore = FakeExportSagaStore()
+    _ = try await createAuthorizedBatch(exportSagaStore, batchID: batchID)
+    let injectedBlock = ExportStartBlock(reason: .monthlyLimitReached, limit: 3)
+    await exportSagaStore.setBatchStartExportOverride { _, _ in .blocked(injectedBlock) }
+    let coordinator = makeCoordinator(
+        exportSagaStore: exportSagaStore,
+        workingSourceStore: workingSourceStore,
+        managedFileStore: managedFileStore
+    )
+
+    await #expect(
+        throws: BatchItemAuthorizationContractViolation.unexpectedBlock(
+            batchID: batchID, projectID: item.request.projectID, block: injectedBlock
+        )
+    ) {
+        _ = try await coordinator.startBatchItem(item, capabilities: makeResolvedCapabilities())
+    }
+}
