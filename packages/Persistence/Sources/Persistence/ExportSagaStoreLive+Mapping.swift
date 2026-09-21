@@ -74,7 +74,7 @@ extension ExportSagaStoreLive {
             exportID: ExportID(rawValue: row["exportID"]),
             projectID: ProjectID(rawValue: row["projectID"]),
             batchID: batchIDRaw.map(BatchID.init(rawValue:)),
-            authorization: try Self.decodeAuthorization(row),
+            authorization: try Self.decodeAuthorization(row, table: "ExportJob"),
             delivery: try Self.decodeDelivery(row)
         )
     }
@@ -96,15 +96,20 @@ extension ExportSagaStoreLive {
         return (plan, status)
     }
 
-    private static func decodeAuthorization(_ row: Row) throws -> ExportAuthorization {
+    /// ExportJob/Batch双方の認可7列（authorizedAt/accountingMode/entitlement*）をデコードする
+    /// 共通ヘルパー。列名はSchema+Accounting.swift（ExportJob）とSchema+Queue.swift（Batch）で
+    /// 完全に一致させてあるため列名の引数化はしない（過剰設計を避ける）。`table`は
+    /// invalidColumnValueのエラーメッセージにそのまま使うため引数化する（Batch行の破損を
+    /// ExportJobの破損と誤認させないため。呼び出し元ごとに実テーブル名を渡す）。
+    static func decodeAuthorization(_ row: Row, table: String) throws -> ExportAuthorization {
         let accountingModeRaw: Int = row["accountingMode"]
         guard let accountingModeColumn = ExportAccountingModeColumn(rawValue: accountingModeRaw) else {
             throw ExportSagaStoreError.invalidColumnValue(
-                table: "ExportJob", column: "accountingMode", rawValue: accountingModeRaw
+                table: table, column: "accountingMode", rawValue: accountingModeRaw
             )
         }
         let (plan, status) = try Self.decodePlanAndStatus(
-            row, table: "ExportJob", planColumn: "entitlementPlan", statusColumn: "entitlementStatus"
+            row, table: table, planColumn: "entitlementPlan", statusColumn: "entitlementStatus"
         )
         let entitlement = Entitlement(
             plan: plan,

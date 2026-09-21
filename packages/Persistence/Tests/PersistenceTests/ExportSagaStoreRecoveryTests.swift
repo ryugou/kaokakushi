@@ -37,8 +37,8 @@ struct ExportSagaStoreRecoveryTests {
             try insertProject(connection, projectID: projectID.rawValue)
             // plan 3 = pro（active）。proBatchが認可されるための能力を持たせる。
             try insertSubscriptionStateRow(connection, plan: 3, status: 1)
-            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 1, trialCreditCount: 0)
         }
+        _ = try await createAuthorizedBatch(store: store, batchID: batchID, kind: .proBatch, trialCreditCount: 0)
         let createdJob = try await authorizeExportJob(store: store, projectID: projectID, batchID: batchID)
 
         let runningJobs = try await store.loadRunningJobs()

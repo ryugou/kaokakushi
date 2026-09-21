@@ -6,93 +6,103 @@ import Domain
 // ExportSagaStoreLive.startExport — 1.5「開始後に有料契約の失効・月間上限への到達・昇格が
 // 起きても無視し、バッチ開始時の認可スナップショットで全項目を完了させる」の Persistence 側の
 // 実現（一括処理キュー簡素化 Issue #40 決定2。ExportSagaStoreLive+Start.swift
-// loadBatchAuthorizationSnapshot が正）。
+// loadBatchAuthorization が正）。
 //
-// 同一 batchID を持つ既存の ExportJob 行があれば、その authorization をそのまま使い
-// resolveVerifiedCapabilities / resolveAccountingMode の fresh 評価を行わない。行が無ければ
-// （先行項目が itemFailed 等で ExportJob を作れなかった場合）従来どおり fresh 評価する。
+// 旧方式（同一batchIDの既存ExportJob行から認可を再利用し、行が無ければfresh評価へ
+// フォールバックする方式）はdiscardExportで参照元のExportJobが消えると再現できなくなる
+// 欠陥があったため、Batch行に認可を固定する新方式へ置き換えて廃棄した。
+// 新方式では: (1) createBatchがBatch作成と同一トランザクションで認可を評価・固定する、
+// (2) startExportのバッチ経路はBatch行の固定済み認可を読むだけで再評価しない、
+// (3) 対応するBatch行が無ければfresh評価へフォールバックせずbatchNotFoundをthrowする
+// （createBatchが先に呼ばれている契約のため、無ければ異常系）。
 //
-// 実行環境注記: このファイルはコンテナ（Linux、CryptoKit 非搭載）でビルド・実行できない
-// （ExportSagaStoreLive+Start.swift の insertExportJob が CryptoKitSha256Digest を使うため、
-// packages/Persistence 自体が `swift build` すら通らない）。TDD の red 確認・green 確認は
-// ホストと CI の検証に委ねる。実装は既存の ExportSagaStoreStartTests.swift 系のパターン
-// （makeTestAppDatabase・insertProject・insertSubscriptionStateRow・insertBatchRow・
-// makeExportSagaStore・authorizeExportJob）に倣って書いた。
+// 実行環境注記: CryptoKit は Apple 専用のため、Linux コンテナでの実行には CryptoKit 相当の
+// 差し替え（シム）が必要。最終的な検証はホスト・CI（macos-15）が正とする。
 
-@Suite("ExportSagaStoreLive.startExport バッチ認可スナップショットの再利用")
+@Suite("ExportSagaStoreLive.startExport バッチ認可の固定")
 struct ExportSagaStoreStartSnapshotTests {
-    @Test("同一batchIDの先行ExportJobがある場合、開始後の契約失効を無視しauthorizationを再利用すること")
-    func reusesAuthorizationSnapshotIgnoringPermissionLossAfterFirstItemStarted() async throws {
+    @Test("createBatchで固定した認可が、開始後の契約失効を無視して以降の項目に使われ続けること")
+    func usesAuthorizationFixedByCreateBatchIgnoringPermissionLossAfterFirstItemStarted() async throws {
         let (database, url) = try makeTestAppDatabase()
         defer { try? FileManager.default.removeItem(at: url) }
-        let projectID = ProjectID(rawValue: UUID())
+        let firstProjectID = ProjectID(rawValue: UUID())
+        let secondProjectID = ProjectID(rawValue: UUID())
         let batchID = BatchID(rawValue: UUID())
         try await database.dbQueue.write { connection in
-            try insertProject(connection, projectID: projectID.rawValue)
+            try insertProject(connection, projectID: firstProjectID.rawValue)
+            try insertProject(connection, projectID: secondProjectID.rawValue)
             // plan 3 = pro、status 1 = active。proBatchはcanUseProBatchを要求するため、
             // 失効するとblocked(.capabilityVerificationRequired)になる（後述のUPDATE）。
             try insertSubscriptionStateRow(connection, plan: 3, status: 1)
-            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 1, trialCreditCount: 0)
         }
         let store = makeExportSagaStore(database: database)
 
-        // 項目1: fresh評価でpaidUnlimitedとして認可される（authorizesProBatchWhenCapableAsPaidUnlimited
-        // と同じ前提）。
-        let firstJob = try await authorizeExportJob(store: store, projectID: projectID, batchID: batchID)
+        // createBatch: 契約が有効なうちに認可を評価しBatch行へ固定する。
+        let authorization = try await createAuthorizedBatch(store: store, batchID: batchID, kind: .proBatch)
+        #expect(authorization.accountingMode == .paidUnlimited)
+        #expect(authorization.entitlementSnapshot.status == .active)
+
+        // 項目1: Batch行の固定済み認可をそのまま使ってauthorizedになる。
+        let firstJob = try await authorizeExportJob(store: store, projectID: firstProjectID, batchID: batchID)
         #expect(firstJob.authorization.accountingMode == .paidUnlimited)
+        #expect(firstJob.batchID == batchID)
 
         // ここで契約の失効が起きたとみなす（statusをactiveからexpiredへ変更）。fresh評価なら
-        // resolveCapabilitiesがfree相当へ倒れcanUseProBatchを失うため、
-        // blocksProBatchWhenIncapableAsCapabilityVerificationRequiredと同じ理由でblockedになる
-        // はずの状態を作る。
+        // resolveCapabilitiesがfree相当へ倒れcanUseProBatchを失うためblockedになるはずだが、
+        // createBatchが固定した認可は再評価されない。
         try await database.dbQueue.write { connection in
             try connection.execute(sql: "UPDATE SubscriptionState SET status = ?", arguments: [4])
         }
 
-        // 項目2: 同一batchIDのExportJob行（項目1）が既にあるため、fresh評価をせず項目1の
-        // authorizationをそのまま再利用してauthorizedになるはず（1.5）。
+        // 項目2: Batch行に固定された認可をそのまま読むため、失効を無視してauthorizedになる
+        // はず（1.5）。
         let decision = try await store.startExport(
-            try makeStartExportInputFixture(projectID: projectID, batchID: batchID), expectedProjectRevision: 0
+            try makeStartExportInputFixture(projectID: secondProjectID, batchID: batchID), expectedProjectRevision: 0
         )
 
         guard case let .authorized(secondJob) = decision else {
             Issue.record("失効を無視してauthorizedになるべきだが、blockedになった: \(decision)")
             return
         }
+        #expect(secondJob.batchID == batchID)
         #expect(secondJob.authorization.entitlementSnapshot == firstJob.authorization.entitlementSnapshot)
         #expect(secondJob.authorization.accountingMode == firstJob.authorization.accountingMode)
         #expect(secondJob.authorization.authorizedAt == firstJob.authorization.authorizedAt)
-        // 失効後のstatus(4)ではなく、項目1が認可された時点のstatus(1=active)がそのまま
-        // 保存されていること（fresh評価していないことの直接証拠）。
+        // 失効後のstatus(4)ではなく、createBatchが認可を固定した時点のstatus(1=active)が
+        // そのまま保存されていること（再評価していないことの直接証拠）。
         #expect(secondJob.authorization.entitlementSnapshot.status == .active)
     }
 
-    @Test("同一batchIDの先行ExportJobが無い場合は次の項目もfresh評価されること")
-    func fallsBackToFreshEvaluationWhenNoPriorExportJobExistsForBatch() async throws {
+    @Test("対応するBatch行が無い場合、fresh評価へフォールバックせずbatchNotFoundがthrowされること")
+    func throwsBatchNotFoundWhenNoBatchRowExists() async throws {
         let (database, url) = try makeTestAppDatabase()
         defer { try? FileManager.default.removeItem(at: url) }
         let projectID = ProjectID(rawValue: UUID())
         let batchID = BatchID(rawValue: UUID())
         try await database.dbQueue.write { connection in
             try insertProject(connection, projectID: projectID.rawValue)
-            // 最初から失効状態（status 4 = expired）で挿入する。先行項目がitemFailed等で
-            // ExportJobを作れなかった状況を模す（このbatchIDのExportJob行はまだ0件）。
-            try insertSubscriptionStateRow(connection, plan: 3, status: 4)
-            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 1, trialCreditCount: 0)
+            // plan 3 = pro、status 1 = active。fresh評価が行われるなら認可されるはずの
+            // 契約状態にしておく——それでもbatchNotFoundになることで、fresh評価への
+            // フォールバックが本当に存在しないことを検証する。
+            try insertSubscriptionStateRow(connection, plan: 3, status: 1)
+            // createBatchを一度も呼ばないため、このbatchIDに対応するBatch行は存在しない。
         }
         let store = makeExportSagaStore(database: database)
 
-        let decision = try await store.startExport(
-            try makeStartExportInputFixture(projectID: projectID, batchID: batchID), expectedProjectRevision: 0
-        )
-
-        // 再利用対象のExportJob行が無いためfresh評価が働き、失効状態どおりblockedになる
-        // （blocksProBatchWhenIncapableAsCapabilityVerificationRequiredと同じ理由）。
-        guard case let .blocked(block) = decision else {
-            Issue.record("先行ExportJobが無いのでfresh評価されblockedになるべきだが、authorizedになった: \(decision)")
-            return
+        do {
+            _ = try await store.startExport(
+                try makeStartExportInputFixture(projectID: projectID, batchID: batchID), expectedProjectRevision: 0
+            )
+            Issue.record("Batch行が無いのにstartExportが成功した")
+        } catch let error as ExportSagaStoreError {
+            guard case .batchNotFound(let notFoundBatchID) = error else {
+                Issue.record("期待したエラーケース(batchNotFound)ではない: \(error)")
+                return
+            }
+            #expect(notFoundBatchID == batchID)
+        } catch {
+            Issue.record("ExportSagaStoreError以外がthrowされた: \(error)")
         }
-        #expect(block.reason == .capabilityVerificationRequired)
         let jobCount: Int = try await database.dbQueue.read { connection in
             try Int.fetchOne(connection, sql: "SELECT count(*) FROM ExportJob") ?? -1
         }

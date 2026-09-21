@@ -17,9 +17,7 @@ struct ExportSagaStoreSettleBatchTests {
         let secondProjectID = ProjectID(rawValue: UUID())
         try await seedAuthorizedProject(database, projectID: firstProjectID)
         try await seedAuthorizedProject(database, projectID: secondProjectID)
-        try await database.dbQueue.write { connection in
-            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 2, trialCreditCount: 10)
-        }
+        _ = try await createAuthorizedBatch(store: store, batchID: batchID, kind: .trial, trialCreditCount: 10)
         let firstJob = try await authorizeExportJob(store: store, projectID: firstProjectID, batchID: batchID)
         let secondJob = try await authorizeExportJob(store: store, projectID: secondProjectID, batchID: batchID)
         try await store.recordGeneratedOutput(RecordOutputInput(
@@ -55,9 +53,7 @@ struct ExportSagaStoreSettleBatchTests {
         let noOutputProjectID = ProjectID(rawValue: UUID())
         try await seedAuthorizedProject(database, projectID: pendingProjectID)
         try await seedAuthorizedProject(database, projectID: noOutputProjectID)
-        try await database.dbQueue.write { connection in
-            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 2, trialCreditCount: 10)
-        }
+        _ = try await createAuthorizedBatch(store: store, batchID: batchID, kind: .trial, trialCreditCount: 10)
         let pendingJob = try await authorizeExportJob(store: store, projectID: pendingProjectID, batchID: batchID)
         let noOutputJob = try await authorizeExportJob(store: store, projectID: noOutputProjectID, batchID: batchID)
         try await store.recordGeneratedOutput(RecordOutputInput(
@@ -86,9 +82,7 @@ struct ExportSagaStoreSettleBatchTests {
         let batchID = BatchID(rawValue: UUID())
         let projectID = ProjectID(rawValue: UUID())
         try await seedAuthorizedProject(database, projectID: projectID)
-        try await database.dbQueue.write { connection in
-            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 2, trialCreditCount: 10)
-        }
+        _ = try await createAuthorizedBatch(store: store, batchID: batchID, kind: .trial, trialCreditCount: 10)
         let job = try await authorizeExportJob(store: store, projectID: projectID, batchID: batchID)
         try await store.recordGeneratedOutput(RecordOutputInput(
             exportID: job.exportID, outputFile: makeOutputFileRefFixture(), outputByteSize: 1_500,

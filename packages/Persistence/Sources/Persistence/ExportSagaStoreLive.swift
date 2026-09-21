@@ -42,10 +42,11 @@ import GRDB
 public enum ExportSagaStoreError: Error, Sendable, Equatable {
     /// startExport: expectedProjectRevisionと比較する対象のProject行が存在しない。
     case projectNotFound(projectID: ProjectID)
-    /// startExport: expectedProjectRevisionが実際のprojectRevisionと一致しない
-    /// （export-saga.md 1.6 手順5。開始前にプロジェクトが変更された）。
-    case projectRevisionMismatch(projectID: ProjectID, expected: Int64, actual: Int64)
-    /// startExport: input.batchIDに対応するBatch行が存在しない。
+    /// startExport: input.batchIDに対応するBatch行が存在しない（createBatchが先に
+    /// 呼ばれていない、またはバッチが既に削除された）。expectedProjectRevisionの不一致は
+    /// 例外ではなく`ExportStartDecision.staleProjectRevision`という型付きの判定結果で返す
+    /// （export-saga.md 1.6 手順5。ExportSagaStore.swiftのdocコメントが正）ため、対応する
+    /// throw caseはここに存在しない。
     case batchNotFound(batchID: BatchID)
     /// recordGeneratedOutput: 対象のExportJob行が存在しない（手順0が完了していない
     /// exportIDが渡された）。
@@ -118,13 +119,6 @@ extension ExportSagaStoreError: LocalizedError {
             ExportSagaStore: startExportに渡されたprojectID=\(projectID.rawValue.uuidString) の \
             Project行が見つかりません。呼び出し元がProjectを作成する前にstartExportを \
             呼んでいないか確認してください。
-            """
-        case .projectRevisionMismatch(let projectID, let expected, let actual):
-            return """
-            ExportSagaStore: projectID=\(projectID.rawValue.uuidString) のprojectRevisionが \
-            期待値と一致しません（期待値=\(expected), 実際の値=\(actual)）。書き出し開始前に \
-            プロジェクトの設定が変更された可能性があります。呼び出し元は最新のプレビュー \
-            確認からやり直してください（export-saga.md 1.6）。
             """
         case .batchNotFound(let batchID):
             return """

@@ -35,13 +35,22 @@ func insertProject(_ database: Database, projectID: UUID) throws {
     )
 }
 
+/// 認可7列（authorizedAt/accountingMode/entitlement*。Schema+Queue.swift参照）はNOT NULL
+/// 制約を満たすための構造的な固定値で、値そのものに意味は無い。このヘルパーはHistory
+/// DeletionStore/SchemaConstraintTests等、ExportSagaStoreの認可ロジックを検証しない
+/// テストが「Batch行がFK参照先として存在する」ことだけを必要とする場面向けのため
+/// （ExportSagaStoreの認可解決〈trial残クレジット・proBatch資格〉を検証したいテストは
+/// ExportSagaStoreTestSupport.createAuthorizedBatch〈実際のcreateBatch経由〉を使うこと）。
 func insertBatch(_ database: Database, batchID: UUID) throws {
     try database.execute(
         sql: """
-        INSERT INTO Batch (batchID, kind, batchSizeLimit, trialCreditCount, concurrencyLimit)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO Batch (
+            batchID, kind, batchSizeLimit, trialCreditCount, concurrencyLimit,
+            authorizedAt, accountingMode, entitlementPlan, entitlementStatus,
+            entitlementExpiresAt, entitlementLastVerifiedAt, entitlementIsSandbox
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        arguments: [batchID, 1, 10, 0, 1]
+        arguments: [batchID, 1, 10, 0, 1, schemaTestReferenceDate, 1, 2, 1, nil, schemaTestReferenceDate, false]
     )
 }
 

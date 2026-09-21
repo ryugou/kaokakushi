@@ -2,9 +2,14 @@ import Foundation
 import Domain
 import GRDB
 
-// startExportが使う勘定（ExportAccountingMode）の解決ロジック（export-saga.md 1.3
-// 「権限とクォータ」・1.4「勘定の使い分け」・architecture.md 6.3「クォータとトライアル」
-// 「判定」節が正本）。
+// startExport（単体書き出し）が使う勘定（ExportAccountingMode）の解決ロジック
+// （export-saga.md 1.3「権限とクォータ」・1.4「勘定の使い分け」・architecture.md 6.3
+// 「クォータとトライアル」「判定」節が正本）。
+//
+// バッチの勘定解決（proBatch/trial）はExportSagaStoreLive+CreateBatch.swiftのcreateBatchへ
+// 移設した（一括処理キュー簡素化 Issue #40 決定2）。startExportのバッチ経路は
+// createBatchが固定した認可をそのまま読むだけで、ここで定義する関数群を一切呼ばない
+// （+Start.swiftのloadBatchAuthorization参照）。このファイルは単体書き出し専用になった。
 //
 // 判定は entitlement.plan を直接見ない。SubscriptionState から導出した
 // ResolvedCapabilities（Domainの純粋関数resolveCapabilitiesの出力）だけを見る
@@ -26,12 +31,11 @@ extension ExportSagaStoreLive {
     }
 
     /// resolveAccountingModeへの入力ひとそろい（lintの引数上限対応で束ねた入力。
-    /// StampStoreLive.insertStampRowsと同じパターン）。
+    /// StampStoreLive.insertStampRowsと同じパターン）。単体書き出し専用に単純化したため
+    /// StartExportInput全体は保持しない（バッチ分岐が無くなりinput.batchIDを見る箇所が
+    /// 消えたため。オーケストレーター確定判断）。
     struct AccountingModeContext {
-        let input: StartExportInput
         let capabilities: ResolvedCapabilities
-        /// Batch.trialCreditCount（DB由来）をクランプする上限（コンストラクタ注入。3番の修正）。
-        let hardMaxTrialCredits: Int
         /// 月間上限（既定5。architecture.md 6.3。コンストラクタ注入）。
         let monthlyLimit: Int
         /// startExportのauthorizedAtをそのまま使う（evaluateMonthlyQuotaのusageNow）。
@@ -39,44 +43,9 @@ extension ExportSagaStoreLive {
         let deviceTimeZone: TimeZone
     }
 
-    static func resolveAccountingMode(
-        _ connection: Database, context: AccountingModeContext
-    ) throws -> AccountingModeDecision {
-        guard let batchID = context.input.batchID else {
-            return try Self.resolveSingleExportAccountingMode(connection, context: context)
-        }
-
-        guard let batch = try Self.loadBatch(connection, batchID: batchID) else {
-            throw ExportSagaStoreError.batchNotFound(batchID: batchID)
-        }
-
-        switch batch.kind {
-        case .proBatch:
-            // 2番の修正: 開始時点でcanUseProBatchを失っていればブロックする
-            // （proBatch自体はentitlementの能力に依存するため。1.5「開始後の権限変化」の
-            // 対象はあくまで「開始済みの書き出し」であり、開始前のこの検査を免除しない）。
-            guard context.capabilities.canUseProBatch else {
-                return .blocked(ExportStartBlock(reason: .capabilityVerificationRequired, limit: nil))
-            }
-            return .resolved(.paidUnlimited)
-        case .trial:
-            // architecture.md 6.3「Pro へ加入済みの場合は消費しない」・export-saga.md 1.3
-            // ExportStartBlockReasonのコメント。開始時点でcanUseProBatchを持つ利用者は
-            // トライアルクレジットの残数に関わらず消費せずpaidUnlimitedで認可する
-            // （アップグレード後もバッチを中断させないため）。
-            guard !context.capabilities.canUseProBatch else {
-                return .resolved(.paidUnlimited)
-            }
-            return try Self.resolveTrialAccountingMode(
-                connection, trialCreditCount: batch.trialCreditCount,
-                hardMaxTrialCredits: context.hardMaxTrialCredits
-            )
-        }
-    }
-
     /// 単体書き出しの勘定判定（1.3「権限とクォータ」）。unlimitedは即resolved、meteredは
     /// UsageLedgerを読みevaluateMonthlyQuota（Domain純粋関数）で月間枠を判定する。
-    private static func resolveSingleExportAccountingMode(
+    static func resolveAccountingMode(
         _ connection: Database, context: AccountingModeContext
     ) throws -> AccountingModeDecision {
         switch context.capabilities.singleExportAccess {
@@ -103,7 +72,9 @@ extension ExportSagaStoreLive {
     /// `UsageLedger.trialConsumedExportIDs`の件数が上限以上なら`.blocked`を返す。
     /// 上限はDB由来のtrialCreditCountをhardMaxTrialCreditsでクランプした値
     /// （3番の修正。DB改変等でtrialCreditCountが異常値になっていても無制限に信頼しない）。
-    private static func resolveTrialAccountingMode(
+    /// createBatch（ExportSagaStoreLive+CreateBatch.swift）が.trial種別のバッチ作成時に
+    /// 再利用するためprivateにしていない（他のstatic funcと同じ流儀）。
+    static func resolveTrialAccountingMode(
         _ connection: Database, trialCreditCount: Int32, hardMaxTrialCredits: Int
     ) throws -> AccountingModeDecision {
         let trialConsumedCount = try Self.loadTrialConsumedCount(connection)
@@ -112,26 +83,6 @@ extension ExportSagaStoreLive {
             return .blocked(ExportStartBlock(reason: .trialCreditsUnavailable, limit: clampedLimit))
         }
         return .resolved(.batchTrial)
-    }
-
-    private struct BatchSnapshot {
-        let kind: BatchKind
-        let trialCreditCount: Int32
-    }
-
-    private static func loadBatch(_ connection: Database, batchID: BatchID) throws -> BatchSnapshot? {
-        guard let row = try Row.fetchOne(
-            connection,
-            sql: "SELECT kind, trialCreditCount FROM Batch WHERE batchID = ?",
-            arguments: [batchID.rawValue]
-        ) else {
-            return nil
-        }
-        let kindRaw: Int = row["kind"]
-        guard let kind32 = UInt32(exactly: kindRaw), let kind = BatchKind(rawValue: kind32) else {
-            throw ExportSagaStoreError.invalidColumnValue(table: "Batch", column: "kind", rawValue: kindRaw)
-        }
-        return BatchSnapshot(kind: kind, trialCreditCount: row["trialCreditCount"])
     }
 
     /// UsageLedger.consumedExportIDs / trialConsumedExportIDsのBLOB形式（このタスクで確定。

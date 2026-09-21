@@ -91,16 +91,39 @@ func insertSubscriptionStateRow(
     )
 }
 
-/// Batch行をkindを指定して挿入する。SchemaTestSupport.insertBatchはkind固定(1=proBatch)の
-/// ため、trial(2)を打ち分けるこのテストでは使えない。
-func insertBatchRow(_ connection: Database, batchID: UUID, kind: Int, trialCreditCount: Int32 = 5) throws {
-    try connection.execute(
-        sql: """
-        INSERT INTO Batch (batchID, kind, batchSizeLimit, trialCreditCount, concurrencyLimit)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        arguments: [batchID, kind, 50, trialCreditCount, 1]
+/// createBatch経由でBatch行を作り、blockedならfatalError（テスト前提の破れ）にする。
+/// 生SQLでの直接INSERTではなく実際のcreateBatchを使うことで、Batchの認可7列
+/// （Schema+Queue.swift。createBatchが単一トランザクションで固定する列）を実装のロジック
+/// どおり確定させる（authorizeExportJobがstartExport経由でExportJobを作るのと同じ思想）。
+///
+/// 旧insertBatchRowは廃止した: 生SQLでの直接INSERTは認可7列を実装ロジックと無関係に
+/// 決め打ちしてしまい、「Batch行が存在する⇒createBatchが認可を固定済み」という
+/// 一括処理キュー簡素化 Issue #40 決定2の契約をテストとして再現できなかったため
+/// （startExportのバッチ経路の資格判定・トライアル残クレジット判定を検証したいテストは
+/// このヘルパー越しにcreateBatchを呼ぶことで、実装の分岐をそのまま通す）。
+///
+/// 呼び出し元は事前にSubscriptionState行を用意しておくこと（resolveVerifiedCapabilitiesが
+/// 読むため。insertSubscriptionStateRow / seedAuthorizedProject参照）。
+func createAuthorizedBatch(
+    store: ExportSagaStoreLive,
+    batchID: BatchID,
+    kind: BatchKind,
+    batchSizeLimit: Int32 = 50,
+    trialCreditCount: Int32 = 5,
+    concurrencyLimit: Int32 = 1,
+    createdAt: Date = schemaTestReferenceDate
+) async throws -> ExportAuthorization {
+    let policy = BatchPolicySnapshot(
+        kind: kind, batchSizeLimit: batchSizeLimit, trialCreditCount: trialCreditCount,
+        concurrencyLimit: concurrencyLimit
     )
+    let decision = try await store.createBatch(
+        CreateBatchInput(batchID: batchID, policy: policy, createdAt: createdAt)
+    )
+    guard case let .created(authorization) = decision else {
+        fatalError("test setup invariant violated: createBatch should authorize a freshly seeded subscription")
+    }
+    return authorization
 }
 
 /// UsageLedgerの唯一行を挿入する。trialConsumedExportIDsはExportSagaStoreLive+Accounting.
