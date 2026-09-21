@@ -298,6 +298,7 @@
 `MediaKit` / `Persistence` / `Billing` / `Ads` の各プロトコルに対し、**実装と偽実装の両方へ同じスイート**を実行します。偽実装が本物と違う挙動をすると saga テストが無意味になるため、この一致を検証します。
 
 - **`ManagedFileStore.createFile` が常に新しいファイルを作成し、既存ファイルの参照を返さないこと**（同一内容の連続作成でも、削除済み・`PendingFileDeletion` 登録済みの参照が存在する状態での再作成でも、過去に返した参照と一致しないこと。[アーキテクチャ設計](architecture.md) の 7.3 の新規作成契約。実装・偽実装の両方）
+- **`PickedPhotoLoader.load` が返す `source.file` が、入力の `ManagedFileRef` とも呼び出し前に存在していたどのファイル参照とも一致しないこと**（`createFile` による新規作成。[画像処理](image-pipeline.md) の「プロトコルのシグネチャ」。実装・偽実装の両方）
 
 ### 4.2 永続化の原子性（[アーキテクチャ設計](architecture.md) の 7.1）
 

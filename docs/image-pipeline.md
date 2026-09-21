@@ -788,7 +788,10 @@ v1 が生成する生ビットマップは常に次の値をとります。
 ```swift
 protocol PickedPhotoLoader: Sendable {
     /// 取り込み時のみ。まだ Project に結び付いていない新しいファイルを読み、向きを正規化する。
-    /// 既存 Project の素材は WorkingSourceRecord 経由の ImageSource で読む
+    /// 既存 Project の素材は WorkingSourceRecord 経由の ImageSource で読む。
+    /// 正規化した原寸ファイルは `ManagedFileStore.createFile`（アーキテクチャ設計 7.3）で
+    /// 新規作成し、その参照を `LoadedPhoto.source.file` として返す（入力 `file` や既存ファイルの
+    /// 参照を返してはならない。削除・置換の各 Saga はこの新規性に依存する。5 章）
     func load(_ file: ManagedFileRef) async throws -> LoadedPhoto
 }
 
@@ -976,7 +979,7 @@ struct WorkingSourceRecord: Sendable {
 2. 単一 DB トランザクションで、`WorkingSourceRecord` の置換または新規作成、`Project` の撮影メタデータ・再編集用参照の更新、`FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` の破棄、`detectionRevision` / `projectRevision` の増加を行う。置換の場合（`replaceWorkingSource`）は、同じトランザクションで置換された旧 `sourceFile` を `PendingFileDeletion` へ登録する（`attachWorkingSourceToExistingProject` は置換対象を持たないため登録しない）
 3. コミット後に、`replaceWorkingSource` が戻り値として返した登録済みの旧 `sourceFile` の実体を削除し、成功したら `PendingFileDeletion` の行を削除する。失敗したら行を残し、起動時の GC が再試行する（削除経路の正本は [アーキテクチャ設計](architecture.md) の 7.5「出力の削除経路」。全 pending 行の走査は行わない — 対象は戻り値の 1 件のみ）
 
-置換と削除対象の確定が単一トランザクションで原子化されるため、複数の再選択が直列キュー上でどの順に並んでも、現在参照中の実体が削除されることはない。根拠は 2 つで役割が異なる: **同一トランザクション内**の新旧一致は `replaceWorkingSource` が判定して登録を抑止し〈下記「実装の所在」〉、**トランザクションをまたぐ**「過去に削除・登録された参照が新しいファイルとして再登場する」経路は `ManagedFileStore.createFile` の新規作成契約〈[アーキテクチャ設計](architecture.md) の 7.3。既存参照の転用禁止 + UUID 一意性への依拠〉が塞ぐ（どちらか一方では閉じないため、判定・契約とも省かない）。
+置換と削除対象の確定が単一トランザクションで原子化されるため、複数の再選択が直列キュー上でどの順に並んでも、現在参照中の実体が削除されることはない。根拠は 2 つで役割が異なる: **同一トランザクション内**の新旧一致は `replaceWorkingSource` が判定して登録を抑止し〈下記「実装の所在」〉、**トランザクションをまたぐ**「過去に削除・登録された参照が新しいファイルとして再登場する」経路は `ManagedFileStore.createFile` の新規作成契約〈[アーキテクチャ設計](architecture.md) の 7.3。既存参照の転用禁止 + UUID 一意性への依拠〉が塞ぐ（再選択が持ち込む新しい参照は `PickedPhotoLoader.load` が `createFile` で新規作成したものに限られる〈上記「プロトコルのシグネチャ」〉。どちらか一方では閉じないため、判定・契約とも省かない）。
 
 手順 2 は `WorkingSourceRecord` の有無で分岐します。
 
