@@ -788,7 +788,10 @@ v1 が生成する生ビットマップは常に次の値をとります。
 ```swift
 protocol PickedPhotoLoader: Sendable {
     /// 取り込み時のみ。まだ Project に結び付いていない新しいファイルを読み、向きを正規化する。
-    /// 既存 Project の素材は WorkingSourceRecord 経由の ImageSource で読む
+    /// 既存 Project の素材は WorkingSourceRecord 経由の ImageSource で読む。
+    /// 正規化した原寸ファイルは `ManagedFileStore.createFile`（アーキテクチャ設計 7.3）で
+    /// 新規作成し、その参照を `LoadedPhoto.source.file` として返す（入力 `file` や既存ファイルの
+    /// 参照を返してはならない。削除・置換の各 Saga はこの新規性に依存する。5 章）
     func load(_ file: ManagedFileRef) async throws -> LoadedPhoto
 }
 
@@ -936,6 +939,7 @@ struct WorkingSourceRecord: Sendable {
 | 保存先 | `app.db`。実体は `working/` |
 | 参照 | 編集中の `Project` の元素材（`projectID` が `Project` への外部キー） |
 | 削除の経路 | **DB トランザクションで `WorkingSourceRecord` を削除し、同じトランザクションで `PendingFileDeletion` を追加する。コミット後に実体を削除する**（[アーキテクチャ設計](architecture.md) の 7.5「出力の削除経路」と同じ単一経路） |
+| 置換時の旧実体 | **再選択で `sourceFile` を置換した場合、旧実体は置換と同一トランザクションで `PendingFileDeletion` へ登録する**（`WorkingSourceRecord` の行自体は削除しない。下記「再選択後の Saga」手順 2） |
 | 削除の契機 | **完了操作（settle）**（[書き出し Saga](export-saga.md) 側の契約）・**プロジェクト破棄**・**実体欠損による無効化**（`invalidateWorkingSource`。下記「実体の存在確認」） |
 | 起動時 | どの `WorkingSourceRecord` からも参照されない `working/` の実体ファイルを、孤児ファイル GC が回収する（[アーキテクチャ設計](architecture.md) の 7.5。`WorkingSourceRecord` 行自体は `Project` への外部キーで束縛され、孤児にならない） |
 | 実体が欠けている | `invalidateWorkingSource` が `WorkingSourceRecord` を削除する。該当項目はセッション内で **`paused(.sourceReselectionRequired)`** として扱われる（`BatchItemStartOutcome.itemPaused`。[書き出し Saga](export-saga.md) の 1.6）。エラーで止めない |
@@ -972,8 +976,10 @@ struct WorkingSourceRecord: Sendable {
 **`paused(.sourceReselectionRequired)` と履歴からの再編集は、どちらも「素材を選び直して既存 `Project` へ結び直す」操作です。** 通常のインポート Saga は新しい `Project` を作るため、既存 `Project` への結び付けにはそのまま使えません。**選び直された写真は常に新しい素材として扱います。**
 
 1. 向きを正規化した原寸ファイルを作成し、EXIF を読む
-2. 単一 DB トランザクションで、`WorkingSourceRecord` の置換または新規作成、`Project` の撮影メタデータ・再編集用参照の更新、`FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` の破棄、`detectionRevision` / `projectRevision` の増加を行う
-3. 置換された旧 `sourceFile` を削除する（失敗したら `PendingFileDeletion` へ積む）
+2. 単一 DB トランザクションで、`WorkingSourceRecord` の置換または新規作成、`Project` の撮影メタデータ・再編集用参照の更新、`FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` の破棄、`detectionRevision` / `projectRevision` の増加を行う。置換の場合（`replaceWorkingSource`）は、同じトランザクションで置換された旧 `sourceFile` を `PendingFileDeletion` へ登録する（`attachWorkingSourceToExistingProject` は置換対象を持たないため登録しない）
+3. コミット後に、`replaceWorkingSource` が戻り値として返した登録済みの旧 `sourceFile` の実体を削除し、成功したら `PendingFileDeletion` の行を削除する。失敗したら行を残し、起動時の GC が再試行する（削除経路の正本は [アーキテクチャ設計](architecture.md) の 7.5「出力の削除経路」。全 pending 行の走査は行わない — 対象は戻り値の 1 件のみ）
+
+置換と削除対象の確定が単一トランザクションで原子化されるため、複数の再選択が直列キュー上でどの順に並んでも、現在参照中の実体が削除されることはない。根拠は 2 つで役割が異なる: **同一トランザクション内**の新旧一致は `replaceWorkingSource` が判定して登録を抑止し〈下記「実装の所在」〉、**トランザクションをまたぐ**「過去に削除・登録された参照が新しいファイルとして再登場する」経路は `ManagedFileStore.createFile` の新規作成契約〈[アーキテクチャ設計](architecture.md) の 7.3。既存参照の転用禁止 + UUID 一意性への依拠〉が塞ぐ（再選択が持ち込む新しい参照は `PickedPhotoLoader.load` が `createFile` で新規作成したものに限られる〈上記「プロトコルのシグネチャ」〉。どちらか一方では閉じないため、判定・契約とも省かない）。
 
 手順 2 は `WorkingSourceRecord` の有無で分岐します。
 
@@ -994,8 +1000,12 @@ protocol WorkingSourceStore: Sendable {
     /// インポート Saga の手順 3。単一 DB トランザクション
     func createProjectWithWorkingSource(_ input: CreateWorkingSourceInput) async throws
 
-    /// 素材更新 Saga の手順 2。単一 DB トランザクション
-    func replaceWorkingSource(_ input: ReplaceWorkingSourceInput) async throws
+    /// 素材更新 Saga の手順 2。単一 DB トランザクションで `sourceFile` を置換し、
+    /// 置換された旧 `sourceFile` の `PendingFileDeletion` への登録を同一トランザクションで行い、
+    /// 登録した参照を返す（新旧が同一の参照なら登録せず nil。現在参照中の実体を削除対象に
+    /// しないため）。呼び出し元はコミット後に戻り値の実体を削除し、成功したら
+    /// `clearPendingFileDeletion` で行を消す（5 章の手順 3）
+    func replaceWorkingSource(_ input: ReplaceWorkingSourceInput) async throws -> ManagedFileRef?
 
     /// 履歴の既存 Project へ処理用素材を再接続する（下記）
     func attachWorkingSourceToExistingProject(
