@@ -56,13 +56,6 @@ func customStampIDHoldsRawValue() {
     #expect(subject.rawValue == id)
 }
 
-@Test("ExportQueueItemIDがSendable/Hashableでraw値を保持する")
-func exportQueueItemIDHoldsRawValue() {
-    let id = UUID()
-    let subject = assertSendableHashable(ExportQueueItemID(rawValue: id))
-    #expect(subject.rawValue == id)
-}
-
 @Test("異なるUUIDから作ったID同士はHashableとして区別される")
 func distinctRawValuesProduceDistinctIdentifiers() {
     let first = ProjectID(rawValue: UUID())

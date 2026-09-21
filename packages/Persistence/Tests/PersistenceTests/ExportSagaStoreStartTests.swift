@@ -4,14 +4,19 @@ import Domain
 @testable import Persistence
 
 // ExportSagaStoreLive.startExportのテスト（export-saga.md 1章「認可」・1.6「開始の順序」
-// 手順4〜5が正本）。ここでは勘定モード（ExportAccountingMode）の解決結果を検証する。
-// 入力検証・DB破損検知のテストはExportSagaStoreStartValidationTests.swiftへ分離した
-// （400行制限のため）。
+// 手順4〜5が正本）。ここでは単体書き出し（batchID == nil）の勘定モード
+// （ExportAccountingMode）の解決結果を検証する。入力検証・DB破損検知のテストは
+// ExportSagaStoreStartValidationTests.swiftへ分離した（400行制限のため）。
 //
 // 1.1（確認の一致）・1.2（能力）の検査はPersistenceのスコープ外（オーケストレーター確定
 // 判断。ExportSagaStoreLive+Start.swiftのコメント参照）のため、ここでは検証しない。
 // 月間枠チェック（monthlyLimitReached）はTask 5後半で実装済み。専用テストは
 // ExportSagaStoreQuotaTests.swiftへ分離した（400行制限）。
+//
+// バッチの勘定解決（trial残クレジット・proBatch資格）はcreateBatchへ移設した
+// （一括処理キュー簡素化 Issue #40 決定2）。startExportのバッチ経路はBatch行に
+// 固定済みの認可を読むだけで再評価しないため、旧来ここにあったバッチ経路の
+// 勘定解決テストはExportSagaStoreCreateBatchTests.swiftへ移設した。
 
 @Suite("ExportSagaStoreLive.startExport")
 struct ExportSagaStoreStartTests {
@@ -60,32 +65,6 @@ struct ExportSagaStoreStartTests {
             return
         }
         #expect(job.authorization.accountingMode == .freeMonthlyConsume)
-    }
-
-    @Test("残クレジットがあるトライアルバッチの書き出しはbatchTrialで認可されること")
-    func authorizesTrialBatchWithRemainingCreditsAsBatchTrial() async throws {
-        let (database, url) = try makeTestAppDatabase()
-        defer { try? FileManager.default.removeItem(at: url) }
-        let projectID = ProjectID(rawValue: UUID())
-        let batchID = BatchID(rawValue: UUID())
-        try await database.dbQueue.write { connection in
-            try insertProject(connection, projectID: projectID.rawValue)
-            try insertSubscriptionStateRow(connection, plan: 1, status: 1)
-            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 2, trialCreditCount: 5)
-            try insertUsageLedgerRow(connection, trialConsumedCount: 2)
-        }
-        let store = makeExportSagaStore(database: database)
-
-        let decision = try await store.startExport(
-            try makeStartExportInputFixture(projectID: projectID, batchID: batchID), expectedProjectRevision: 0
-        )
-
-        guard case let .authorized(job) = decision else {
-            Issue.record("authorizedであるべき")
-            return
-        }
-        #expect(job.authorization.accountingMode == .batchTrial)
-        #expect(job.batchID == batchID)
     }
 
     @Test("SubscriptionState行が無い場合capabilityVerificationRequiredでblockedになること")
@@ -187,114 +166,5 @@ struct ExportSagaStoreStartTests {
             return
         }
         #expect(job.authorization.accountingMode == .freeMonthlyConsume)
-    }
-
-    @Test("トライアルクレジットを使い切ったバッチはtrialCreditsUnavailableでblockedになること")
-    func blocksTrialBatchWhenCreditsExhausted() async throws {
-        let (database, url) = try makeTestAppDatabase()
-        defer { try? FileManager.default.removeItem(at: url) }
-        let projectID = ProjectID(rawValue: UUID())
-        let batchID = BatchID(rawValue: UUID())
-        try await database.dbQueue.write { connection in
-            try insertProject(connection, projectID: projectID.rawValue)
-            try insertSubscriptionStateRow(connection, plan: 1, status: 1)
-            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 2, trialCreditCount: 3)
-            try insertUsageLedgerRow(connection, trialConsumedCount: 3)
-        }
-        let store = makeExportSagaStore(database: database)
-
-        let decision = try await store.startExport(
-            try makeStartExportInputFixture(projectID: projectID, batchID: batchID), expectedProjectRevision: 0
-        )
-
-        guard case let .blocked(block) = decision else {
-            Issue.record("blockedであるべき")
-            return
-        }
-        #expect(block.reason == .trialCreditsUnavailable)
-        #expect(block.limit == 3)
-    }
-
-    @Test("proBatchでcanUseProBatchがtrueならpaidUnlimitedで認可されること")
-    func authorizesProBatchWhenCapableAsPaidUnlimited() async throws {
-        let (database, url) = try makeTestAppDatabase()
-        defer { try? FileManager.default.removeItem(at: url) }
-        let projectID = ProjectID(rawValue: UUID())
-        let batchID = BatchID(rawValue: UUID())
-        try await database.dbQueue.write { connection in
-            try insertProject(connection, projectID: projectID.rawValue)
-            // plan 3 = pro（active）。ResolveCapabilities.swiftのcapabilities(forPlan: .pro)は
-            // canUseProBatch == trueを返す。
-            try insertSubscriptionStateRow(connection, plan: 3, status: 1)
-            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 1, trialCreditCount: 0)
-        }
-        let store = makeExportSagaStore(database: database)
-
-        let decision = try await store.startExport(
-            try makeStartExportInputFixture(projectID: projectID, batchID: batchID), expectedProjectRevision: 0
-        )
-
-        guard case let .authorized(job) = decision else {
-            Issue.record("authorizedであるべき")
-            return
-        }
-        #expect(job.authorization.accountingMode == .paidUnlimited)
-    }
-
-    @Test("proBatchでcanUseProBatchがfalseならcapabilityVerificationRequiredでblockedになること")
-    func blocksProBatchWhenIncapableAsCapabilityVerificationRequired() async throws {
-        let (database, url) = try makeTestAppDatabase()
-        defer { try? FileManager.default.removeItem(at: url) }
-        let projectID = ProjectID(rawValue: UUID())
-        let batchID = BatchID(rawValue: UUID())
-        try await database.dbQueue.write { connection in
-            try insertProject(connection, projectID: projectID.rawValue)
-            // plan 2 = standard（active）。capabilities(forPlan: .standard)はcanUseProBatch
-            // == falseを返すため、proBatch自体は作られていてもここでブロックされる。
-            try insertSubscriptionStateRow(connection, plan: 2, status: 1)
-            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 1, trialCreditCount: 0)
-        }
-        let store = makeExportSagaStore(database: database)
-
-        let decision = try await store.startExport(
-            try makeStartExportInputFixture(projectID: projectID, batchID: batchID), expectedProjectRevision: 0
-        )
-
-        guard case let .blocked(block) = decision else {
-            Issue.record("blockedであるべき")
-            return
-        }
-        #expect(block.reason == .capabilityVerificationRequired)
-    }
-
-    // Pro 加入済みのトライアルバッチ（paidUnlimited 認可）のテストは
-    // ExportSagaStoreStartValidationTests.swift（type_body_length 対応で分離）。
-
-    @Test("トライアルクレジット上限はhardMaxTrialCreditsでクランプされDB上のtrialCreditCountを無条件に信頼しないこと")
-    func clampsTrialCreditLimitToHardMaximum() async throws {
-        let (database, url) = try makeTestAppDatabase()
-        defer { try? FileManager.default.removeItem(at: url) }
-        let projectID = ProjectID(rawValue: UUID())
-        let batchID = BatchID(rawValue: UUID())
-        try await database.dbQueue.write { connection in
-            try insertProject(connection, projectID: projectID.rawValue)
-            try insertSubscriptionStateRow(connection, plan: 1, status: 1)
-            // trialCreditCount=100だが、hardMaxTrialCredits=5でクランプされるため、
-            // 消費済み5件で上限に達したものとしてブロックされるはず。
-            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 2, trialCreditCount: 100)
-            try insertUsageLedgerRow(connection, trialConsumedCount: 5)
-        }
-        let store = makeExportSagaStore(database: database, hardMaxTrialCredits: 5)
-
-        let decision = try await store.startExport(
-            try makeStartExportInputFixture(projectID: projectID, batchID: batchID), expectedProjectRevision: 0
-        )
-
-        guard case let .blocked(block) = decision else {
-            Issue.record("hardMaxTrialCreditsでクランプされずauthorizedになった")
-            return
-        }
-        #expect(block.reason == .trialCreditsUnavailable)
-        #expect(block.limit == 5)
     }
 }

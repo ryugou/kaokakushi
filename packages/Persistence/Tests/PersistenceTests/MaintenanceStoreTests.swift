@@ -53,6 +53,36 @@ struct MaintenanceStoreTests {
         #expect(remaining.first?.file.fileID.rawValue == keepFileID)
     }
 
+    @Test(
+        "loadPendingFileDeletionsが未知のkind値を持つ行に対しunknownPendingFileDeletionKindをthrowすること"
+    )
+    func loadPendingFileDeletionsThrowsForUnknownKind() async throws {
+        let (database, url) = try makeTestAppDatabase()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let (root, directories) = makeTemporaryDirectories()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MaintenanceStoreLive(database: database, directories: directories)
+        // ManagedFileKindのraw valueは1〜6（ManagedFileRef.swift）。999はどのcaseとも
+        // 一致しない値として、スキーマとDomainのenumの不整合を模す。
+        let unknownKindRawValue: UInt32 = 999
+        try await database.dbQueue.write { connection in
+            try insertPendingFileDeletion(connection, kind: unknownKindRawValue, fileID: UUID())
+        }
+
+        do {
+            _ = try await store.loadPendingFileDeletions()
+            Issue.record("未知のkind値を持つ行が存在するのにloadPendingFileDeletionsがthrowしなかった")
+        } catch let error as MaintenanceStoreError {
+            guard case .unknownPendingFileDeletionKind(let rawValue) = error else {
+                Issue.record("期待したエラーケース(unknownPendingFileDeletionKind)ではない: \(error)")
+                return
+            }
+            #expect(rawValue == Int(unknownKindRawValue))
+        } catch {
+            Issue.record("MaintenanceStoreError以外がthrowされた: \(error)")
+        }
+    }
+
     @Test("listExistingFileIDsがディスク上のファイルを返しUUIDとしてパースできない名前を無視すること")
     func listExistingFileIDsReturnsFilesOnDiskIgnoringUnparseableNames() async throws {
         let (database, url) = try makeTestAppDatabase()

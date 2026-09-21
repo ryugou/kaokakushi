@@ -35,13 +35,22 @@ func insertProject(_ database: Database, projectID: UUID) throws {
     )
 }
 
+/// 認可7列（authorizedAt/accountingMode/entitlement*。Schema+Queue.swift参照）はNOT NULL
+/// 制約を満たすための構造的な固定値で、値そのものに意味は無い。このヘルパーはHistory
+/// DeletionStore/SchemaConstraintTests等、ExportSagaStoreの認可ロジックを検証しない
+/// テストが「Batch行がFK参照先として存在する」ことだけを必要とする場面向けのため
+/// （ExportSagaStoreの認可解決〈trial残クレジット・proBatch資格〉を検証したいテストは
+/// ExportSagaStoreTestSupport.createAuthorizedBatch〈実際のcreateBatch経由〉を使うこと）。
 func insertBatch(_ database: Database, batchID: UUID) throws {
     try database.execute(
         sql: """
-        INSERT INTO Batch (batchID, kind, batchSizeLimit, trialCreditCount, concurrencyLimit)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO Batch (
+            batchID, kind, batchSizeLimit, trialCreditCount, concurrencyLimit,
+            authorizedAt, accountingMode, entitlementPlan, entitlementStatus,
+            entitlementExpiresAt, entitlementLastVerifiedAt, entitlementIsSandbox
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        arguments: [batchID, 1, 10, 0, 1]
+        arguments: [batchID, 1, 10, 0, 1, schemaTestReferenceDate, 1, 2, 1, nil, schemaTestReferenceDate, false]
     )
 }
 
@@ -84,23 +93,6 @@ func insertWorkingSourceRecord(_ database: Database, projectID: UUID, sourceFile
     )
 }
 
-func insertExportQueueItem(
-    _ database: Database,
-    queueItemID: UUID,
-    projectID: UUID,
-    batchID: UUID
-) throws {
-    try database.execute(
-        sql: """
-        INSERT INTO ExportQueueItem (
-            queueItemID, projectID, batchID, state, failureErrorCode,
-            failureIsRetryable, failureOccurredAt, pauseReason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        arguments: [queueItemID, projectID, batchID, 0, nil, nil, nil, nil]
-    )
-}
-
 func insertExportRecord(_ database: Database, exportID: UUID, projectID: UUID, batchID: UUID?) throws {
     try database.execute(
         sql: """
@@ -127,14 +119,14 @@ func insertExportJob(
     try database.execute(
         sql: """
         INSERT INTO ExportJob (
-            exportID, projectID, batchID, queueItemID, authorizedAt, accountingMode,
+            exportID, projectID, batchID, authorizedAt, accountingMode,
             entitlementPlan, entitlementStatus, entitlementExpiresAt,
             entitlementLastVerifiedAt, entitlementIsSandbox, deliveryFormat,
             deliverySuggestedCreationDate, settingsHash
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         arguments: [
-            exportID, projectID, batchID, nil, schemaTestReferenceDate, 1,
+            exportID, projectID, batchID, schemaTestReferenceDate, 1,
             1, 1, nil, schemaTestReferenceDate, false, 1, nil, settingsHash
         ]
     )
@@ -227,14 +219,6 @@ func countWorkingSourceRecordRows(_ database: Database, projectID: UUID) throws 
     try Int.fetchOne(
         database,
         sql: "SELECT count(*) FROM WorkingSourceRecord WHERE projectID = ?",
-        arguments: [projectID]
-    ) ?? -1
-}
-
-func countExportQueueItemRows(_ database: Database, projectID: UUID) throws -> Int {
-    try Int.fetchOne(
-        database,
-        sql: "SELECT count(*) FROM ExportQueueItem WHERE projectID = ?",
         arguments: [projectID]
     ) ?? -1
 }

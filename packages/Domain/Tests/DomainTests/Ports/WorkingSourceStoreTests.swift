@@ -77,8 +77,8 @@ func workingSourceRecordHoldsAllFields() {
 
 // MARK: - CreateWorkingSourceInput / ReplaceWorkingSourceInput / AttachWorkingSourceInput
 
-@Test("CreateWorkingSourceInputが全フィールドを保持し単体書き出しではbatchIDとqueueItemIDにnilを許容する")
-func createWorkingSourceInputHoldsAllFieldsAndAllowsNilOptionals() throws {
+@Test("CreateWorkingSourceInputが全フィールドを保持する")
+func createWorkingSourceInputHoldsAllFields() throws {
     let projectID = ProjectID(rawValue: UUID())
     let sourceFile = makeWorkingSourceFileRef()
     let createdAt = Date(timeIntervalSince1970: 1_700_000_000)
@@ -88,8 +88,6 @@ func createWorkingSourceInputHoldsAllFieldsAndAllowsNilOptionals() throws {
 
     let subject = CreateWorkingSourceInput(
         projectID: projectID,
-        batchID: nil,
-        queueItemID: nil,
         sourceFile: sourceFile,
         createdAt: createdAt,
         sourceLocator: locator,
@@ -100,8 +98,6 @@ func createWorkingSourceInputHoldsAllFieldsAndAllowsNilOptionals() throws {
     )
 
     #expect(subject.projectID == projectID)
-    #expect(subject.batchID == nil)
-    #expect(subject.queueItemID == nil)
     #expect(subject.sourceFile == sourceFile)
     #expect(subject.createdAt == createdAt)
     #expect(subject.sourceLocator == locator)
@@ -111,16 +107,12 @@ func createWorkingSourceInputHoldsAllFieldsAndAllowsNilOptionals() throws {
     #expect(subject.initialSpec == initialSpec)
 }
 
-@Test("CreateWorkingSourceInputは一括処理でbatchIDとqueueItemIDを保持する")
-func createWorkingSourceInputHoldsBatchAndQueueItemIDsWhenPresent() throws {
-    let batchID = BatchID(rawValue: UUID())
-    let queueItemID = ExportQueueItemID(rawValue: UUID())
+@Test("CreateWorkingSourceInputはlibraryCreationDateとrepresentationを渡された値どおりに保持する")
+func createWorkingSourceInputHoldsLibraryCreationDateAndRepresentation() throws {
     let libraryCreationDate = Date(timeIntervalSince1970: 1_699_999_000)
 
     let subject = CreateWorkingSourceInput(
         projectID: ProjectID(rawValue: UUID()),
-        batchID: batchID,
-        queueItemID: queueItemID,
         sourceFile: makeWorkingSourceFileRef(),
         createdAt: Date(timeIntervalSince1970: 1_700_000_000),
         sourceLocator: ProjectSourceLocator(photoLibraryLocalIdentifier: "asset-2"),
@@ -130,8 +122,6 @@ func createWorkingSourceInputHoldsBatchAndQueueItemIDsWhenPresent() throws {
         initialSpec: try makeRenderSpec()
     )
 
-    #expect(subject.batchID == batchID)
-    #expect(subject.queueItemID == queueItemID)
     #expect(subject.libraryCreationDate == libraryCreationDate)
     #expect(subject.representation == .transcoded)
 }
@@ -234,8 +224,6 @@ func fakeWorkingSourceStoreForwardsArguments() async throws {
 
     let createInput = CreateWorkingSourceInput(
         projectID: ProjectID(rawValue: UUID()),
-        batchID: nil,
-        queueItemID: nil,
         sourceFile: makeWorkingSourceFileRef(),
         createdAt: Date(timeIntervalSince1970: 1_700_000_000),
         sourceLocator: ProjectSourceLocator(photoLibraryLocalIdentifier: nil),

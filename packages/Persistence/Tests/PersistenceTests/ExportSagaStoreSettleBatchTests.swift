@@ -4,10 +4,6 @@ import Domain
 @testable import Persistence
 
 // ExportSagaStoreLive.settleBatchのテスト（export-saga.md 3章「手順」手順5が正本）。
-// queueItem事前条件のstate/projectID不一致は、job.batchIDが非nilである場合にのみ意味を成す
-// （validateQueueItemForSettleはjob.batchIDがnilなら先にbatchID不一致でthrowするため）。
-// settleExportは単体専用でjob.batchID == nilが前提のため、この2ケースはsettleBatch側で
-// 検証する（ExportSagaStoreSettleTests.swiftのコメント参照）。
 
 @Suite("ExportSagaStoreLive.settleBatch")
 struct ExportSagaStoreSettleBatchTests {
@@ -21,9 +17,7 @@ struct ExportSagaStoreSettleBatchTests {
         let secondProjectID = ProjectID(rawValue: UUID())
         try await seedAuthorizedProject(database, projectID: firstProjectID)
         try await seedAuthorizedProject(database, projectID: secondProjectID)
-        try await database.dbQueue.write { connection in
-            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 2, trialCreditCount: 10)
-        }
+        _ = try await createAuthorizedBatch(store: store, batchID: batchID, kind: .trial, trialCreditCount: 10)
         let firstJob = try await authorizeExportJob(store: store, projectID: firstProjectID, batchID: batchID)
         let secondJob = try await authorizeExportJob(store: store, projectID: secondProjectID, batchID: batchID)
         try await store.recordGeneratedOutput(RecordOutputInput(
@@ -59,9 +53,7 @@ struct ExportSagaStoreSettleBatchTests {
         let noOutputProjectID = ProjectID(rawValue: UUID())
         try await seedAuthorizedProject(database, projectID: pendingProjectID)
         try await seedAuthorizedProject(database, projectID: noOutputProjectID)
-        try await database.dbQueue.write { connection in
-            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 2, trialCreditCount: 10)
-        }
+        _ = try await createAuthorizedBatch(store: store, batchID: batchID, kind: .trial, trialCreditCount: 10)
         let pendingJob = try await authorizeExportJob(store: store, projectID: pendingProjectID, batchID: batchID)
         let noOutputJob = try await authorizeExportJob(store: store, projectID: noOutputProjectID, batchID: batchID)
         try await store.recordGeneratedOutput(RecordOutputInput(
@@ -90,9 +82,7 @@ struct ExportSagaStoreSettleBatchTests {
         let batchID = BatchID(rawValue: UUID())
         let projectID = ProjectID(rawValue: UUID())
         try await seedAuthorizedProject(database, projectID: projectID)
-        try await database.dbQueue.write { connection in
-            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 2, trialCreditCount: 10)
-        }
+        _ = try await createAuthorizedBatch(store: store, batchID: batchID, kind: .trial, trialCreditCount: 10)
         let job = try await authorizeExportJob(store: store, projectID: projectID, batchID: batchID)
         try await store.recordGeneratedOutput(RecordOutputInput(
             exportID: job.exportID, outputFile: makeOutputFileRefFixture(), outputByteSize: 1_500,
@@ -162,90 +152,4 @@ struct ExportSagaStoreSettleBatchTests {
         #expect(fields?.settledAt == nil)
     }
 
-    @Test("バッチ内のqueueItemのstateがexportingでなければsettleQueueItemPreconditionFailedでthrowすること")
-    func rejectsWhenQueueItemStateNotExporting() async throws {
-        try await assertQueueItemPreconditionRejectedViaSettleBatch(mismatch: .wrongState)
-    }
-
-    @Test("バッチ内のqueueItemのprojectIDが一致しなければsettleQueueItemPreconditionFailedでthrowすること")
-    func rejectsWhenQueueItemProjectIDMismatch() async throws {
-        try await assertQueueItemPreconditionRejectedViaSettleBatch(mismatch: .wrongProjectID)
-    }
-
-    private enum QueueItemMismatch {
-        case wrongState
-        case wrongProjectID
-    }
-
-    /// assertQueueItemPreconditionRejectedViaSettleBatchのセットアップ部分（proBatch
-    /// 〈paidUnlimited〉でqueueItemID付きのジョブを認可し、OutputRecordまで作る）を分離した
-    /// （関数50行制限）。startExportが失敗した場合はテスト前提の破損としてfatalErrorする
-    /// （authorizeExportJobと同じ方針。テスト対象の挙動ではないため#expect/Issue.recordでは
-    /// なく即座に落とす）。
-    private func authorizeProBatchJobWithQueueItem(
-        store: ExportSagaStoreLive, database: AppDatabase,
-        projectID: ProjectID, batchID: BatchID, queueItemID: ExportQueueItemID
-    ) async throws -> ExportJob {
-        try await database.dbQueue.write { connection in
-            try insertProject(connection, projectID: projectID.rawValue)
-            try insertSubscriptionStateRow(connection, plan: 3, status: 1)
-            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 1, trialCreditCount: 0)
-        }
-        let decision = try await store.startExport(
-            try makeStartExportInputFixture(projectID: projectID, batchID: batchID, queueItemID: queueItemID),
-            expectedProjectRevision: 0
-        )
-        guard case let .authorized(job) = decision else {
-            fatalError("test setup invariant violated: startExport should authorize a freshly seeded proBatch project")
-        }
-        try await store.recordGeneratedOutput(RecordOutputInput(
-            exportID: job.exportID, outputFile: makeOutputFileRefFixture(), outputByteSize: 1_024,
-            outputSHA256: Data(repeating: 0x50, count: 32)
-        ))
-        return job
-    }
-
-    /// rejectsWhenQueueItemStateNotExporting / rejectsWhenQueueItemProjectIDMismatchが共有する
-    /// セットアップ。ExportQueueItem行をstate/projectIDのいずれかだけ不一致にして直接挿入する。
-    private func assertQueueItemPreconditionRejectedViaSettleBatch(mismatch: QueueItemMismatch) async throws {
-        let (database, url) = try makeTestAppDatabase()
-        defer { try? FileManager.default.removeItem(at: url) }
-        let store = makeExportSagaStore(database: database)
-        let projectID = ProjectID(rawValue: UUID())
-        let batchID = BatchID(rawValue: UUID())
-        let queueItemID = ExportQueueItemID(rawValue: UUID())
-        let job = try await authorizeProBatchJobWithQueueItem(
-            store: store, database: database, projectID: projectID, batchID: batchID, queueItemID: queueItemID
-        )
-        try await database.dbQueue.write { connection in
-            switch mismatch {
-            case .wrongState:
-                try insertExportQueueItemWithState(
-                    connection, queueItemID: queueItemID.rawValue, projectID: projectID.rawValue,
-                    batchID: batchID.rawValue, state: 1
-                )
-            case .wrongProjectID:
-                let unrelatedProjectID = UUID()
-                try insertProject(connection, projectID: unrelatedProjectID)
-                try insertExportQueueItemWithState(
-                    connection, queueItemID: queueItemID.rawValue, projectID: unrelatedProjectID,
-                    batchID: batchID.rawValue, state: 4
-                )
-            }
-        }
-
-        do {
-            try await store.settleBatch(batchID, settledAt: schemaTestReferenceDate)
-            Issue.record("キュー項目の事前条件が満たされていないのにsettleBatchが成功した")
-        } catch let error as ExportSagaStoreError {
-            guard case .settleQueueItemPreconditionFailed = error else {
-                Issue.record("期待したエラーケース(settleQueueItemPreconditionFailed)ではない: \(error)")
-                return
-            }
-        } catch {
-            Issue.record("ExportSagaStoreError以外がthrowされた: \(error)")
-        }
-
-        #expect(try exportJobExists(database, exportID: job.exportID.rawValue))
-    }
 }

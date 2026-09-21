@@ -9,7 +9,7 @@ import CryptoKit
 // importCustomStamp（architecture.md「StampStore」節・「内容ハッシュの対象」節が正本）。
 
 /// StampStoreLiveが送出する専用エラー。運用者が次のアクションを判断できるよう、
-/// 契約違反の詳細を持つ（WorkingSourceStoreError/HistoryDeletionStoreErrorと同じ方針:
+/// 契約違反の詳細を持つ（HistoryDeletionStoreErrorと同じ方針:
 /// Sendable, Equatable, LocalizedError）。
 public enum StampStoreError: Error, Sendable, Equatable {
     /// insertStampRows: 既存CustomStamp.sortOrderの最大値が既にInt32.maxだった。このまま

@@ -51,20 +51,25 @@ public struct ExportedSettingsEntryStoreLive: ExportedSettingsEntryStore {
     /// ProjectSettingsHashの想定長と一致しなければ握りつぶさずthrowする
     /// （invalidColumnValue系と同じ「握りつぶさずfail-closedで報告する」方針）。
     public func loadEntry(for projectID: ProjectID) async throws -> ExportedSettingsEntry? {
-        let row: Row? = try await database.dbQueue.read { connection in
-            try Row.fetchOne(
+        // 戻り値型を明示する（toolchain 差の推論割れ対策。Package.swift の GRDB ピン注記参照）
+        let entry: ExportedSettingsEntry? = try await database.dbQueue.read { connection in
+            guard let row = try Row.fetchOne(
                 connection,
                 sql: "SELECT settingsHash, exportedAt FROM ExportedSettingsEntry WHERE projectID = ?",
                 arguments: [projectID.rawValue]
+            ) else {
+                return nil
+            }
+            let hashBytes: Data = row["settingsHash"]
+            guard let settingsHash = try? ProjectSettingsHash(bytes: hashBytes) else {
+                throw ExportedSettingsEntryStoreError.invalidSettingsHashLength(
+                    projectID: projectID, byteCount: hashBytes.count
+                )
+            }
+            return ExportedSettingsEntry(
+                projectID: projectID, settingsHash: settingsHash, exportedAt: row["exportedAt"]
             )
         }
-        guard let row else { return nil }
-        let hashBytes: Data = row["settingsHash"]
-        guard let settingsHash = try? ProjectSettingsHash(bytes: hashBytes) else {
-            throw ExportedSettingsEntryStoreError.invalidSettingsHashLength(
-                projectID: projectID, byteCount: hashBytes.count
-            )
-        }
-        return ExportedSettingsEntry(projectID: projectID, settingsHash: settingsHash, exportedAt: row["exportedAt"])
+        return entry
     }
 }

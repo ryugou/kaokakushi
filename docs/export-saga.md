@@ -130,7 +130,6 @@ struct ExportSetting: Sendable, Equatable {
 struct CreateBatchInput: Sendable {
     let batchID: BatchID
     let policy: BatchPolicySnapshot   // 作成時の設定定数から作る（アーキテクチャ設計 6.4）
-    let createdAt: Date
 }
 enum BatchCreateDecision: Sendable {
     case blocked(ExportStartBlock)          // バッチは作成されない

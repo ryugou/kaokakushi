@@ -6,8 +6,9 @@ import Foundation
 ///
 /// `ExportSagaStore` は具体的なロジックを持たないプロトコルのため、ここでは
 /// (1) プロトコルへの最小準拠がコンパイルでき、各メソッドがシグネチャどおりの引数を
-/// 受け取ること、(2) 入力型（StartExportInput / RecordOutputInput）が全フィールドを
-/// 保持すること、(3) ExportStartDecision の2ケースを区別できることを検証する。
+/// 受け取ること、(2) 入力型（StartExportInput / RecordOutputInput / CreateBatchInput）が
+/// 全フィールドを保持すること、(3) ExportStartDecision の3ケースと BatchCreateDecision の
+/// 2ケースを区別できることを検証する。
 
 private func makeProjectID() -> ProjectID { ProjectID(rawValue: UUID()) }
 
@@ -45,7 +46,6 @@ private func makeExportJob(exportID: ExportID, projectID: ProjectID) -> ExportJo
         exportID: exportID,
         projectID: projectID,
         batchID: nil,
-        queueItemID: nil,
         authorization: ExportAuthorization(
             entitlementSnapshot: entitlement,
             accountingMode: .freeMonthlyConsume,
@@ -57,7 +57,7 @@ private func makeExportJob(exportID: ExportID, projectID: ProjectID) -> ExportJo
 
 // MARK: - StartExportInput / RecordOutputInput のフィールド保持
 
-@Test("StartExportInputが全フィールドを保持し単体書き出しではbatchIDとqueueItemIDにnilを許容する")
+@Test("StartExportInputが全フィールドを保持し単体書き出しではbatchIDにnilを許容する")
 func startExportInputHoldsAllFieldsAndAllowsNilForSingleExport() throws {
     let projectID = makeProjectID()
     let renderSpec = try makeRenderSpec()
@@ -67,7 +67,6 @@ func startExportInputHoldsAllFieldsAndAllowsNilForSingleExport() throws {
     let subject = StartExportInput(
         projectID: projectID,
         batchID: nil,
-        queueItemID: nil,
         renderSpec: renderSpec,
         exportSetting: exportSetting,
         previewConfirmation: previewConfirmation
@@ -75,29 +74,25 @@ func startExportInputHoldsAllFieldsAndAllowsNilForSingleExport() throws {
 
     #expect(subject.projectID == projectID)
     #expect(subject.batchID == nil)
-    #expect(subject.queueItemID == nil)
     #expect(subject.renderSpec == renderSpec)
     #expect(subject.exportSetting == exportSetting)
     #expect(subject.previewConfirmation == previewConfirmation)
 }
 
-@Test("StartExportInputはバッチ書き出しでbatchIDとqueueItemIDを保持する")
-func startExportInputHoldsBatchAndQueueItemIDsWhenPresent() throws {
+@Test("StartExportInputはバッチ書き出しでbatchIDを保持する")
+func startExportInputHoldsBatchIDWhenPresent() throws {
     let projectID = makeProjectID()
     let batchID = BatchID(rawValue: UUID())
-    let queueItemID = ExportQueueItemID(rawValue: UUID())
 
     let subject = StartExportInput(
         projectID: projectID,
         batchID: batchID,
-        queueItemID: queueItemID,
         renderSpec: try makeRenderSpec(),
         exportSetting: makeExportSetting(),
         previewConfirmation: try makePreviewConfirmation(projectID: projectID)
     )
 
     #expect(subject.batchID == batchID)
-    #expect(subject.queueItemID == queueItemID)
 }
 
 @Test("RecordOutputInputが全フィールドを保持する")
@@ -119,7 +114,7 @@ func recordOutputInputHoldsAllFields() {
     #expect(subject.outputSHA256 == sha256)
 }
 
-// MARK: - ExportStartDecision の2ケース
+// MARK: - ExportStartDecision の3ケース / BatchCreateDecision の2ケース
 
 @Test("ExportStartDecision.blockedはExportStartBlockを保持する")
 func exportStartDecisionBlockedHoldsBlock() {
@@ -143,9 +138,61 @@ func exportStartDecisionAuthorizedHoldsJob() {
     #expect(heldJob.exportID == job.exportID)
 }
 
+@Test("ExportStartDecision.staleProjectRevisionは他ケースと区別できる")
+func exportStartDecisionStaleProjectRevisionIsDistinctFromOtherCases() {
+    let subject = ExportStartDecision.staleProjectRevision
+
+    guard case .staleProjectRevision = subject else {
+        Issue.record("staleProjectRevisionケースであるべき")
+        return
+    }
+    if case .blocked = subject {
+        Issue.record("blockedケースと誤認識してはならない")
+    }
+    if case .authorized = subject {
+        Issue.record("authorizedケースと誤認識してはならない")
+    }
+}
+
+@Test("BatchCreateDecision.blockedはExportStartBlockを保持する")
+func batchCreateDecisionBlockedHoldsBlock() {
+    let block = ExportStartBlock(reason: .monthlyLimitReached, limit: 10)
+    let subject = BatchCreateDecision.blocked(block)
+    guard case let .blocked(heldBlock) = subject else {
+        Issue.record("blockedケースであるべき")
+        return
+    }
+    #expect(heldBlock == block)
+}
+
+@Test("BatchCreateDecision.createdはExportAuthorizationを保持する")
+func batchCreateDecisionCreatedHoldsAuthorization() {
+    let entitlement = Entitlement(
+        plan: .free,
+        status: .active,
+        expiresAt: nil,
+        lastVerifiedAt: Date(timeIntervalSince1970: 0),
+        isSandbox: false
+    )
+    let authorization = ExportAuthorization(
+        entitlementSnapshot: entitlement,
+        accountingMode: .freeMonthlyConsume,
+        authorizedAt: Date(timeIntervalSince1970: 100)
+    )
+    let subject = BatchCreateDecision.created(authorization)
+    guard case let .created(heldAuthorization) = subject else {
+        Issue.record("createdケースであるべき")
+        return
+    }
+    #expect(heldAuthorization.entitlementSnapshot == authorization.entitlementSnapshot)
+    #expect(heldAuthorization.accountingMode == authorization.accountingMode)
+    #expect(heldAuthorization.authorizedAt == authorization.authorizedAt)
+}
+
 // MARK: - ExportSagaStore への最小準拠（引数がシグネチャどおり伝わることを検証）
 
 private actor FakeExportSagaStore: ExportSagaStore {
+    private(set) var createBatchCalls: [CreateBatchInput] = []
     private(set) var startExportCalls: [(input: StartExportInput, expectedProjectRevision: Int64)] = []
     private(set) var recordGeneratedOutputCalls: [RecordOutputInput] = []
     private(set) var settleExportCalls: [ExportID] = []
@@ -153,12 +200,20 @@ private actor FakeExportSagaStore: ExportSagaStore {
     private(set) var discardExportCalls: [(exportID: ExportID, temporaryFiles: [ManagedFileRef])] = []
     private(set) var loadRunningJobsCallCount = 0
     private(set) var deleteRunningJobsCalls: [[ExportID]] = []
+    private(set) var deleteUnsettledBatchesCallCount = 0
 
+    var createBatchResult: BatchCreateDecision
     var startExportResult: ExportStartDecision
     var loadRunningJobsResult: [ExportJob] = []
 
-    init(startExportResult: ExportStartDecision) {
+    init(createBatchResult: BatchCreateDecision, startExportResult: ExportStartDecision) {
+        self.createBatchResult = createBatchResult
         self.startExportResult = startExportResult
+    }
+
+    func createBatch(_ input: CreateBatchInput) async throws -> BatchCreateDecision {
+        createBatchCalls.append(input)
+        return createBatchResult
     }
 
     func startExport(_ input: StartExportInput, expectedProjectRevision: Int64) async throws -> ExportStartDecision {
@@ -190,18 +245,49 @@ private actor FakeExportSagaStore: ExportSagaStore {
     func deleteRunningJobs(_ exportIDs: [ExportID]) async throws {
         deleteRunningJobsCalls.append(exportIDs)
     }
+
+    func deleteUnsettledBatches() async throws {
+        deleteUnsettledBatchesCallCount += 1
+    }
+}
+
+@Test("ExportSagaStoreへの最小準拠がcreateBatchの呼び出し引数を渡された値どおりに記録する")
+func fakeExportSagaStoreForwardsCreateBatchArguments() async throws {
+    let expectedBlock = ExportStartBlock(reason: .trialCreditsUnavailable, limit: nil)
+    let store = FakeExportSagaStore(
+        createBatchResult: .blocked(expectedBlock),
+        startExportResult: .blocked(expectedBlock)
+    )
+
+    let batchPolicy = BatchPolicySnapshot(kind: .proBatch, batchSizeLimit: 50, trialCreditCount: 0, concurrencyLimit: 2)
+    let batchID = BatchID(rawValue: UUID())
+    let input = CreateBatchInput(batchID: batchID, policy: batchPolicy)
+
+    let decision = try await store.createBatch(input)
+    guard case let .blocked(block) = decision else {
+        Issue.record("blockedケースであるべき")
+        return
+    }
+    #expect(block == expectedBlock)
+
+    let createBatchCalls = await store.createBatchCalls
+    #expect(createBatchCalls.count == 1)
+    #expect(createBatchCalls[0].batchID == batchID)
+    #expect(createBatchCalls[0].policy == batchPolicy)
 }
 
 @Test("ExportSagaStoreへの最小準拠が全メソッドの引数を渡された値どおりに記録する")
 func fakeExportSagaStoreForwardsArguments() async throws {
     let projectID = makeProjectID()
     let expectedBlock = ExportStartBlock(reason: .trialCreditsUnavailable, limit: nil)
-    let store = FakeExportSagaStore(startExportResult: .blocked(expectedBlock))
+    let store = FakeExportSagaStore(
+        createBatchResult: .blocked(expectedBlock),
+        startExportResult: .blocked(expectedBlock)
+    )
 
     let input = StartExportInput(
         projectID: projectID,
         batchID: nil,
-        queueItemID: nil,
         renderSpec: try makeRenderSpec(),
         exportSetting: makeExportSetting(),
         previewConfirmation: try makePreviewConfirmation(projectID: projectID)
@@ -249,10 +335,10 @@ func fakeExportSagaStoreForwardsArguments() async throws {
     #expect(settleBatchCalls[0].settledAt == settledAt)
 }
 
-@Test("ExportSagaStoreへの最小準拠がdiscard/loadRunningJobs/deleteRunningJobsの引数を記録する")
+@Test("ExportSagaStoreへの最小準拠がdiscard/loadRunningJobs/deleteRunningJobs/deleteUnsettledBatchesの呼び出しを記録する")
 func fakeExportSagaStoreForwardsJobMaintenanceArguments() async throws {
-    let store = FakeExportSagaStore(startExportResult: .blocked(
-        ExportStartBlock(reason: .trialCreditsUnavailable, limit: nil)))
+    let unusedBlock = ExportStartBlock(reason: .trialCreditsUnavailable, limit: nil)
+    let store = FakeExportSagaStore(createBatchResult: .blocked(unusedBlock), startExportResult: .blocked(unusedBlock))
 
     let discardedID = ExportID(rawValue: UUID())
     let temporaryFiles = [
@@ -266,6 +352,8 @@ func fakeExportSagaStoreForwardsJobMaintenanceArguments() async throws {
     let deletedIDs = [ExportID(rawValue: UUID()), ExportID(rawValue: UUID())]
     try await store.deleteRunningJobs(deletedIDs)
 
+    try await store.deleteUnsettledBatches()
+
     let discardCalls = await store.discardExportCalls
     #expect(discardCalls.count == 1)
     #expect(discardCalls[0].exportID == discardedID)
@@ -276,4 +364,7 @@ func fakeExportSagaStoreForwardsJobMaintenanceArguments() async throws {
 
     let deleteCalls = await store.deleteRunningJobsCalls
     #expect(deleteCalls == [deletedIDs])
+
+    let deleteUnsettledBatchesCallCount = await store.deleteUnsettledBatchesCallCount
+    #expect(deleteUnsettledBatchesCallCount == 1)
 }

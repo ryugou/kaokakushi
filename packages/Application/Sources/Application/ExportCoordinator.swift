@@ -29,16 +29,32 @@ public enum ExportStartOutcome: Sendable {
     case renderSpecBlocked(RenderSpecBlockReason)
     case confirmationMismatch
     case workingSourceMissing
+    /// 1.6 手順3: `WorkingSourceRecord` の行自体が存在しない（Project が履歴削除された等で
+    /// FK CASCADE により行ごと消えた状態。再選択では復帰できない。`AppErrorCode.sourceMissing`）。
+    /// 他5ケースと同じく戻り値でモデル化する（reviewer指摘 W-1: この帰結だけ throw にすると
+    /// 呼び出し元の分岐が一貫しなくなる）。
+    case sourceRowMissing
+    /// 1.6 手順5: expectedProjectRevision の不一致。ExportJob は作られず、単体書き出しでは
+    /// この不成立がそのまま書き出し全体の不開始として利用者へ返る（export-saga.md 1.6）。
+    case staleProjectRevision
     case started(ExportJob)
 }
 
 /// `authorizeAndStart` の判定結果。`confirmationMismatch` / `renderSpecBlocked` は呼び出し前に
 /// startExport / startBatchItem 側で判定済みのため、この内部 enum には実際に到達しうる
-/// 3ケースしか存在しない（レビュー第2ラウンド B。旧実装は `ExportStartOutcome` をそのまま
+/// ケースしか存在しない（レビュー第2ラウンド B。旧実装は `ExportStartOutcome` をそのまま
 /// 返し、呼び出し元の switch に到達不能な分岐と `preconditionFailure` が残っていた）。
 enum AuthorizeAndStartOutcome: Sendable {
     case started(ExportJob)
+    /// 1.6 手順3: `WorkingSourceRecord` の行はあるが実体ファイルが無い。invalidateWorkingSource
+    /// を呼んだ後の帰結（再選択導線へ倒す）。
     case workingSourceMissing
+    /// 1.6 手順3: `WorkingSourceRecord` の行自体が存在しない（Project が履歴削除された等で
+    /// FK CASCADE により行ごと消えた状態）。再選択では復帰できないため invalidateWorkingSource
+    /// は呼ばない。
+    case sourceRowMissing
+    /// 1.6 手順5: expectedProjectRevision の不一致。
+    case staleProjectRevision
     case blocked(ExportStartBlock)
 }
 
@@ -127,6 +143,10 @@ public actor ExportCoordinator {
             return .started(job)
         case .workingSourceMissing:
             return .workingSourceMissing
+        case .sourceRowMissing:
+            return .sourceRowMissing
+        case .staleProjectRevision:
+            return .staleProjectRevision
         case .blocked(let block):
             return .blocked(block)
         }
@@ -146,16 +166,22 @@ public actor ExportCoordinator {
 
     // MARK: - 実体確認・startExport 呼び出し（SerialTaskQueue 経由）
 
-    /// 単体は batchID / queueItemID とも nil のまま呼ぶ。バッチ項目の開始
-    /// （ExportCoordinator+Batch.swift の startBatchItem）はこの同じ経路を batchID /
-    /// queueItemID つきで再利用する（1.6 の実体確認・startExport 呼び出し順序は単体・バッチで
+    /// 単体は batchID nil のまま呼ぶ。バッチ項目の開始
+    /// （ExportCoordinator+Batch.swift の startBatchItem）はこの同じ経路を batchID
+    /// つきで再利用する（1.6 の実体確認・startExport 呼び出し順序は単体・バッチで
     /// 変わらないため重複させない）。
     func authorizeAndStart(
         _ request: SingleExportRequest,
-        batchID: BatchID? = nil,
-        queueItemID: ExportQueueItemID? = nil
+        batchID: BatchID? = nil
     ) async throws -> AuthorizeAndStartOutcome {
-        guard try await workingSourceExists(for: request.projectID) else {
+        switch try await checkWorkingSource(for: request.projectID) {
+        case .exists:
+            break
+        case .rowMissing:
+            // 行自体が無いため invalidateWorkingSource を呼ばない（無効化する対象が無い。
+            // export-saga.md 1.6 手順3）。
+            return .sourceRowMissing
+        case .fileMissing:
             try await workingSourceStore.invalidateWorkingSource(request.projectID)
             return .workingSourceMissing
         }
@@ -163,12 +189,11 @@ public actor ExportCoordinator {
         let input = StartExportInput(
             projectID: request.projectID,
             batchID: batchID,
-            queueItemID: queueItemID,
             renderSpec: request.renderSpec,
             exportSetting: request.exportSetting,
             previewConfirmation: request.previewConfirmation
         )
-        // expectedProjectRevision 不一致等の throw はここで catch せず呼び出し元へ伝播させる
+        // ExportSagaStoreError.batchNotFound 等の throw はここで catch せず呼び出し元へ伝播させる
         // （Global Constraints「エラーの握りつぶし禁止」）。
         let decision = try await exportSagaStore.startExport(
             input, expectedProjectRevision: request.expectedProjectRevision
@@ -176,20 +201,35 @@ public actor ExportCoordinator {
         switch decision {
         case .blocked(let block):
             return .blocked(block)
+        case .staleProjectRevision:
+            return .staleProjectRevision
         case .authorized(let job):
             return .started(job)
         }
     }
 
-    /// `WorkingSourceRecord` が無い、または実体ファイルが無ければ false
-    /// （export-saga.md 1.6 手順3）。実体確認は `exists` の存在確認専用 API のみを使う
+    /// `checkWorkingSource` の判定結果（export-saga.md 1.6 手順3）。
+    private enum WorkingSourceCheckResult {
+        /// `WorkingSourceRecord` の行があり、実体ファイルも存在する。
+        case exists
+        /// `WorkingSourceRecord` の行自体が存在しない（Project が履歴削除された等で FK CASCADE
+        /// により行ごと消えた状態。再選択では復帰できない）。
+        case rowMissing
+        /// 行はあるが実体ファイルが無い。
+        case fileMissing
+    }
+
+    /// `WorkingSourceRecord` の行有無と実体ファイルの有無を区別する（export-saga.md 1.6
+    /// 手順3）。行自体が無い場合と実体ファイルが無い場合とで invalidateWorkingSource の
+    /// 呼び出し要否が異なるため、旧来の Bool 専用判定（行欠損・実体欠損を等しく false に
+    /// 潰していた）を廃止した。実体確認は `exists` の存在確認専用 API のみを使う
     /// （image-pipeline.md「実体の存在確認」）。`exists` の throw（保護データ利用不可・
     /// I/O 障害など）は欠損として扱わず、そのまま呼び出し元へ伝播させる
     /// （Global Constraints「エラーの握りつぶし禁止」）。
-    private func workingSourceExists(for projectID: ProjectID) async throws -> Bool {
+    private func checkWorkingSource(for projectID: ProjectID) async throws -> WorkingSourceCheckResult {
         guard let record = try await workingSourceStore.loadWorkingSource(for: projectID) else {
-            return false
+            return .rowMissing
         }
-        return try await managedFileStore.exists(record.sourceFile.ref)
+        return try await managedFileStore.exists(record.sourceFile.ref) ? .exists : .fileMissing
     }
 }

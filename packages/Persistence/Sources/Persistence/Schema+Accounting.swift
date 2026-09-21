@@ -18,9 +18,6 @@ private func createExportProgressTables(_ database: Database) throws {
         tableDef.primaryKey("exportID", .blob)
         tableDef.column("projectID", .blob).notNull().references("Project", onDelete: .restrict)
         tableDef.column("batchID", .blob).references("Batch", onDelete: .setNull)
-        // ExportQueueItemの行そのもの（キュー経路の場合のみ）。FKは宣言しない
-        // （外部キー表に記載が無い）。
-        tableDef.column("queueItemID", .blob)
         tableDef.column("authorizedAt", .datetime).notNull()
         // ExportAccountingModeの判別子。raw valueの割当はStore実装タスクの担当。
         tableDef.column("accountingMode", .integer).notNull()

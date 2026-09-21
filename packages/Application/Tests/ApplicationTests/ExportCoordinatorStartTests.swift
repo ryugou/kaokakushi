@@ -45,6 +45,16 @@ private func startedJob(_ outcome: ExportStartOutcome) -> ExportJob? {
     return nil
 }
 
+private func isStaleProjectRevision(_ outcome: ExportStartOutcome) -> Bool {
+    if case .staleProjectRevision = outcome { return true }
+    return false
+}
+
+private func isSourceRowMissing(_ outcome: ExportStartOutcome) -> Bool {
+    if case .sourceRowMissing = outcome { return true }
+    return false
+}
+
 /// 標準構成の ExportCoordinator を組み立てる（ファイル行数制約〈Global Constraints〉のため、
 /// 各テストで異なる差し替え対象だけを引数化する。Fakes/*.swift 以外の依存は既定値で足りる）。
 private func makeCoordinator(
@@ -188,19 +198,24 @@ private func renderSpecBlockedByCapabilityCheckDoesNotCallStartExport() async th
 
 // MARK: - 実体確認（WorkingSourceRecord / 実体ファイル）
 
-@Test("WorkingSourceRecordが無ければinvalidateWorkingSourceを呼びworkingSourceMissingを返す")
-private func missingWorkingSourceRecordInvalidatesAndReturnsMissing() async throws {
+@Test("WorkingSourceRecordの行自体が無ければinvalidateWorkingSourceを呼ばずsourceRowMissingを返す")
+private func missingWorkingSourceRowReturnsSourceRowMissingWithoutInvalidating() async throws {
+    // export-saga.md 1.6 手順3: 行自体が存在しない（Project 履歴削除等で FK CASCADE により
+    // 行ごと消えた状態）場合は再選択で復帰できないため、実体欠損（行はあるがファイルが無い）と
+    // 区別し invalidateWorkingSource を呼ばない。他5ケース（confirmationMismatch /
+    // renderSpecBlocked / workingSourceMissing / staleProjectRevision / blocked）と同じく
+    // ExportStartOutcome の戻り値でモデル化する（throw にしない。reviewer指摘 W-1）。
     let (request, capabilities) = try makeFullyConsistentRequest()
     let exportSagaStore = FakeExportSagaStore()
-    let workingSourceStore = FakeWorkingSourceStore() // 何も seed しない → レコードが無い
+    let workingSourceStore = FakeWorkingSourceStore() // 何も seed しない → 行自体が無い
     let coordinator = makeCoordinator(exportSagaStore: exportSagaStore, workingSourceStore: workingSourceStore)
 
     let outcome = try await coordinator.startExport(request, capabilities: capabilities)
 
-    #expect(isWorkingSourceMissing(outcome))
+    #expect(isSourceRowMissing(outcome))
     let invalidateCalls = await workingSourceStore.invalidateWorkingSourceCalls
     let startExportCalls = await exportSagaStore.startExportCalls
-    #expect(invalidateCalls == [request.projectID])
+    #expect(invalidateCalls.isEmpty)
     #expect(startExportCalls.isEmpty)
 }
 
@@ -235,8 +250,8 @@ private func missingWorkingSourceFileInvalidatesAndReturnsMissing() async throws
 
 // MARK: - startExport 呼び出し（revision 不一致 / 全成立）
 
-@Test("expectedProjectRevisionがFakeのrevision(既定0)と不一致なら、throwがCoordinator.startExportの呼び出し元まで伝播する")
-private func projectRevisionMismatchPropagatesToCaller() async throws {
+@Test("expectedProjectRevisionがFakeのrevision(既定0)と不一致なら、throwではなくstaleProjectRevisionが呼び出し元まで伝播する")
+private func expectedRevisionMismatchPropagatesAsStaleProjectRevision() async throws {
     let (request, capabilities) = try makeFullyConsistentRequest(expectedProjectRevision: 1)
     let sourceFileRef = try makeWorkingSourceFileRef()
     let workingSourceStore = FakeWorkingSourceStore()
@@ -249,20 +264,23 @@ private func projectRevisionMismatchPropagatesToCaller() async throws {
     )
     let managedFileStore = FakeManagedFileStore()
     await managedFileStore.seedExistingFile(sourceFileRef.ref)
+    let exportSagaStore = FakeExportSagaStore()
     let coordinator = makeCoordinator(
-        exportSagaStore: FakeExportSagaStore(),
+        exportSagaStore: exportSagaStore,
         workingSourceStore: workingSourceStore,
         managedFileStore: managedFileStore
     )
 
     // FakeExportSagaStore は projectRevisions 未設定の projectID を revision 0 として扱う
-    // （Fakes/FakeExportSagaStore.swift 冒頭コメント）。expectedProjectRevision: 1 との不一致で
-    // projectRevisionMismatch が throw される。
-    await #expect(throws: FakeExportSagaStoreError.projectRevisionMismatch(
-        projectID: request.projectID, expected: 1, actual: 0
-    )) {
-        _ = try await coordinator.startExport(request, capabilities: capabilities)
-    }
+    // （Fakes/FakeExportSagaStore.swift 冒頭コメント）。expectedProjectRevision: 1 との不一致は
+    // Domain の契約変更（ExportSagaStore.swift の ExportStartDecision）により throw ではなく
+    // `.staleProjectRevision` として返り、単体書き出しではそのまま不開始として利用者へ返る
+    // （export-saga.md 1.6 手順5）。
+    let outcome = try await coordinator.startExport(request, capabilities: capabilities)
+
+    #expect(isStaleProjectRevision(outcome))
+    let startExportCalls = await exportSagaStore.startExportCalls
+    #expect(startExportCalls.count == 1)
 }
 
 @Test("1.1・1.2・実体確認・revisionがすべて成立する場合はExportJobを挿入しstartedを返す")
@@ -341,13 +359,29 @@ private func loadWorkingSourceFailurePropagatesToCaller() async throws {
     }
 }
 
-@Test("欠損経路のinvalidateWorkingSourceの失敗は握りつぶさず呼び出し元へ伝播する")
+@Test("実体欠損経路のinvalidateWorkingSourceの失敗は握りつぶさず呼び出し元へ伝播する")
 private func invalidateWorkingSourceFailurePropagatesToCaller() async throws {
+    // export-saga.md 1.6 手順3: invalidateWorkingSource が呼ばれるのは「行はあるが実体
+    // ファイルが無い」経路のみ（行自体が無い経路は呼ばない。sourceRowMissing を返す
+    // テストと区別する）。
     struct InvalidateBoom: Error, Equatable {}
     let (request, capabilities) = try makeFullyConsistentRequest()
-    let workingSourceStore = FakeWorkingSourceStore() // 何も seed しない → レコードが無い（欠損経路）
+    let sourceFileRef = try makeWorkingSourceFileRef()
+    let workingSourceStore = FakeWorkingSourceStore()
+    await workingSourceStore.seedWorkingSource(
+        WorkingSourceRecord(
+            projectID: request.projectID,
+            sourceFile: sourceFileRef,
+            createdAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+    )
+    let managedFileStore = FakeManagedFileStore() // ref を seed しない → 実体欠損
     await workingSourceStore.setInvalidateWorkingSourceFailure(InvalidateBoom())
-    let coordinator = makeCoordinator(exportSagaStore: FakeExportSagaStore(), workingSourceStore: workingSourceStore)
+    let coordinator = makeCoordinator(
+        exportSagaStore: FakeExportSagaStore(),
+        workingSourceStore: workingSourceStore,
+        managedFileStore: managedFileStore
+    )
 
     await #expect(throws: InvalidateBoom.self) {
         _ = try await coordinator.startExport(request, capabilities: capabilities)

@@ -34,8 +34,8 @@ public struct ProjectSourceLocator: Sendable, Equatable {
     }
 }
 
-/// 復元したキュー項目が参照する処理用ファイルを表す永続モデル（image-pipeline.md 5 章
-/// 「処理用ファイルの寿命を DB で管理する」）。正本は Sendable のみ
+/// 処理用ファイルを表す永続モデル（image-pipeline.md 5 章「処理用ファイルの寿命を DB で管理する」）。
+/// 正本は Sendable のみ
 public struct WorkingSourceRecord: Sendable {
     public let projectID: ProjectID
     public let sourceFile: WorkingSourceFileRef
@@ -68,19 +68,18 @@ public protocol WorkingSourceStore: Sendable {
     func deleteWorkingSource(_ projectID: ProjectID) async throws
 
     /// 実体欠損時の無効化（下記「実体の存在確認」）。単一 DB トランザクションで
-    /// (a) `WorkingSourceRecord` を削除し、(b) 対象 `projectID` の非終端キュー項目を
-    /// `paused(.sourceReselectionRequired)` へ更新し、(c) 欠損したファイル参照を
-    /// `PendingFileDeletion` へ登録する。**実体が無くても (c) を行ってよい**（参照の掃除
-    /// であり、孤児 GC が空振りで行を消すだけで無害。[アーキテクチャ設計](architecture.md) の
-    /// 7.5「出力の削除経路」と同じ単一経路に揃える）
+    /// (a) `WorkingSourceRecord` を削除し、(b) 欠損したファイル参照を `PendingFileDeletion`
+    /// へ登録する。**実体が無くても (b) を行ってよい**（参照の掃除であり、孤児 GC が
+    /// 空振りで行を消すだけで無害。[アーキテクチャ設計](architecture.md) の 7.5「出力の削除経路」
+    /// と同じ単一経路に揃える）。呼び出し元（`Application`）は、この DB 更新に続けて
+    /// 対象項目をセッション内で `paused(.sourceReselectionRequired)` として扱う
+    /// （`BatchItemStartOutcome.itemPaused`。[書き出し Saga](export-saga.md) の 1.6。DB は更新しない）
     func invalidateWorkingSource(_ projectID: ProjectID) async throws
 }
 
 /// インポート Saga の手順 3 の入力（image-pipeline.md 5 章）。正本は Sendable のみ
 public struct CreateWorkingSourceInput: Sendable {
     public let projectID: ProjectID
-    public let batchID: BatchID?
-    public let queueItemID: ExportQueueItemID?
     public let sourceFile: WorkingSourceFileRef      // 向き正規化済みの原寸
     public let createdAt: Date
     public let sourceLocator: ProjectSourceLocator
@@ -91,8 +90,6 @@ public struct CreateWorkingSourceInput: Sendable {
 
     public init(
         projectID: ProjectID,
-        batchID: BatchID?,
-        queueItemID: ExportQueueItemID?,
         sourceFile: WorkingSourceFileRef,
         createdAt: Date,
         sourceLocator: ProjectSourceLocator,
@@ -102,8 +99,6 @@ public struct CreateWorkingSourceInput: Sendable {
         initialSpec: RenderSpec
     ) {
         self.projectID = projectID
-        self.batchID = batchID
-        self.queueItemID = queueItemID
         self.sourceFile = sourceFile
         self.createdAt = createdAt
         self.sourceLocator = sourceLocator

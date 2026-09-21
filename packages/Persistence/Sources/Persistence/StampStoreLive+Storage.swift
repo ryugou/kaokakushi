@@ -8,22 +8,28 @@ import GRDB
 extension StampStoreLive {
     /// スタンプ一覧。sortOrder昇順で返す。
     public func loadCustomStamps() async throws -> [CustomStamp] {
-        let rows: [Row] = try await database.dbQueue.read { connection in
-            try Row.fetchAll(
+        // 戻り値型を明示する（toolchain 差の推論割れ対策。Package.swift の GRDB ピン注記参照）
+        let stamps: [CustomStamp] = try await database.dbQueue.read { connection in
+            let rows = try Row.fetchAll(
                 connection,
                 sql: """
                 SELECT customStampID, assetHash, name, sortOrder, thumbnailFileID
                 FROM CustomStamp ORDER BY sortOrder
                 """
             )
+            return try rows.map(Self.makeCustomStamp)
         }
-        return try rows.map(Self.makeCustomStamp)
+        return stamps
     }
 
     /// 使用容量の内訳（登録中のマイスタンプ / 過去の加工履歴で使用中 / 合計）。
     public func loadStampStorageBreakdown() async throws -> StampStorageBreakdown {
-        let rows: [Row] = try await database.dbQueue.read { connection in
-            try Row.fetchAll(
+        // Row自体はSendable未対応（GRDB 7.11.1）のためdbQueue.readのクロージャ境界を
+        // 越えられない。fileID/isRegisteredへここでデコードし、Sendableなタプル配列だけを
+        // 返す（クロージャ外の非同期fileSize呼び出しはデータベース処理と独立しているため
+        // ループごとawaitする設計は変えない）。
+        let assets: [(fileID: UUID, isRegistered: Bool)] = try await database.dbQueue.read { connection in
+            let rows = try Row.fetchAll(
                 connection,
                 sql: """
                 SELECT fileID, EXISTS(
@@ -32,15 +38,14 @@ extension StampStoreLive {
                 FROM StampAsset
                 """
             )
+            return rows.map { row in (fileID: row["fileID"] as UUID, isRegistered: row["isRegistered"] as Bool) }
         }
 
         var registeredBytes: Int64 = 0
         var historyOnlyBytes: Int64 = 0
-        for row in rows {
-            let fileID: UUID = row["fileID"]
-            let isRegistered: Bool = row["isRegistered"]
-            let byteSize = try await fileSize(fileID: ManagedFileID(rawValue: fileID))
-            if isRegistered {
+        for asset in assets {
+            let byteSize = try await fileSize(fileID: ManagedFileID(rawValue: asset.fileID))
+            if asset.isRegistered {
                 registeredBytes += byteSize
             } else {
                 historyOnlyBytes += byteSize

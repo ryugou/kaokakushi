@@ -34,20 +34,43 @@ struct ExportStartBlockScenario: Sendable {
     let expectedReason: ExportStartBlockReason
 }
 
-/// startExportの blocked 網羅を検証する。`ExportStartBlockReason`
-/// （Accounting/ExportAuthorization.swift）はCaseIterableではないため、正本の3 caseを
-/// ここに明示し、渡されたscenariosが過不足なく覆っているかをまず確認したうえで、各
-/// シナリオが期待したreasonでblockedになることを確認する。各reasonを発生させるDB行の
+/// `ExportStartBlockReason`（Accounting/ExportAuthorization.swift）はCaseIterableでは
+/// ないため手で列挙する。この配列がDomain側の網羅契約
+/// （packages/Domain/Tests/DomainTests/Accounting/ExportAuthorizationTests.swiftの
+/// 「ExportStartBlockReasonは3ケース…」テスト）と1対1で対応する唯一の場所であり、Domainに
+/// caseが追加された場合はそちらのテストとこの配列の両方を更新する必要がある（どちらか
+/// 片方だけを更新すると他方が壊れることで検知される）。
+let allExportStartBlockReasons: [ExportStartBlockReason] = [
+    .monthlyLimitReached, .trialCreditsUnavailable, .capabilityVerificationRequired
+]
+
+/// startExport経路が担当するreason（単体書き出しの`monthlyLimitReached`のみ。理由は
+/// startExportRequiredBlockReasons/createBatchRequiredBlockReasonsのdocコメント参照）。
+let startExportRequiredBlockReasons: [ExportStartBlockReason] = [.monthlyLimitReached]
+
+/// createBatch経路が担当するreason（`.trialCreditsUnavailable` /
+/// `.capabilityVerificationRequired`）。
+///
+/// 一括処理キュー簡素化 Issue #40（createBatchの新設）により、この2reasonはcreateBatch側
+/// でのみ到達可能になった（startExportのバッチ経路はBatch行に固定済みの認可を読むだけで、
+/// 認可の再評価をしない。ExportSagaStoreLive+Start.swiftのloadBatchAuthorization参照）。
+/// startExportRequiredBlockReasonsとcreateBatchRequiredBlockReasonsを合わせると
+/// allExportStartBlockReasons全体を過不足なく覆う（漏れも重複もない）ことを
+/// `ExportSagaStoreConformanceTests.requiredBlockReasonsTogetherCoverAllCasesExactlyOnce`
+/// が検証する。
+let createBatchRequiredBlockReasons: [ExportStartBlockReason] = [
+    .trialCreditsUnavailable, .capabilityVerificationRequired
+]
+
+/// startExportの blocked 網羅を検証する。呼び出し側が requiredReasons で期待する
+/// reasonの集合を明示し、渡されたscenariosが過不足なく覆っているかをまず確認したうえで、
+/// 各シナリオが期待したreasonでblockedになることを確認する。各reasonを発生させるDB行の
 /// 準備は呼び出し側が行い、ここではstartExportの戻り値の判定ロジックだけを担う。
 func verifyExportSagaStoreStartBlockedCoverage(
     _ store: some ExportSagaStore,
-    scenarios: [ExportStartBlockScenario]
+    scenarios: [ExportStartBlockScenario],
+    requiredReasons: [ExportStartBlockReason]
 ) async throws {
-    // ExportStartBlockReasonはHashableではないためSetにできない。3 caseを配列で明示し、
-    // containsで網羅を確認する。
-    let requiredReasons: [ExportStartBlockReason] = [
-        .monthlyLimitReached, .trialCreditsUnavailable, .capabilityVerificationRequired
-    ]
     let providedReasons = scenarios.map(\.expectedReason)
     for reason in requiredReasons {
         #expect(providedReasons.contains(reason), "\(reason)を検証するscenarioが渡されていない")
@@ -57,6 +80,34 @@ func verifyExportSagaStoreStartBlockedCoverage(
         let decision = try await store.startExport(
             scenario.input, expectedProjectRevision: scenario.expectedProjectRevision
         )
+        guard case let .blocked(block) = decision else {
+            Issue.record("\(scenario.label): blockedであるべき")
+            continue
+        }
+        #expect(block.reason == scenario.expectedReason, "\(scenario.label)")
+    }
+}
+
+/// createBatchのblocked網羅スイート1件分（verifyExportSagaStoreStartBlockedCoverageと対）。
+struct CreateBatchBlockScenario: Sendable {
+    let label: String
+    let input: CreateBatchInput
+    let expectedReason: ExportStartBlockReason
+}
+
+/// createBatchのblocked網羅を検証する（verifyExportSagaStoreStartBlockedCoverageと対）。
+func verifyExportSagaStoreCreateBatchBlockedCoverage(
+    _ store: some ExportSagaStore,
+    scenarios: [CreateBatchBlockScenario],
+    requiredReasons: [ExportStartBlockReason]
+) async throws {
+    let providedReasons = scenarios.map(\.expectedReason)
+    for reason in requiredReasons {
+        #expect(providedReasons.contains(reason), "\(reason)を検証するscenarioが渡されていない")
+    }
+
+    for scenario in scenarios {
+        let decision = try await store.createBatch(scenario.input)
         guard case let .blocked(block) = decision else {
             Issue.record("\(scenario.label): blockedであるべき")
             continue
@@ -77,32 +128,23 @@ func verifyDiscardExportIsIdempotentForUnknownExportID(
 
 // MARK: - ExportSagaStore: フィクスチャ
 
-/// startExportのblocked網羅スイート用の入力を1つのAppDatabaseの上に用意する。
-/// SubscriptionState/UsageLedgerはDB全体で単一行の制約があるため（ExportSagaStoreLive+
-/// Start.swiftのloadSubscriptionStateコメント参照）、3reasonすべてを同じ行の上で
-/// 再現できるよう設計する:
-///   - monthlyLimitReached: 単体書き出し（batchIDなし）+ consumedExportIDsをmonthlyLimit
-///     （既定5）以上にする
-///   - trialCreditsUnavailable: trialバッチ（kind=2, trialCreditCount=3）+
-///     trialConsumedExportIDsを3件にする
-///   - capabilityVerificationRequired: proBatch（kind=1）。free planはcanUseProBatchが
-///     false（ResolveCapabilities.swift capabilities(forPlan:)）のためバッチ種別だけで
-///     到達できる（SubscriptionStateを差し替える必要が無い）
+/// startExportのblocked網羅スイート用の入力を用意する。単体書き出し（batchID == nil）
+/// 限定のmonthlyLimitReachedのみを対象にする。
+///
+/// trialCreditsUnavailable・バッチ経路のcapabilityVerificationRequiredはcreateBatchへ
+/// 移設したためmakeCreateBatchBlockScenariosが担当する。単体経路の
+/// capabilityVerificationRequired（SubscriptionState行が無い）はSubscriptionStateが
+/// DB全体で単一行の制約を持つため（ExportSagaStoreLive+Start.swiftのloadSubscriptionState
+/// コメント参照）、monthlyLimitReached用に用意する行（SubscriptionState行が存在する状態）
+/// と同じDB内で同時に再現できない。該当ケースは
+/// ExportSagaStoreStartTests.swift.blocksWhenSubscriptionStateMissingが単体で検証する。
 func makeExportStartBlockScenarios(_ database: AppDatabase) async throws -> [ExportStartBlockScenario] {
     let monthlyLimitProjectID = ProjectID(rawValue: UUID())
-    let trialProjectID = ProjectID(rawValue: UUID())
-    let proBatchProjectID = ProjectID(rawValue: UUID())
-    let trialBatchID = BatchID(rawValue: UUID())
-    let proBatchID = BatchID(rawValue: UUID())
     try await seedAuthorizedProject(database, projectID: monthlyLimitProjectID, plan: 1, status: 1)
-    try await seedAuthorizedProject(database, projectID: trialProjectID, plan: 1, status: 1)
-    try await seedAuthorizedProject(database, projectID: proBatchProjectID, plan: 1, status: 1)
     try await database.dbQueue.write { connection in
-        try insertBatchRow(connection, batchID: trialBatchID.rawValue, kind: 2, trialCreditCount: 3)
-        try insertBatchRow(connection, batchID: proBatchID.rawValue, kind: 1, trialCreditCount: 0)
         try insertUsageLedgerRowWithIDs(
             connection, periodYear: 2_023, periodMonth: 11,
-            consumedExportIDs: makeExportIDs(count: 5), trialConsumedExportIDs: makeExportIDs(count: 3)
+            consumedExportIDs: makeExportIDs(count: 5), trialConsumedExportIDs: []
         )
     }
     return [
@@ -111,17 +153,41 @@ func makeExportStartBlockScenarios(_ database: AppDatabase) async throws -> [Exp
             input: try makeStartExportInputFixture(projectID: monthlyLimitProjectID),
             expectedProjectRevision: 0,
             expectedReason: .monthlyLimitReached
-        ),
-        ExportStartBlockScenario(
+        )
+    ]
+}
+
+/// createBatchのblocked網羅スイート用の入力を用意する（バッチ専用の2reason:
+/// trialCreditsUnavailable / capabilityVerificationRequired）。createBatchはprojectIDを
+/// 取らずSubscriptionStateとUsageLedgerだけを見るため、1つのSubscriptionState行
+/// （plan=1free相当。Domain/Billing/SubscriptionState.swiftのPlanはfree=1/standard=2/pro=3で、
+/// plan=1はfree。ResolveCapabilities.swiftのfreeEquivalentCapabilitiesによりcanUseProBatch
+/// == false）で両方のreasonを同時に再現できる:
+///   - trialCreditsUnavailable: trialポリシー（trialCreditCount=3）+
+///     trialConsumedExportIDsを3件にする
+///   - capabilityVerificationRequired: proBatchポリシー。canUseProBatch == falseのため
+///     ポリシー種別だけで到達できる
+func makeCreateBatchBlockScenarios(_ database: AppDatabase) async throws -> [CreateBatchBlockScenario] {
+    try await database.dbQueue.write { connection in
+        try insertSubscriptionStateRow(connection, plan: 1, status: 1)
+        try insertUsageLedgerRowWithIDs(
+            connection, periodYear: 2_023, periodMonth: 11,
+            consumedExportIDs: [], trialConsumedExportIDs: makeExportIDs(count: 3)
+        )
+    }
+    let trialPolicy = BatchPolicySnapshot(kind: .trial, batchSizeLimit: 50, trialCreditCount: 3, concurrencyLimit: 1)
+    let proBatchPolicy = BatchPolicySnapshot(
+        kind: .proBatch, batchSizeLimit: 50, trialCreditCount: 0, concurrencyLimit: 1
+    )
+    return [
+        CreateBatchBlockScenario(
             label: "trialCreditsUnavailable",
-            input: try makeStartExportInputFixture(projectID: trialProjectID, batchID: trialBatchID),
-            expectedProjectRevision: 0,
+            input: CreateBatchInput(batchID: BatchID(rawValue: UUID()), policy: trialPolicy),
             expectedReason: .trialCreditsUnavailable
         ),
-        ExportStartBlockScenario(
+        CreateBatchBlockScenario(
             label: "capabilityVerificationRequired",
-            input: try makeStartExportInputFixture(projectID: proBatchProjectID, batchID: proBatchID),
-            expectedProjectRevision: 0,
+            input: CreateBatchInput(batchID: BatchID(rawValue: UUID()), policy: proBatchPolicy),
             expectedReason: .capabilityVerificationRequired
         )
     ]
@@ -131,14 +197,39 @@ func makeExportStartBlockScenarios(_ database: AppDatabase) async throws -> [Exp
 
 @Suite("ConformanceSuites: ExportSagaStore (Live)")
 struct ExportSagaStoreConformanceTests {
-    @Test("startExportはExportStartBlockReasonの3 case全てにblockedで到達できること")
-    func startExportCoversAllBlockReasons() async throws {
+    @Test("startExportは単体書き出しのmonthlyLimitReachedへblockedで到達できること")
+    func startExportCoversSingleExportBlockReasons() async throws {
         let (database, url) = try makeTestAppDatabase()
         defer { try? FileManager.default.removeItem(at: url) }
         let store = makeExportSagaStore(database: database)
         let scenarios = try await makeExportStartBlockScenarios(database)
 
-        try await verifyExportSagaStoreStartBlockedCoverage(store, scenarios: scenarios)
+        try await verifyExportSagaStoreStartBlockedCoverage(
+            store, scenarios: scenarios, requiredReasons: startExportRequiredBlockReasons
+        )
+    }
+
+    @Test("createBatchはtrialCreditsUnavailable/capabilityVerificationRequiredへblockedで到達できること")
+    func createBatchCoversBatchBlockReasons() async throws {
+        let (database, url) = try makeTestAppDatabase()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = makeExportSagaStore(database: database)
+        let scenarios = try await makeCreateBatchBlockScenarios(database)
+
+        try await verifyExportSagaStoreCreateBatchBlockedCoverage(
+            store, scenarios: scenarios, requiredReasons: createBatchRequiredBlockReasons
+        )
+    }
+
+    @Test("startExport用とcreateBatch用のrequiredReasonsを合わせるとExportStartBlockReasonの全caseを過不足なく覆うこと")
+    func requiredBlockReasonsTogetherCoverAllCasesExactlyOnce() {
+        let combined = startExportRequiredBlockReasons + createBatchRequiredBlockReasons
+
+        #expect(combined.count == allExportStartBlockReasons.count, "合計件数が全case数と一致しない（重複または過剰）")
+        for reason in allExportStartBlockReasons {
+            let occurrences = combined.filter { $0 == reason }.count
+            #expect(occurrences == 1, "\(reason)がrequiredReasonsの合計にちょうど1回含まれていない（実際は\(occurrences)回）")
+        }
     }
 
     @Test("discardExportは存在しないexportIDに対してプロトコル経由で冪等であること")

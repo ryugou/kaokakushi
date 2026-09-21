@@ -28,7 +28,7 @@ private func sampleFailure() -> ExportQueueFailure {
             occurredAt: Date(timeIntervalSince1970: 0)
         )), true),
         (ExportQueueState.canceled, true),
-        (ExportQueueState.paused(.userPaused), false)
+        (ExportQueueState.paused(.sourceReselectionRequired), false)
     ]
 )
 func isTerminalReflectsExpectedStates(state: ExportQueueState, expected: Bool) {
@@ -48,14 +48,14 @@ func exportQueueFailureHoldsAllFields() {
     #expect(subject.occurredAt == occurredAt)
 }
 
-@Test(
-    "QueuePauseReasonは4ケースを持ちHashableである",
-    arguments: [
-        QueuePauseReason.entitlementExpired, .storageInsufficient, .userPaused, .sourceReselectionRequired
-    ]
-)
-func queuePauseReasonHasFourCases(reason: QueuePauseReason) {
-    #expect(Set([reason]).contains(reason))
+@Test("QueuePauseReasonはsourceReselectionRequiredの1ケースのみを持つ")
+func queuePauseReasonHasOnlySourceReselectionRequiredCase() {
+    let reason = QueuePauseReason.sourceReselectionRequired
+    // 網羅的な switch であるため、正本に無い2つめの case が追加されればコンパイルが壊れ検出できる。
+    switch reason {
+    case .sourceReselectionRequired: break
+    }
+    #expect(reason == .sourceReselectionRequired)
 }
 
 @Test("ExportQueueStateはfailedのペイロードを保持する")

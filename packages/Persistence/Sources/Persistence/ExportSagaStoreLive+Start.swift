@@ -13,7 +13,20 @@ import GRDB
 // 1.3（権限とクォータ）のうち月間枠チェックはコンストラクタ注入のmonthlyLimit /
 // deviceTimeZoneとauthorizedAt（usageNow）をAccountingModeContext経由で+Accounting.swiftへ
 // 渡し、Domainのevaluate関数（evaluateMonthlyQuota）で評価する（+Accounting.swiftの
-// コメント参照）。
+// コメント参照）。expectedProjectRevisionの不一致は例外ではなく
+// `ExportStartDecision.staleProjectRevision`という型付きの判定結果で返す（1.6手順5。
+// ExportSagaStore.swiftのdocコメントが正）。
+//
+// 一括処理キュー簡素化 Issue #40 決定2（1.5「開始後に有料契約の失効・月間上限への到達・
+// 昇格が起きても無視し、バッチ開始時の認可スナップショットで全項目を完了させる」）:
+// バッチの認可はcreateBatch（+CreateBatch.swift）がBatch作成と同一トランザクションで
+// 評価・固定する。startExportのバッチ経路はBatch行に固定済みの認可（loadBatchAuthorization）
+// をそのまま読むだけで、resolveVerifiedCapabilities / resolveAccountingModeのfresh評価を
+// 一切行わない（開始後の失効・昇格を無視するのはこの再評価をしないことで実現する）。
+// Batch行が無ければbatchNotFoundをthrowする（createBatchが先に呼ばれている契約のため、
+// 無ければ異常系。旧方式にあった「fresh評価へのフォールバック」は廃止した——discardExportで
+// 参照元のExportJobが消えると再現できなくなる欠陥があったため）。単体書き出し
+// （batchID == nil）は対象外で常にfresh評価する。
 
 extension ExportSagaStoreLive {
     public func startExport(
@@ -21,12 +34,25 @@ extension ExportSagaStoreLive {
         expectedProjectRevision: Int64
     ) async throws -> ExportStartDecision {
         try Self.validatePreviewConfirmationProjectID(input)
-        try Self.validateQueueItemRequiresBatchID(input)
         let authorizedAt = now()
-        return try await database.dbQueue.write { connection in
-            try Self.validateProjectRevision(
+        // 戻り値型を明示する（toolchain 差の推論割れ対策。Package.swift の GRDB ピン注記参照）
+        let decision: ExportStartDecision = try await database.dbQueue.write { connection in
+            guard try Self.projectRevisionMatches(
                 connection, projectID: input.projectID, expectedProjectRevision: expectedProjectRevision
-            )
+            ) else {
+                return .staleProjectRevision
+            }
+
+            if let batchID = input.batchID {
+                guard let authorization = try Self.loadBatchAuthorization(connection, batchID: batchID) else {
+                    throw ExportSagaStoreError.batchNotFound(batchID: batchID)
+                }
+                let job = try Self.insertExportJob(
+                    connection, input: input, entitlement: authorization.entitlementSnapshot,
+                    accountingMode: authorization.accountingMode, authorizedAt: authorization.authorizedAt
+                )
+                return .authorized(job)
+            }
 
             guard let (subscriptionState, capabilities) = try Self.resolveVerifiedCapabilities(
                 connection, usageNow: authorizedAt, enabledStampPacks: enabledStampPacks
@@ -35,8 +61,8 @@ extension ExportSagaStoreLive {
             }
 
             let accountingContext = AccountingModeContext(
-                input: input, capabilities: capabilities, hardMaxTrialCredits: hardMaxTrialCredits,
-                monthlyLimit: monthlyLimit, usageNow: authorizedAt, deviceTimeZone: deviceTimeZone()
+                capabilities: capabilities, monthlyLimit: monthlyLimit,
+                usageNow: authorizedAt, deviceTimeZone: deviceTimeZone()
             )
             switch try Self.resolveAccountingMode(connection, context: accountingContext) {
             case .blocked(let block):
@@ -49,6 +75,32 @@ extension ExportSagaStoreLive {
                 return .authorized(job)
             }
         }
+        return decision
+    }
+
+    /// Batch行に固定済みの認可を読む（1.5。createBatchが確定させた認可をそのまま使い、
+    /// 再評価しない）。行が無ければnilを返し、呼び出し元がbatchNotFoundをthrowする
+    /// （createBatchが先にBatch行を作っている契約のため、無ければ異常系として扱う。
+    /// 旧方式〈同一batchIDの既存ExportJob行から認可を再利用し、無ければfresh評価へ
+    /// フォールバックする〉はdiscardExportで参照元のExportJobが消えると再現できなくなる
+    /// 欠陥があったため廃棄した）。デコードはdecodeAuthorization（+Mapping.swift）を
+    /// ExportJob/Batch間で共有し、Entitlement再構成ロジックをこのファイルへ重複させない
+    /// （列名はSchema+Queue.swiftでExportJobと完全一致させてある）。
+    private static func loadBatchAuthorization(
+        _ connection: Database, batchID: BatchID
+    ) throws -> ExportAuthorization? {
+        guard let row = try Row.fetchOne(
+            connection,
+            sql: """
+            SELECT authorizedAt, accountingMode, entitlementPlan, entitlementStatus,
+                entitlementExpiresAt, entitlementLastVerifiedAt, entitlementIsSandbox
+            FROM Batch WHERE batchID = ?
+            """,
+            arguments: [batchID.rawValue]
+        ) else {
+            return nil
+        }
+        return try Self.decodeAuthorization(row, table: "Batch")
     }
 
     /// previewConfirmation.projectIDがinput.projectIDと一致することを検査する（1.1
@@ -62,18 +114,16 @@ extension ExportSagaStoreLive {
         }
     }
 
-    /// queueItemIDが指定される場合はbatchIDも必須であることを検査する。DBアクセスを
-    /// 伴わない純粋な入力検査のため、書き込みトランザクションを開く前に行う。
-    private static func validateQueueItemRequiresBatchID(_ input: StartExportInput) throws {
-        guard let queueItemID = input.queueItemID, input.batchID == nil else { return }
-        throw ExportSagaStoreError.queueItemIDRequiresBatchID(queueItemID: queueItemID)
-    }
-
-    /// Project行のprojectRevisionを読み、expectedProjectRevisionと比較する（1.6 手順5）。
-    /// 行が無い、または不一致ならthrowしExportJobを作らない。
-    private static func validateProjectRevision(
+    /// Project行のprojectRevisionを読み、expectedProjectRevisionと一致するかを返す
+    /// （1.6 手順5）。Project行自体が無ければprojectNotFoundをthrowする（Projectの不在は
+    /// revision不一致とは別の異常系のためthrowのまま）。revision不一致自体は例外ではなく
+    /// 戻り値のfalseとして表現し、呼び出し元が`ExportStartDecision.staleProjectRevision`
+    /// という型付きの判定結果へ変換する（旧方式はここでthrowしていたが、正常に起こりうる
+    /// 分岐をthrowで表現すると呼び出し元がdo/catchで判定を強いられるため、Domainの
+    /// 契約変更〈ExportSagaStore.swift〉に合わせて戻り値化した）。
+    private static func projectRevisionMatches(
         _ connection: Database, projectID: ProjectID, expectedProjectRevision: Int64
-    ) throws {
+    ) throws -> Bool {
         guard let actual = try Int64.fetchOne(
             connection,
             sql: "SELECT projectRevision FROM Project WHERE projectID = ?",
@@ -81,11 +131,7 @@ extension ExportSagaStoreLive {
         ) else {
             throw ExportSagaStoreError.projectNotFound(projectID: projectID)
         }
-        guard actual == expectedProjectRevision else {
-            throw ExportSagaStoreError.projectRevisionMismatch(
-                projectID: projectID, expected: expectedProjectRevision, actual: actual
-            )
-        }
+        return actual == expectedProjectRevision
     }
 
     /// SubscriptionStateの唯一行を読み、DomainのSubscriptionStateへデコードする。行が
@@ -130,8 +176,10 @@ extension ExportSagaStoreLive {
     /// （Domain側実装済み）、契約を過信せず、`.verificationRequired`が返った場合は
     /// nilを返し、呼び出し元でcapabilityVerificationRequiredのblockedへ倒す
     /// （防御的プログラミング）。insertExportJobがentitlementの生スナップショットを
-    /// 必要とするため、subscriptionState自体も併せて返す。
-    private static func resolveVerifiedCapabilities(
+    /// 必要とするため、subscriptionState自体も併せて返す。createBatch
+    /// （+CreateBatch.swift）も認可評価（1.3）の入口として同じロジックを再利用するため
+    /// privateにしていない（他のstatic funcと同じ流儀。認可判定の重複実装を避ける）。
+    static func resolveVerifiedCapabilities(
         _ connection: Database, usageNow: Date, enabledStampPacks: Set<String>
     ) throws -> (subscriptionState: SubscriptionState, capabilities: ResolvedCapabilities)? {
         let subscriptionState = try Self.loadSubscriptionState(connection)
@@ -180,14 +228,14 @@ extension ExportSagaStoreLive {
         try connection.execute(
             sql: """
             INSERT INTO ExportJob (
-                exportID, projectID, batchID, queueItemID, authorizedAt, accountingMode,
+                exportID, projectID, batchID, authorizedAt, accountingMode,
                 entitlementPlan, entitlementStatus, entitlementExpiresAt,
                 entitlementLastVerifiedAt, entitlementIsSandbox, deliveryFormat,
                 deliverySuggestedCreationDate, settingsHash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             arguments: [
-                exportID.rawValue, input.projectID.rawValue, input.batchID?.rawValue, input.queueItemID?.rawValue,
+                exportID.rawValue, input.projectID.rawValue, input.batchID?.rawValue,
                 authorizedAt, ExportAccountingModeColumn(accountingMode).rawValue,
                 entitlement.plan.rawValue, entitlement.status.rawValue, entitlement.expiresAt,
                 entitlement.lastVerifiedAt, entitlement.isSandbox,
@@ -199,7 +247,6 @@ extension ExportSagaStoreLive {
             exportID: exportID,
             projectID: input.projectID,
             batchID: input.batchID,
-            queueItemID: input.queueItemID,
             authorization: authorization,
             delivery: delivery
         )

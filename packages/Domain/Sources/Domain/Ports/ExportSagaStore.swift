@@ -6,9 +6,8 @@ import Foundation
 // 正本から一字一句転記する（省略しない。運用時にここを読めば「何が」「いつ」「どこまで」
 // 確定するかが分かる必要があるため）。
 //
-// このファイルには含めない型: `ExportQueueItemID`（Identifiers.swift、Task 1）・
-// `OutputAspect` / `MetadataPolicy` / `ExportSetting`（Accounting/ExportSetting.swift、
-// Task 3）は既に実装済みのため再宣言しない。`OutputDeliveryStore` と
+// このファイルには含めない型: `OutputAspect` / `MetadataPolicy` / `ExportSetting`
+// （Accounting/ExportSetting.swift、Task 3）は既に実装済みのため再宣言しない。`OutputDeliveryStore` と
 // `OutputDeliverySnapshot` は寿命・関心が異なるため OutputDeliveryStore.swift に分離する
 // （spec のファイル配置どおり）。
 //
@@ -19,14 +18,19 @@ import Foundation
 
 /// Application が使う書き出し Saga の永続化ポート（export-saga.md 0 章）。
 public protocol ExportSagaStore: Sendable {
-    /// 認可を評価し ExportJob を挿入する（1 章）。expectedProjectRevision と不一致なら throw
+    /// バッチを作成する。認可（1.3）の評価と Batch 行の挿入を単一 DB トランザクションで行い、
+    /// 評価した認可を Batch 行へ固定する。blocked ならバッチを作らず理由を返す（行は挿入されない）
+    func createBatch(_ input: CreateBatchInput) async throws -> BatchCreateDecision
+    /// ExportJob を挿入する（1 章）。input.batchID == nil なら認可（1.3）をこの場で評価し、
+    /// 非 nil なら対応する Batch 行に固定済みの認可を読む（再評価しない。1.5）。
+    /// expectedProjectRevision と不一致なら `.staleProjectRevision` を返す（throw しない）
     func startExport(_ input: StartExportInput, expectedProjectRevision: Int64) async throws -> ExportStartDecision
     /// 確認用の OutputRecord(settledAt: nil) を作成する（3 章）。同じ projectID の未確定 OutputRecord が
-    /// 既に存在すれば throw（部分 UNIQUE 制約。詳細は 3 章）。台帳・ExportRecord・キュー・WorkingSourceRecord には触れない
+    /// 既に存在すれば throw（部分 UNIQUE 制約。詳細は 3 章）。台帳・ExportRecord・WorkingSourceRecord には触れない
     func recordGeneratedOutput(_ input: RecordOutputInput) async throws
     /// 完了（単体専用。ExportJob.batchID == nil でなければ throw）。単一トランザクションで、台帳の加算または
     /// トライアルクレジットの消費・settledAt の確定・ExportRecord の作成・confirmed 設定エントリの更新・
-    /// キュー項目の completed 更新・WorkingSourceRecord の削除を行う（3 章）。ここが唯一の確定境界。
+    /// WorkingSourceRecord の削除を行う（3 章）。ここが唯一の確定境界。
     /// 削除する WorkingSourceRecord の WorkingSourceFileRef は同一トランザクションで PendingFileDeletion へ
     /// 登録する（実削除はコミット後、失敗時は起動時再試行。削除経路の正本はアーキテクチャ設計 7.5）。最後に ExportJob を削除する
     func settleExport(_ exportID: ExportID) async throws
@@ -45,15 +49,18 @@ public protocol ExportSagaStore: Sendable {
     func loadRunningJobs() async throws -> [ExportJob]
     /// 起動時復旧。ExportJob 行と、対応する未確定（settledAt IS NULL）OutputRecord をまとめて削除する（5 章）
     func deleteRunningJobs(_ exportIDs: [ExportID]) async throws
+    /// 起動時復旧の手順2（5 章）。どの ExportRecord からも参照されない Batch 行
+    /// （未 settle のまま中断されたバッチの残骸）を単一 DB トランザクションで削除する。
+    /// 手順1（deleteRunningJobs）の完了後に呼ぶ。該当行が無ければ何もしない（冪等）
+    func deleteUnsettledBatches() async throws
 }
 
-/// 手順 0 の入力（export-saga.md 0 章）。
+/// 手順 0 の入力（認可の評価材料は含めない。1.3「評価入力の出所」）（export-saga.md 0 章）。
 /// 正本は Sendable のみ（PreviewConfirmation は Equatable だが StartExportInput 自体を
 /// 値として比較する用途が正本コードブロックに無いため Equatable を追加しない）
 public struct StartExportInput: Sendable {
     public let projectID: ProjectID
     public let batchID: BatchID?
-    public let queueItemID: ExportQueueItemID?   // 単体書き出しでは nil
     public let renderSpec: RenderSpec
     public let exportSetting: ExportSetting
     public let previewConfirmation: PreviewConfirmation   // 1.1
@@ -61,18 +68,35 @@ public struct StartExportInput: Sendable {
     public init(
         projectID: ProjectID,
         batchID: BatchID?,
-        queueItemID: ExportQueueItemID?,
         renderSpec: RenderSpec,
         exportSetting: ExportSetting,
         previewConfirmation: PreviewConfirmation
     ) {
         self.projectID = projectID
         self.batchID = batchID
-        self.queueItemID = queueItemID
         self.renderSpec = renderSpec
         self.exportSetting = exportSetting
         self.previewConfirmation = previewConfirmation
     }
+}
+
+/// バッチ作成の入力（認可の評価材料は含めない。1.3「評価入力の出所」）（export-saga.md 0 章）。
+/// 正本は Sendable のみ（BatchPolicySnapshot は Equatable だが CreateBatchInput 自体を
+/// 値として比較する用途が正本コードブロックに無いため Equatable を追加しない。StartExportInput と同じ判断）
+public struct CreateBatchInput: Sendable {
+    public let batchID: BatchID
+    public let policy: BatchPolicySnapshot   // 作成時の設定定数から作る（アーキテクチャ設計 6.4）
+
+    public init(batchID: BatchID, policy: BatchPolicySnapshot) {
+        self.batchID = batchID
+        self.policy = policy
+    }
+}
+
+/// createBatch の判定結果（export-saga.md 0 章）。
+public enum BatchCreateDecision: Sendable {
+    case blocked(ExportStartBlock)          // バッチは作成されない
+    case created(ExportAuthorization)       // Batch 行へ固定された認可
 }
 
 /// 手順4（生成）の入力。ExportJob から導出できない値だけを渡す（export-saga.md 0 章）。
@@ -95,5 +119,8 @@ public struct RecordOutputInput: Sendable {
 /// startExport の判定結果（export-saga.md 0 章）。
 public enum ExportStartDecision: Sendable {
     case blocked(ExportStartBlock)
+    /// 1.6 の手順 5: expectedProjectRevision の不一致。ExportJob は作られない。
+    /// バッチの項目は itemFailed（1.6）、単体はそのまま不開始として利用者へ返る
+    case staleProjectRevision
     case authorized(ExportJob)
 }

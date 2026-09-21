@@ -6,8 +6,8 @@ import GRDB
 // 2章「ExportJobとOutputRecord」・3章「手順」・4章「中断・やり直し・破棄」・
 // 5章「起動時復旧」が正本。Issue #6 Task 5）。
 //
-// 全7メソッド（startExport / recordGeneratedOutput / discardExport / settleExport /
-// settleBatch / loadRunningJobs / deleteRunningJobs）を実装する。
+// 全8メソッド（startExport / recordGeneratedOutput / discardExport / settleExport /
+// settleBatch / loadRunningJobs / deleteRunningJobs / deleteUnsettledBatches）を実装する。
 //
 // `ExportSagaStore` のポートシグネチャには時刻引数が無いが、ExportJob.authorization.
 // authorizedAt / OutputRecord.generatedAt / settledAt には実行時点の時刻が必要なため、
@@ -37,15 +37,16 @@ import GRDB
 //   - ExportSagaStoreLive+Recovery.swift: loadRunningJobs / deleteRunningJobs
 
 /// ExportSagaStoreLiveが送出する専用エラー。運用者が次のアクションを判断できるよう、
-/// 契約違反の詳細を持つ（WorkingSourceStoreError/MaintenanceStoreErrorと同じ方針:
+/// 契約違反の詳細を持つ（MaintenanceStoreErrorと同じ方針:
 /// Sendable, Equatable, LocalizedError）。
 public enum ExportSagaStoreError: Error, Sendable, Equatable {
     /// startExport: expectedProjectRevisionと比較する対象のProject行が存在しない。
     case projectNotFound(projectID: ProjectID)
-    /// startExport: expectedProjectRevisionが実際のprojectRevisionと一致しない
-    /// （export-saga.md 1.6 手順5。開始前にプロジェクトが変更された）。
-    case projectRevisionMismatch(projectID: ProjectID, expected: Int64, actual: Int64)
-    /// startExport: input.batchIDに対応するBatch行が存在しない。
+    /// startExport: input.batchIDに対応するBatch行が存在しない（createBatchが先に
+    /// 呼ばれていない、またはバッチが既に削除された）。expectedProjectRevisionの不一致は
+    /// 例外ではなく`ExportStartDecision.staleProjectRevision`という型付きの判定結果で返す
+    /// （export-saga.md 1.6 手順5。ExportSagaStore.swiftのdocコメントが正）ため、対応する
+    /// throw caseはここに存在しない。
     case batchNotFound(batchID: BatchID)
     /// recordGeneratedOutput: 対象のExportJob行が存在しない（手順0が完了していない
     /// exportIDが渡された）。
@@ -81,12 +82,6 @@ public enum ExportSagaStoreError: Error, Sendable, Equatable {
     /// startExport: input.previewConfirmation.projectIDがinput.projectIDと一致しない
     /// （1.1 確認の一致。異なるプロジェクトのプレビュー確認情報が渡された可能性がある）。
     case previewConfirmationProjectMismatch(projectID: ProjectID, previewConfirmationProjectID: ProjectID)
-    /// startExport: input.queueItemIDが指定されているのにinput.batchIDがnil。
-    /// ExportQueueItem.batchIDはNOT NULL制約（Schema+Queue.swift）のため、queueItemIDを
-    /// 伴うジョブは必ずbatchIDも持つ必要がある。ここで防がないと、settle時に
-    /// validateQueueItemForSettleが必ず事前条件不一致でthrowするだけの、確定不能な
-    /// ExportJobが残ってしまう。
-    case queueItemIDRequiresBatchID(queueItemID: ExportQueueItemID)
     /// settleExport / settleBatch: 対象exportIDのExportJob行が存在しない（settleExportが
     /// 未認可のexportIDに呼ばれた、または既にsettle済み・discardExport/起動時復旧で
     /// 削除済みのexportIDへ再度settleが呼ばれた）。exportJobNotFound（recordGeneratedOutput
@@ -103,10 +98,6 @@ public enum ExportSagaStoreError: Error, Sendable, Equatable {
     /// settleExport / settleBatch: 対象exportIDに対応するOutputRecordが存在しない、または
     /// 存在してもsettledAtが既に非NULL（確定対象は`settledAt IS NULL`の行のみ。3章）。
     case settlePendingOutputRecordNotFound(exportID: ExportID)
-    /// settleExport / settleBatch: ExportJob.queueItemIDが指定されているのに、対応する
-    /// ExportQueueItem行が存在しない、projectID/batchIDが一致しない、またはstateが
-    /// `.exporting`でない（無関係なキュー項目をcompletedにしないための事前条件。3章）。
-    case settleQueueItemPreconditionFailed(exportID: ExportID, queueItemID: ExportQueueItemID, detail: String)
     /// settleExport / settleBatch: accountingModeから期待される消費件数
     /// （paidUnlimited=0、freeMonthlyConsume/batchTrialは1件）の合計と、実際にUsageLedgerへ
     /// 新規追加できた件数が一致しない（数え間違いによる過不足消費を防ぐ検査。exportIDの
@@ -128,13 +119,6 @@ extension ExportSagaStoreError: LocalizedError {
             ExportSagaStore: startExportに渡されたprojectID=\(projectID.rawValue.uuidString) の \
             Project行が見つかりません。呼び出し元がProjectを作成する前にstartExportを \
             呼んでいないか確認してください。
-            """
-        case .projectRevisionMismatch(let projectID, let expected, let actual):
-            return """
-            ExportSagaStore: projectID=\(projectID.rawValue.uuidString) のprojectRevisionが \
-            期待値と一致しません（期待値=\(expected), 実際の値=\(actual)）。書き出し開始前に \
-            プロジェクトの設定が変更された可能性があります。呼び出し元は最新のプレビュー \
-            確認からやり直してください（export-saga.md 1.6）。
             """
         case .batchNotFound(let batchID):
             return """
@@ -189,14 +173,6 @@ extension ExportSagaStoreError: LocalizedError {
             一致しません。呼び出し元が別プロジェクトのプレビュー確認情報を渡していないか \
             確認してください（export-saga.md 1.1）。
             """
-        case .queueItemIDRequiresBatchID(let queueItemID):
-            return """
-            ExportSagaStore: startExportに渡されたqueueItemID=\
-            \(queueItemID.rawValue.uuidString) がありますが、batchIDがnilです。 \
-            ExportQueueItem.batchIDはNOT NULL制約のため、queueItemIDを伴う書き出しには \
-            batchIDも必須です。呼び出し元がキュー経路の書き出しでbatchIDを渡し忘れていないか \
-            確認してください。
-            """
         case .settleExportJobNotFound(let exportID):
             return """
             ExportSagaStore: settleExport/settleBatchに渡されたexportID=\
@@ -227,14 +203,6 @@ extension ExportSagaStoreError: LocalizedError {
             OutputRecordが見つかりません。recordGeneratedOutputがまだ呼ばれていない、 \
             または既にこのexportIDが確定済みである可能性があります。呼び出し元の書き出し \
             パイプラインの進行順序を確認してください。
-            """
-        case .settleQueueItemPreconditionFailed(let exportID, let queueItemID, let detail):
-            return """
-            ExportSagaStore: settleExport/settleBatch（exportID=\
-            \(exportID.rawValue.uuidString), queueItemID=\(queueItemID.rawValue.uuidString)）の \
-            キュー項目の事前条件チェックに失敗しました: \(detail)。無関係なキュー項目を \
-            completedへ更新しないための防御です。ExportQueueItemの状態遷移を管理する \
-            呼び出し元の実装を確認してください。
             """
         case .settleConsumptionMismatch(let exportIDs, let expectedConsumed, let actualConsumed):
             return """

@@ -48,14 +48,18 @@ struct ExportSagaStoreSingletonContractTests {
 
     @Test("UsageLedgerが2件以上ある場合multipleSingletonRowsでthrowすること")
     func throwsWhenUsageLedgerHasMultipleRows() async throws {
+        // 単体書き出し（batchID == nil）のmetered経路（resolveAccountingMode →
+        // loadUsageLedger）を通す。バッチ経路はBatch行に固定済みの認可を読むだけで
+        // UsageLedgerを一切読まなくなったため（一括処理キュー簡素化 Issue #40 決定2。
+        // ExportSagaStoreLive+Start.swiftのloadBatchAuthorization参照）、この検証は
+        // batchIDを使わない単体経路で行う。
         let (database, url) = try makeTestAppDatabase()
         defer { try? FileManager.default.removeItem(at: url) }
         let projectID = ProjectID(rawValue: UUID())
-        let batchID = BatchID(rawValue: UUID())
         try await database.dbQueue.write { connection in
             try insertProject(connection, projectID: projectID.rawValue)
+            // plan 1 = free（metered）。
             try insertSubscriptionStateRow(connection, plan: 1, status: 1)
-            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 2, trialCreditCount: 5)
             try insertUsageLedgerRow(connection, trialConsumedCount: 1)
             // 単一行キーのCHECK制約を一時的に無効化し、通常経路では作れない2件目の行を
             // 直接作る。PRAGMAは接続スコープの設定でロールバックしても戻らないため、
@@ -68,7 +72,7 @@ struct ExportSagaStoreSingletonContractTests {
 
         do {
             _ = try await store.startExport(
-                try makeStartExportInputFixture(projectID: projectID, batchID: batchID), expectedProjectRevision: 0
+                try makeStartExportInputFixture(projectID: projectID), expectedProjectRevision: 0
             )
             Issue.record("UsageLedgerが2件あるのにstartExportが成功した")
         } catch let error as ExportSagaStoreError {

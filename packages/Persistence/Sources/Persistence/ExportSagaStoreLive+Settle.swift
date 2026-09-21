@@ -67,7 +67,7 @@ struct SettleOutcome {
 
 extension ExportSagaStoreLive {
     /// 1件のexportIDを確定する（事前条件検査 → OutputRecord確定 → ExportRecord作成 →
-    /// ExportedSettingsEntry UPSERT → キュー項目completed更新 → WorkingSourceRecord削除 →
+    /// ExportedSettingsEntry UPSERT → WorkingSourceRecord削除 →
     /// ExportJob削除）。個々のステップの実装はExportSagaStoreLive+SettleSteps.swiftに
     /// 分割する（400行制限）。台帳の更新はここでは行わない（呼び出し元がoutcomeをまとめて
     /// applyLedgerConsumptionへ渡す。3章「台帳の書き込みは...最後に1回だけ書き込む」）。
@@ -80,14 +80,12 @@ extension ExportSagaStoreLive {
         let job = loaded.job
         try Self.validateJobBatchScope(job: job, exportID: exportID, scope: scope)
         let pendingOutput = try Self.loadPendingOutputRecord(connection, exportID: exportID)
-        try Self.validateQueueItemForSettle(connection, job: job)
 
         try Self.confirmOutputRecord(connection, exportID: exportID, settledAt: settledAt)
         try Self.insertExportRecordRow(connection, job: job, settledAt: settledAt, output: pendingOutput)
         try Self.upsertExportedSettingsEntryRow(
             connection, job: job, settledAt: settledAt, settingsHash: loaded.settingsHash
         )
-        try Self.completeQueueItemIfPresent(connection, queueItemID: job.queueItemID)
         try Self.deleteWorkingSourceRecordForSettle(connection, projectID: job.projectID)
         try connection.execute(sql: "DELETE FROM ExportJob WHERE exportID = ?", arguments: [exportID.rawValue])
 

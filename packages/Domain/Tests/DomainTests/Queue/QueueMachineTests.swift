@@ -49,7 +49,7 @@ func isBatchCompleteReturnsTrueWhenAllItemsAreTerminal() {
 @Test(
     "isBatchCompleteは非終端状態が1件でも混ざればfalseを返す",
     arguments: [
-        ExportQueueState.waiting, .analyzing, .reviewRequired, .exporting, .paused(.userPaused)
+        ExportQueueState.waiting, .analyzing, .reviewRequired, .exporting, .paused(.sourceReselectionRequired)
     ]
 )
 func isBatchCompleteReturnsFalseWhenAnyItemIsNonTerminal(nonTerminalState: ExportQueueState) {

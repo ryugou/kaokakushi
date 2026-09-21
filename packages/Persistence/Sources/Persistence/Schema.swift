@@ -4,7 +4,7 @@ import GRDB
 // 外部キー表が正本。この3つに無い制約は作らず、この3つにある制約は1つも欠かさ
 // ない）。
 //
-// マイグレーションは `registerMigration("v1")` 1件のみで全20テーブルを作成する。
+// マイグレーションは `registerMigration("v1")` 1件のみで全19テーブルを作成する。
 // GRDBの DatabaseMigrator は各 registerMigration をトランザクションで包み、
 // 途中で throw すればロールバックして呼び出し元へエラーを伝播する（GRDB本体の
 // 契約）。これにより test-plan.md 4.2「スキーマ移行が単一トランザクションで確定し、
@@ -19,8 +19,7 @@ import GRDB
 //      WorkingSourceRecord）
 //   2. Stamp 系（StampAsset → CustomStamp → ProjectStampAsset。
 //      ProjectStampAssetはProjectも参照するため1の後に置く）
-//   3. Queue 系（Batch → BatchPreset → ExportQueueItem。ExportQueueItemは
-//      ProjectとBatchの両方を参照するため1・このファイル内のBatch作成の後）
+//   3. Queue 系（Batch → BatchPreset）
 //   4. Accounting 系（ExportJob / OutputRecord / ExportRecord / UsageLedger /
 //      ExportedSettingsEntry。いずれもProject・Batchを参照するため1・3の後）
 //   5. Delivery 系（DeliveryAttempt / UnknownLibrarySave はOutputRecordを

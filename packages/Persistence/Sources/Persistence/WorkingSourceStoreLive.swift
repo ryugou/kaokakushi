@@ -26,58 +26,6 @@ import GRDB
 // docs/architecture.mdの正本更新（コミット1c04e47）後に別途実装済み。本ファイルの
 // 対象はWorkingSourceStoreのみで変わらない）。
 
-/// WorkingSourceStoreLiveが送出する専用エラー。運用者が次のアクションを判断できるよう、
-/// 契約違反の詳細を持つ（AppDatabaseError/ManagedFileStoreErrorと同じ方針:
-/// Sendable, Equatable, LocalizedError）。
-public enum WorkingSourceStoreError: Error, Sendable, Equatable {
-    /// createProjectWithWorkingSource: input.queueItemIDが非nilなのにinput.batchIDが
-    /// nilだった。ExportQueueItem.batchIDはNOT NULL制約のため、この組み合わせのまま
-    /// 挿入するとクラッシュしてしまう。呼び出し元（SourceImportCoordinator）の契約違反
-    /// として明示的にthrowし、握りつぶさない（image-pipeline.md 5章
-    /// CreateWorkingSourceInput）。
-    case batchIDMissingForQueueItem(queueItemID: ExportQueueItemID)
-}
-
-extension WorkingSourceStoreError: LocalizedError {
-    public var errorDescription: String? {
-        switch self {
-        case .batchIDMissingForQueueItem(let queueItemID):
-            return """
-            WorkingSourceStore: queueItemID=\(queueItemID.rawValue.uuidString) を指定した \
-            CreateWorkingSourceInputにbatchIDがありません。ExportQueueItem.batchIDはNOT NULL \
-            制約のため挿入できません。呼び出し元（SourceImportCoordinator）でqueueItemIDと \
-            batchIDを常に対で渡しているか確認してください。
-            """
-        }
-    }
-}
-
-/// `ExportQueueItem.state` 列のraw value割当（Issue #6 Task 4で確定）。Domain
-/// `Queue/ExportQueueState.swift` の `ExportQueueState` の各caseに対応する。
-/// **Task 8（キュー状態機械）実装時はこの割当をそのまま再利用すること**
-/// （列値はスキーマ移行をまたいで永続化されるため、後から変更すると既存行の意味が
-/// 変わってしまう）。
-enum ExportQueueStateColumn: Int, Sendable {
-    case waiting = 1
-    case analyzing = 2
-    case reviewRequired = 3
-    case exporting = 4
-    case completed = 5
-    case failed = 6
-    case canceled = 7
-    case paused = 8
-}
-
-/// `ExportQueueItem.pauseReason` 列のraw value割当（Issue #6 Task 4で確定）。Domain
-/// `Queue/ExportQueueState.swift` の `QueuePauseReason` に対応する。Task 8実装時は
-/// この割当を再利用すること。
-enum QueuePauseReasonColumn: Int, Sendable {
-    case entitlementExpired = 1
-    case storageInsufficient = 2
-    case userPaused = 3
-    case sourceReselectionRequired = 4
-}
-
 /// `Project.sourceRepresentation` 列のraw value割当（Issue #6 Task 4で確定）。Domain
 /// `SourceRepresentation` に対応する。以後この列を読み書きする実装が現れた場合は
 /// この割当を再利用すること。

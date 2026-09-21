@@ -13,6 +13,11 @@ import Domain
 // Persistenceのスコープ外（オーケストレーター確定判断）のため、ここでは検証しない。
 // previewConfirmation.projectIDとinput.projectIDの整合検査だけは差し戻し対応7番で
 // store側のゲートとして追加されたため、ここで検証する。
+//
+// バッチ経路（UsageLedgerのBLOB破損検知・Pro加入済みトライアルバッチのpaidUnlimited
+// 認可）を検証していたテストは、認可評価がcreateBatchへ移設された（一括処理キュー簡素化
+// Issue #40 決定2）ためExportSagaStoreCreateBatchTests.swiftへ移設した。startExportの
+// バッチ経路はBatch行に固定済みの認可を読むだけで、UsageLedgerを一切読まない。
 
 @Suite("ExportSagaStoreLive.startExport(検証・データ整合性)")
 struct ExportSagaStoreStartValidationTests {
@@ -58,169 +63,71 @@ struct ExportSagaStoreStartValidationTests {
     // multipleSingletonRows検知（CHECK制約を意図的に無効化してでも通す二重担保）は
     // ExportSagaStoreSingletonContractTests.swiftへ移設した。
 
-    @Test("UsageLedgerのBLOB長が16の倍数でない場合corruptUsageLedgerBlobでthrowすること")
-    func throwsWhenUsageLedgerBlobLengthIsNotAMultipleOf16() async throws {
-        let (database, url) = try makeTestAppDatabase()
-        defer { try? FileManager.default.removeItem(at: url) }
-        let projectID = ProjectID(rawValue: UUID())
-        let batchID = BatchID(rawValue: UUID())
-        try await database.dbQueue.write { connection in
-            try insertProject(connection, projectID: projectID.rawValue)
-            try insertSubscriptionStateRow(connection, plan: 1, status: 1)
-            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 2, trialCreditCount: 5)
-            try connection.execute(
-                sql: """
-                INSERT INTO UsageLedger (periodYear, periodMonth, consumedExportIDs, trialConsumedExportIDs)
-                VALUES (?, ?, ?, ?)
-                """,
-                arguments: [2023, 11, Data(), Data(repeating: 0, count: 17)]
-            )
-        }
-        let store = makeExportSagaStore(database: database)
-
-        do {
-            _ = try await store.startExport(
-                try makeStartExportInputFixture(projectID: projectID, batchID: batchID), expectedProjectRevision: 0
-            )
-            Issue.record("BLOB長が16の倍数でないのにstartExportが成功した")
-        } catch let error as ExportSagaStoreError {
-            guard case .corruptUsageLedgerBlob(let byteCount) = error else {
-                Issue.record("期待したエラーケース(corruptUsageLedgerBlob)ではない: \(error)")
-                return
-            }
-            #expect(byteCount == 17)
-        } catch {
-            Issue.record("ExportSagaStoreError以外がthrowされた: \(error)")
-        }
-    }
-
-    @Test("UsageLedgerのBLOBに重複するExportIDチャンクがある場合corruptUsageLedgerBlobでthrowすること")
-    func throwsWhenUsageLedgerBlobHasDuplicateChunks() async throws {
-        let (database, url) = try makeTestAppDatabase()
-        defer { try? FileManager.default.removeItem(at: url) }
-        let projectID = ProjectID(rawValue: UUID())
-        let batchID = BatchID(rawValue: UUID())
-        let duplicatedChunk = Data(repeating: 0xAA, count: 16)
-        try await database.dbQueue.write { connection in
-            try insertProject(connection, projectID: projectID.rawValue)
-            try insertSubscriptionStateRow(connection, plan: 1, status: 1)
-            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 2, trialCreditCount: 5)
-            try connection.execute(
-                sql: """
-                INSERT INTO UsageLedger (periodYear, periodMonth, consumedExportIDs, trialConsumedExportIDs)
-                VALUES (?, ?, ?, ?)
-                """,
-                arguments: [2023, 11, Data(), duplicatedChunk + duplicatedChunk]
-            )
-        }
-        let store = makeExportSagaStore(database: database)
-
-        do {
-            _ = try await store.startExport(
-                try makeStartExportInputFixture(projectID: projectID, batchID: batchID), expectedProjectRevision: 0
-            )
-            Issue.record("重複するExportIDチャンクがあるのにstartExportが成功した")
-        } catch let error as ExportSagaStoreError {
-            guard case .corruptUsageLedgerBlob(let byteCount) = error else {
-                Issue.record("期待したエラーケース(corruptUsageLedgerBlob)ではない: \(error)")
-                return
-            }
-            #expect(byteCount == 32)
-        } catch {
-            Issue.record("ExportSagaStoreError以外がthrowされた: \(error)")
-        }
-    }
-
-    @Test("expectedProjectRevisionが実際のprojectRevisionと不一致ならprojectRevisionMismatchでthrowすること")
-    func throwsWhenProjectRevisionMismatches() async throws {
+    @Test("expectedProjectRevisionが実際のprojectRevisionと不一致ならstaleProjectRevisionを返しExportJobを作らないこと")
+    func returnsStaleProjectRevisionWhenProjectRevisionMismatches() async throws {
+        // Domain契約変更（一括処理キュー簡素化 Issue #40）: revision不一致はthrowではなく
+        // ExportStartDecision.staleProjectRevisionという型付きの判定結果で返る
+        // （ExportSagaStore.swift docコメント参照）。
         let (database, url) = try makeTestAppDatabase()
         defer { try? FileManager.default.removeItem(at: url) }
         let projectID = ProjectID(rawValue: UUID())
         try await database.dbQueue.write { connection in
             try insertProject(connection, projectID: projectID.rawValue)
             try insertSubscriptionStateRow(connection, plan: 1, status: 1)
-        }
-        let store = makeExportSagaStore(database: database)
-
-        do {
-            _ = try await store.startExport(
-                try makeStartExportInputFixture(projectID: projectID), expectedProjectRevision: 999
-            )
-            Issue.record("projectRevision不一致なのにstartExportが成功した")
-        } catch let error as ExportSagaStoreError {
-            guard case .projectRevisionMismatch(let mismatchedProjectID, let expected, let actual) = error else {
-                Issue.record("期待したエラーケース(projectRevisionMismatch)ではない: \(error)")
-                return
-            }
-            #expect(mismatchedProjectID == projectID)
-            #expect(expected == 999)
-            #expect(actual == 0)
-        } catch {
-            Issue.record("ExportSagaStoreError以外がthrowされた: \(error)")
-        }
-    }
-
-    @Test("queueItemIDが指定されbatchIDがnilの場合queueItemIDRequiresBatchIDでthrowすること")
-    func throwsWhenQueueItemIDPresentWithoutBatchID() async throws {
-        let (database, url) = try makeTestAppDatabase()
-        defer { try? FileManager.default.removeItem(at: url) }
-        let projectID = ProjectID(rawValue: UUID())
-        let queueItemID = ExportQueueItemID(rawValue: UUID())
-        try await database.dbQueue.write { connection in
-            try insertProject(connection, projectID: projectID.rawValue)
-            try insertSubscriptionStateRow(connection, plan: 1, status: 1)
-        }
-        let store = makeExportSagaStore(database: database)
-        let input = try makeStartExportInputFixture(projectID: projectID, batchID: nil, queueItemID: queueItemID)
-
-        do {
-            _ = try await store.startExport(input, expectedProjectRevision: 0)
-            Issue.record("queueItemIDが指定されbatchIDがnilなのにstartExportが成功した")
-        } catch let error as ExportSagaStoreError {
-            guard case .queueItemIDRequiresBatchID(let mismatchedQueueItemID) = error else {
-                Issue.record("期待したエラーケース(queueItemIDRequiresBatchID)ではない: \(error)")
-                return
-            }
-            #expect(mismatchedQueueItemID == queueItemID)
-        } catch {
-            Issue.record("ExportSagaStoreError以外がthrowされた: \(error)")
-        }
-    }
-
-    @Test("Pro加入済み利用者のトライアルバッチはクレジット状態に関わらずpaidUnlimitedで認可されトライアル台帳を消費しないこと")
-    func authorizesTrialBatchForProSubscriberAsPaidUnlimitedWithoutConsumingTrialLedger() async throws {
-        let (database, url) = try makeTestAppDatabase()
-        defer { try? FileManager.default.removeItem(at: url) }
-        let projectID = ProjectID(rawValue: UUID())
-        let batchID = BatchID(rawValue: UUID())
-        try await database.dbQueue.write { connection in
-            try insertProject(connection, projectID: projectID.rawValue)
-            // plan 3 = pro（active）。canUseProBatch == true。
-            try insertSubscriptionStateRow(connection, plan: 3, status: 1)
-            // trialCreditCount=3・trialConsumedCount=3で通常なら使い切り状態
-            // （blocksTrialBatchWhenCreditsExhaustedと同条件）。Pro加入済みならこの状態でも
-            // ブロックされないことを検証する（architecture.md 6.3「Pro へ加入済みの場合は
-            // 消費しない」）。
-            try insertBatchRow(connection, batchID: batchID.rawValue, kind: 2, trialCreditCount: 3)
-            try insertUsageLedgerRow(connection, trialConsumedCount: 3)
-        }
-        let trialConsumedExportIDsBefore: Data? = try await database.dbQueue.read { connection in
-            try Data.fetchOne(connection, sql: "SELECT trialConsumedExportIDs FROM UsageLedger")
         }
         let store = makeExportSagaStore(database: database)
 
         let decision = try await store.startExport(
-            try makeStartExportInputFixture(projectID: projectID, batchID: batchID), expectedProjectRevision: 0
+            try makeStartExportInputFixture(projectID: projectID), expectedProjectRevision: 999
         )
 
-        guard case let .authorized(job) = decision else {
-            Issue.record("Pro加入済みのトライアルバッチはauthorizedであるべき")
+        guard case .staleProjectRevision = decision else {
+            Issue.record("staleProjectRevisionであるべきだが違う結果になった: \(decision)")
             return
         }
-        #expect(job.authorization.accountingMode == .paidUnlimited)
-        let trialConsumedExportIDsAfter: Data? = try await database.dbQueue.read { connection in
-            try Data.fetchOne(connection, sql: "SELECT trialConsumedExportIDs FROM UsageLedger")
+        let jobCount: Int = try await database.dbQueue.read { connection in
+            try Int.fetchOne(connection, sql: "SELECT count(*) FROM ExportJob") ?? -1
         }
-        #expect(trialConsumedExportIDsAfter == trialConsumedExportIDsBefore)
+        #expect(jobCount == 0)
+    }
+
+    @Test("Batch行のaccountingModeが不正値の場合table: \"Batch\"のinvalidColumnValueでthrowし、ExportJobの破損と誤認しないこと")
+    func throwsInvalidColumnValueWithBatchTableWhenBatchRowAccountingModeIsCorrupted() async throws {
+        // decodeAuthorization（+Mapping.swift）はExportJob/Batch双方の認可行を共有デコードする
+        // ため、table引数を正しく"Batch"で渡していることをここで検証する。これを検証しないと
+        // Batch行の破損がExportJobの破損として誤って報告されても気づけない
+        // （運用者が誤ったテーブルを調査してしまう）。
+        let (database, url) = try makeTestAppDatabase()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let projectID = ProjectID(rawValue: UUID())
+        let batchID = BatchID(rawValue: UUID())
+        try await database.dbQueue.write { connection in
+            try insertProject(connection, projectID: projectID.rawValue)
+            // plan 3 = pro、status 1 = active。proBatchはcanUseProBatchを要求する
+            // （ExportSagaStoreStartSnapshotTests.swiftと同じ組み合わせ）。
+            try insertSubscriptionStateRow(connection, plan: 3, status: 1)
+        }
+        let store = makeExportSagaStore(database: database)
+        _ = try await createAuthorizedBatch(store: store, batchID: batchID, kind: .proBatch)
+        try await database.dbQueue.write { connection in
+            try connection.execute(sql: "UPDATE Batch SET accountingMode = ?", arguments: [999])
+        }
+
+        do {
+            _ = try await store.startExport(
+                try makeStartExportInputFixture(projectID: projectID, batchID: batchID), expectedProjectRevision: 0
+            )
+            Issue.record("Batch行のaccountingModeが不正値なのにstartExportが成功した")
+        } catch let error as ExportSagaStoreError {
+            guard case .invalidColumnValue(let table, let column, let rawValue) = error else {
+                Issue.record("期待したエラーケース(invalidColumnValue)ではない: \(error)")
+                return
+            }
+            #expect(table == "Batch", "ExportJobの破損と誤認していないか（table引数の検証）")
+            #expect(column == "accountingMode")
+            #expect(rawValue == 999)
+        } catch {
+            Issue.record("ExportSagaStoreError以外がthrowされた: \(error)")
+        }
     }
 }

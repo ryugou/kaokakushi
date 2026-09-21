@@ -10,22 +10,24 @@ import GRDB
 //      throwして終了（DBは一切変更しない）。
 //   2. CASCADE連鎖で消える前に、後続処理に必要な値を事前に読み取る。
 //      (a) OutputRecord.outputFileID一覧 (b) WorkingSourceRecord.sourceFileID
-//      (c) ProjectStampAsset.assetHash一覧 (d) ExportQueueItemのDISTINCT batchID一覧
+//      (c) ProjectStampAsset.assetHash一覧 (d) 削除対象ProjectのExportRecordのDISTINCT
+//      batchID一覧
 //   3. OutputRecordを明示DELETEしoutputFileIDをPendingFileDeletionへ登録する
 //      （OutputRecord.projectIDはonDelete: .restrictのため、残存行があるとProject本体の
 //      DELETEがFK違反で失敗する。よって事前削除が必須）。
 //   4. WorkingSourceRecord.sourceFileIDをPendingFileDeletionへ登録する（行自体はCASCADEに
 //      任せ、明示DELETEはしない）。
 //   5. Project本体をDELETEする。CASCADEでFaceTrack→EffectSetting、ExportSetting、
-//      WorkingSourceRecord、ExportQueueItem、ExportRecord、ExportedSettingsEntry、
-//      ProjectStampAssetが連鎖削除される。万一ExportJob/OutputRecordの残存行があれば
-//      RESTRICT違反がthrowされ、トランザクション全体がロールバックされる（判定漏れへの
-//      二重防御。正本どおりcatchして握りつぶさず伝播させる）。
+//      WorkingSourceRecord、ExportRecord、ExportedSettingsEntry、ProjectStampAssetが
+//      連鎖削除される。万一ExportJob/OutputRecordの残存行があればRESTRICT違反がthrowされ、
+//      トランザクション全体がロールバックされる（判定漏れへの二重防御。正本どおりcatchして
+//      握りつぶさず伝播させる）。
 //   6. cで読み取ったassetHashごとにProjectStampAssetの参照解放を行う
 //      （StampAssetReferences.swift。StampStoreと共有する）。
-//   7. dで読み取ったbatchIDごとに、ExportQueueItemの残存行が0件ならBatch行を削除する
-//      （architecture.md「Project削除Saga」直後の解説。ExportRecord/OutputRecord/ExportJobの
-//      batchID列はonDelete: .setNullのため追加対応不要）。
+//   7. dで読み取ったbatchIDごとに、その`batchID`を参照するExportRecord/OutputRecord/
+//      ExportJobの残数が合計0ならBatch行を削除する（architecture.md「Project削除Saga」
+//      手順3。削除対象Project自身の分は手順2で既に削除済みのため、ここで数えるのは
+//      同じbatchIDを持つ他のProjectの行）。
 
 extension HistoryDeletionStoreLive {
     public func deleteHistoryUnit(_ unit: HistoryUnit, trigger: DeletionTrigger) async throws {
@@ -81,10 +83,14 @@ extension HistoryDeletionStoreLive {
         )
     }
 
+    /// 削除対象Projectが持つExportRecordのDISTINCT batchID一覧（architecture.md
+    /// 「Project削除Saga」手順2）。`ExportRecord.batchID`はNULL許容列（単体書き出しの行は
+    /// NULL）のため、`AND batchID IS NOT NULL`を必ず含める（無いとUUID.fetchAllのデコードが
+    /// NULL行で失敗する）。
     private static func loadDistinctBatchIDs(_ connection: Database, projectID: ProjectID) throws -> [UUID] {
         try UUID.fetchAll(
             connection,
-            sql: "SELECT DISTINCT batchID FROM ExportQueueItem WHERE projectID = ?",
+            sql: "SELECT DISTINCT batchID FROM ExportRecord WHERE projectID = ? AND batchID IS NOT NULL",
             arguments: [projectID.rawValue]
         )
     }
@@ -110,17 +116,23 @@ extension HistoryDeletionStoreLive {
         try registerPendingFileDeletion(connection, kind: .processingTemporary, fileID: sourceFileID.rawValue)
     }
 
-    /// 手順7。正本（architecture.md「Project削除Saga」手順3）の判定基準は「同じトランザクション
-    /// 内で数えた残り所属Project数が0」であるため、ExportQueueItem.projectIDのDISTINCT数で
-    /// 判定する。ExportQueueItemはUNIQUE(batchID, projectID)のためcount(*)と値は一致するが、
-    /// SQL自体に「残存Project数」という判定意図を明示する。
+    /// 手順7。正本（architecture.md「Project削除Saga」手順3）の判定基準は「その`batchID`を
+    /// 参照する`ExportRecord`/`OutputRecord`/`ExportJob`の残数が合計0」。この呼び出しは
+    /// Project自身の関連行（ExportRecord等）を削除した後に実行されるため、削除対象Project
+    /// 自身の分は既に消えており、ここで数えるのは同じbatchIDを持つ他のProject由来の行のみ
+    /// （正本の解説どおり）。
     private static func deleteBatchIfEmpty(_ connection: Database, batchID: UUID) throws {
-        let remainingProjectCount = try Int.fetchOne(
+        let remainingCount = try Int.fetchOne(
             connection,
-            sql: "SELECT count(DISTINCT projectID) FROM ExportQueueItem WHERE batchID = ?",
-            arguments: [batchID]
+            sql: """
+            SELECT
+                (SELECT count(*) FROM ExportRecord WHERE batchID = ?) +
+                (SELECT count(*) FROM OutputRecord WHERE batchID = ?) +
+                (SELECT count(*) FROM ExportJob WHERE batchID = ?)
+            """,
+            arguments: [batchID, batchID, batchID]
         ) ?? 0
-        guard remainingProjectCount == 0 else { return }
+        guard remainingCount == 0 else { return }
         try connection.execute(sql: "DELETE FROM Batch WHERE batchID = ?", arguments: [batchID])
     }
 }

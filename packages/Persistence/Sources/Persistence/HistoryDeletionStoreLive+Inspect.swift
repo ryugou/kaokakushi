@@ -9,7 +9,8 @@ import GRDB
 extension HistoryDeletionStoreLive {
     public func inspectDeletion(_ unit: HistoryUnit, trigger: DeletionTrigger) async throws -> DeletionInspection {
         let projectID = Self.projectID(for: unit)
-        return try await database.dbQueue.read { connection in
+        // 戻り値型を明示する（toolchain 差の推論割れ対策。Package.swift の GRDB ピン注記参照）
+        let inspection: DeletionInspection = try await database.dbQueue.read { connection in
             let context = try Self.loadDeletionContext(connection, unit: unit, trigger: trigger)
             let reclaimableBytes = try Self.reclaimableBytes(connection, projectID: projectID)
             return DeletionInspection(
@@ -18,6 +19,7 @@ extension HistoryDeletionStoreLive {
                 reclaimableBytes: reclaimableBytes
             )
         }
+        return inspection
     }
 
     /// OutputRecord.outputByteSizeの合計（正本に算出式の指定は無く、オーケストレーター
