@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import GRDB
 import Domain
 @testable import Persistence
 
@@ -40,6 +41,41 @@ struct ExportedSettingsEntryStoreTests {
         let entry = try await store.loadEntry(for: ProjectID(rawValue: UUID()))
 
         #expect(entry == nil)
+    }
+
+    @Test("settingsHashのバイト長がProjectSettingsHashの想定長(32バイト)と異なる行にinvalidSettingsHashLengthをthrowすること")
+    func loadEntryThrowsForInvalidSettingsHashLength() async throws {
+        let (database, url) = try makeTestAppDatabase()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let projectID = ProjectID(rawValue: UUID())
+        // 想定長32バイトに対し1バイト短い31バイトのハッシュを直接挿入し、settle系書き込み
+        // 経路を経由しない手動改変・マイグレーション漏れ相当のデータ破損を模す。
+        let invalidHash = Data(repeating: 0xEE, count: 31)
+        try await database.dbQueue.write { connection in
+            try insertProject(connection, projectID: projectID.rawValue)
+            try connection.execute(
+                sql: """
+                INSERT INTO ExportedSettingsEntry (projectID, settingsHash, exportedAt)
+                VALUES (?, ?, ?)
+                """,
+                arguments: [projectID.rawValue, invalidHash, schemaTestReferenceDate]
+            )
+        }
+        let store = ExportedSettingsEntryStoreLive(database: database)
+
+        do {
+            _ = try await store.loadEntry(for: projectID)
+            Issue.record("31バイトのsettingsHashを持つ行が存在するのにloadEntryがthrowしなかった")
+        } catch let error as ExportedSettingsEntryStoreError {
+            guard case .invalidSettingsHashLength(let errorProjectID, let byteCount) = error else {
+                Issue.record("期待したエラーケース(invalidSettingsHashLength)ではない: \(error)")
+                return
+            }
+            #expect(errorProjectID == projectID)
+            #expect(byteCount == 31)
+        } catch {
+            Issue.record("ExportedSettingsEntryStoreError以外がthrowされた: \(error)")
+        }
     }
 
     @Test("settleExport経由でupsertされたエントリを読めること")

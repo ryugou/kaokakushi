@@ -9,7 +9,8 @@ extension WorkingSourceStoreLive {
     /// projectIDの処理用素材を返す（無ければnil）。再選択後の分岐と実体の存在確認に使う
     /// （image-pipeline.md 5章）。
     public func loadWorkingSource(for projectID: ProjectID) async throws -> WorkingSourceRecord? {
-        try await database.dbQueue.read { connection in
+        // 戻り値型を明示する（toolchain 差の推論割れ対策。Package.swift の GRDB ピン注記参照）
+        let record: WorkingSourceRecord? = try await database.dbQueue.read { connection in
             guard let row = try Row.fetchOne(
                 connection,
                 sql: "SELECT sourceFileID, createdAt FROM WorkingSourceRecord WHERE projectID = ?",
@@ -27,6 +28,7 @@ extension WorkingSourceStoreLive {
             )!
             return WorkingSourceRecord(projectID: projectID, sourceFile: sourceFile, createdAt: createdAt)
         }
+        return record
     }
 
     /// 破棄。呼び出し契機は完了操作（settle）とプロジェクト破棄の2つ（image-pipeline.md

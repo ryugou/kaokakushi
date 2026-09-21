@@ -35,7 +35,8 @@ extension ExportSagaStoreLive {
     ) async throws -> ExportStartDecision {
         try Self.validatePreviewConfirmationProjectID(input)
         let authorizedAt = now()
-        return try await database.dbQueue.write { connection in
+        // 戻り値型を明示する（toolchain 差の推論割れ対策。Package.swift の GRDB ピン注記参照）
+        let decision: ExportStartDecision = try await database.dbQueue.write { connection in
             guard try Self.projectRevisionMatches(
                 connection, projectID: input.projectID, expectedProjectRevision: expectedProjectRevision
             ) else {
@@ -74,6 +75,7 @@ extension ExportSagaStoreLive {
                 return .authorized(job)
             }
         }
+        return decision
     }
 
     /// Batch行に固定済みの認可を読む（1.5。createBatchが確定させた認可をそのまま使い、

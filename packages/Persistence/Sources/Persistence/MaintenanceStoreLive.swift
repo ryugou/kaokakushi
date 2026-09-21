@@ -49,20 +49,22 @@ public struct MaintenanceStoreLive: MaintenanceStore {
     /// 未処理のPendingFileDeletionをすべて読む。デコードできないkindが来た場合は
     /// 握りつぶさず`MaintenanceStoreError.unknownPendingFileDeletionKind`をthrowする。
     public func loadPendingFileDeletions() async throws -> [PendingFileDeletion] {
-        let rows: [Row] = try await database.dbQueue.read { connection in
-            try Row.fetchAll(connection, sql: "SELECT kind, fileID FROM PendingFileDeletion")
-        }
-        return try rows.map { row in
-            let kindRawValue: Int = row["kind"]
-            guard
-                let kindUInt32 = UInt32(exactly: kindRawValue),
-                let kind = ManagedFileKind(rawValue: kindUInt32)
-            else {
-                throw MaintenanceStoreError.unknownPendingFileDeletionKind(rawValue: kindRawValue)
+        // 戻り値型を明示する（toolchain 差の推論割れ対策。Package.swift の GRDB ピン注記参照）
+        let deletions: [PendingFileDeletion] = try await database.dbQueue.read { connection in
+            let rows = try Row.fetchAll(connection, sql: "SELECT kind, fileID FROM PendingFileDeletion")
+            return try rows.map { row in
+                let kindRawValue: Int = row["kind"]
+                guard
+                    let kindUInt32 = UInt32(exactly: kindRawValue),
+                    let kind = ManagedFileKind(rawValue: kindUInt32)
+                else {
+                    throw MaintenanceStoreError.unknownPendingFileDeletionKind(rawValue: kindRawValue)
+                }
+                let fileID: UUID = row["fileID"]
+                return PendingFileDeletion(file: ManagedFileRef(kind: kind, fileID: ManagedFileID(rawValue: fileID)))
             }
-            let fileID: UUID = row["fileID"]
-            return PendingFileDeletion(file: ManagedFileRef(kind: kind, fileID: ManagedFileID(rawValue: fileID)))
         }
+        return deletions
     }
 
     /// 実体削除に成功した行を消す。

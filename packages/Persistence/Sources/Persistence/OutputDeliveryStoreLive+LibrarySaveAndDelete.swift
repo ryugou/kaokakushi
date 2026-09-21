@@ -14,12 +14,14 @@ extension OutputDeliveryStoreLive {
     /// UnknownLibrarySaveの全件を返す。事前条件は無い（起動時案内・完了画面表示のどちらも
     /// 全件を必要とするため絞り込みをこの層へ持ち込まない）。
     public func loadUnknownLibrarySaves() async throws -> [UnknownLibrarySave] {
-        let rows: [Row] = try await database.dbQueue.read { connection in
-            try Row.fetchAll(connection, sql: "SELECT exportID, occurredAt FROM UnknownLibrarySave")
+        // 戻り値型を明示する（toolchain 差の推論割れ対策。Package.swift の GRDB ピン注記参照）
+        let saves: [UnknownLibrarySave] = try await database.dbQueue.read { connection in
+            let rows = try Row.fetchAll(connection, sql: "SELECT exportID, occurredAt FROM UnknownLibrarySave")
+            return rows.map { row in
+                UnknownLibrarySave(exportID: ExportID(rawValue: row["exportID"]), occurredAt: row["occurredAt"])
+            }
         }
-        return rows.map { row in
-            UnknownLibrarySave(exportID: ExportID(rawValue: row["exportID"]), occurredAt: row["occurredAt"])
-        }
+        return saves
     }
 
     /// 利用者が「確認した」を選んだ行を削除する（export-saga.md 7.0）。対象行が無くても

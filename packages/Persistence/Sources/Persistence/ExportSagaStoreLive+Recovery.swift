@@ -10,10 +10,12 @@ extension ExportSagaStoreLive {
     /// 起動時復旧の入力（5章 手順1）。ExportJobの全行を読む。列リストはloadExportJobと
     /// 共有する（ExportSagaStoreLive+Mapping.swift）。
     public func loadRunningJobs() async throws -> [ExportJob] {
-        let rows: [Row] = try await database.dbQueue.read { connection in
-            try Row.fetchAll(connection, sql: "SELECT \(Self.exportJobColumns) FROM ExportJob")
+        // 戻り値型を明示する（toolchain 差の推論割れ対策。Package.swift の GRDB ピン注記参照）
+        let jobs: [ExportJob] = try await database.dbQueue.read { connection in
+            let rows = try Row.fetchAll(connection, sql: "SELECT \(Self.exportJobColumns) FROM ExportJob")
+            return try rows.map(Self.makeExportJob)
         }
-        return try rows.map(Self.makeExportJob)
+        return jobs
     }
 
     /// 起動時復旧（5章 手順1）。ExportJob行と、対応する未確定（settledAt IS NULL）

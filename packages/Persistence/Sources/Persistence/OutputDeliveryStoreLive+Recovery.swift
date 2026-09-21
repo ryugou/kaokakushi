@@ -10,7 +10,8 @@ extension OutputDeliveryStoreLive {
     /// 状態を返す（単一トランザクション。7.0表）。
     public func resolveOrphanedAttempts() async throws -> [OutputDeliverySnapshot] {
         let resolvedAt = now()
-        return try await database.dbQueue.write { connection in
+        // 戻り値型を明示する（toolchain 差の推論割れ対策。Package.swift の GRDB ピン注記参照）
+        let snapshots: [OutputDeliverySnapshot] = try await database.dbQueue.write { connection in
             let attemptRows = try Row.fetchAll(
                 connection, sql: "SELECT exportID, previousState FROM DeliveryAttempt"
             )
@@ -19,6 +20,7 @@ extension OutputDeliveryStoreLive {
             }
             return try Self.loadAllDeliverySnapshots(connection)
         }
+        return snapshots
     }
 
     /// 1件のDeliveryAttemptをpreviousStateおよび現在のOutputRecord.stateに応じて解決する

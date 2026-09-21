@@ -59,7 +59,8 @@ extension ExportSagaStoreLive {
     /// 静かに成功することはない。
     public func createBatch(_ input: CreateBatchInput) async throws -> BatchCreateDecision {
         let usageNow = now()
-        return try await database.dbQueue.write { connection in
+        // 戻り値型を明示する（toolchain 差の推論割れ対策。Package.swift の GRDB ピン注記参照）
+        let decision: BatchCreateDecision = try await database.dbQueue.write { connection in
             guard let (subscriptionState, capabilities) = try Self.resolveVerifiedCapabilities(
                 connection, usageNow: usageNow, enabledStampPacks: enabledStampPacks
             ) else {
@@ -85,6 +86,7 @@ extension ExportSagaStoreLive {
                 return .created(authorization)
             }
         }
+        return decision
     }
 
     /// バッチの勘定判定（1.3「権限とクォータ」・1.4「勘定の使い分け」）。単体書き出しの
