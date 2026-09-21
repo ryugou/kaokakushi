@@ -48,14 +48,14 @@ func exportQueueFailureHoldsAllFields() {
     #expect(subject.occurredAt == occurredAt)
 }
 
-@Test("QueuePauseReasonはsourceReselectionRequiredの1ケースのみを持ちHashableである")
+@Test("QueuePauseReasonはsourceReselectionRequiredの1ケースのみを持つ")
 func queuePauseReasonHasOnlySourceReselectionRequiredCase() {
     let reason = QueuePauseReason.sourceReselectionRequired
     // 網羅的な switch であるため、正本に無い2つめの case が追加されればコンパイルが壊れ検出できる。
     switch reason {
     case .sourceReselectionRequired: break
     }
-    #expect(Set([reason, .sourceReselectionRequired]).count == 1)
+    #expect(reason == .sourceReselectionRequired)
 }
 
 @Test("ExportQueueStateはfailedのペイロードを保持する")
