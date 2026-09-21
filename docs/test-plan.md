@@ -327,7 +327,9 @@
 - **DB 確定より前に取り込みファイルを削除しないこと**
 - **`replaceWorkingSource` が置換と旧 `sourceFile` の `PendingFileDeletion` 登録を単一 DB トランザクションで行うこと（置換が失敗したら登録も残らないこと）**
 - **`replaceWorkingSource` のコミット前に旧実体を削除せず、コミット後に旧実体だけが削除され、成功時に対応する `PendingFileDeletion` の行が消えること。削除に失敗した場合は行が残り、起動時 GC の再試行で削除・消去されること**
-- **新旧の `sourceFile` が同一参照の場合、`PendingFileDeletion` へ登録しないこと**（現在参照中の実体を削除しない）
+- **`replaceWorkingSource` の戻り値が、同一トランザクションで登録した旧 `sourceFile` の `ManagedFileRef` と一致すること**
+- **新旧の `sourceFile` が同一参照の場合、`PendingFileDeletion` へ登録せず戻り値が `nil` であり、コミット後の削除・`clearPendingFileDeletion` が呼ばれないこと**（現在参照中の実体を削除しない）
+- **コミット後の削除が戻り値の 1 件だけを対象にし、他の `PendingFileDeletion` 行（他 Saga が登録したものを含む）に触れないこと**（全 pending 行の走査をしない。[画像処理](image-pipeline.md) 5 章 手順 3）
 - **`attachWorkingSourceToExistingProject` の経路では、置換対象の旧 `sourceFile` が無いため、旧実体の `PendingFileDeletion` 登録も削除も発生しないこと**
 - **「Free 版として複製」で新しい `projectID` の `WorkingSourceRecord` が作られ、処理用ファイルが元 `Project` と共有されないこと**
 - **複製の DB 失敗（手順 3）で、手順 2 で作成した実体ファイルが補償削除されること（`WorkingSourceRecord` 行は単一 DB トランザクション内で作られるためロールバックで消える）**
