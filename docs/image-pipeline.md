@@ -974,9 +974,9 @@ struct WorkingSourceRecord: Sendable {
 
 1. 向きを正規化した原寸ファイルを作成し、EXIF を読む
 2. 単一 DB トランザクションで、`WorkingSourceRecord` の置換または新規作成、`Project` の撮影メタデータ・再編集用参照の更新、`FaceTrack` / `ReviewIssue` / `ReviewDecision` / `ReviewStatus` の破棄、`detectionRevision` / `projectRevision` の増加を行う。置換の場合（`replaceWorkingSource`）は、同じトランザクションで置換された旧 `sourceFile` を `PendingFileDeletion` へ登録する（`attachWorkingSourceToExistingProject` は置換対象を持たないため登録しない）
-3. コミット後に、登録した旧 `sourceFile` の実体を削除し、成功したら `PendingFileDeletion` の行を削除する。失敗したら行を残し、起動時の GC が再試行する（削除経路の正本は [アーキテクチャ設計](architecture.md) の 7.5「出力の削除経路」）
+3. コミット後に、`replaceWorkingSource` が戻り値として返した登録済みの旧 `sourceFile` の実体を削除し、成功したら `PendingFileDeletion` の行を削除する。失敗したら行を残し、起動時の GC が再試行する（削除経路の正本は [アーキテクチャ設計](architecture.md) の 7.5「出力の削除経路」。全 pending 行の走査は行わない — 対象は戻り値の 1 件のみ）
 
-置換と削除対象の確定が単一トランザクションで原子化されるため、複数の再選択が直列キュー上でどの順に並んでも、現在参照中の実体が削除されることはない（削除対象は常に「その置換で参照を失ったファイル」に限られる。新旧が同一参照でないことは `replaceWorkingSource` が判定して登録を抑止する〈下記「実装の所在」〉。`ManagedFileStore.createFile` の新規性契約〈[アーキテクチャ設計](architecture.md) の 7.3〉はこれを裏打ちするが、判定自体は省かない）。
+置換と削除対象の確定が単一トランザクションで原子化されるため、複数の再選択が直列キュー上でどの順に並んでも、現在参照中の実体が削除されることはない。根拠は 2 つで役割が異なる: **同一トランザクション内**の新旧一致は `replaceWorkingSource` が判定して登録を抑止し〈下記「実装の所在」〉、**トランザクションをまたぐ**「過去に削除・登録された参照が新しいファイルとして再登場する」経路は `ManagedFileStore.createFile` の新規作成契約〈[アーキテクチャ設計](architecture.md) の 7.3。既存参照の転用禁止 + UUID 一意性への依拠〉が塞ぐ（どちらか一方では閉じないため、判定・契約とも省かない）。
 
 手順 2 は `WorkingSourceRecord` の有無で分岐します。
 
@@ -998,9 +998,11 @@ protocol WorkingSourceStore: Sendable {
     func createProjectWithWorkingSource(_ input: CreateWorkingSourceInput) async throws
 
     /// 素材更新 Saga の手順 2。単一 DB トランザクションで `sourceFile` を置換し、
-    /// 置換された旧 `sourceFile` の `PendingFileDeletion` への登録を同一トランザクションで行う
-    /// （新旧が同一の参照なら登録しない。現在参照中の実体を削除対象にしないため）
-    func replaceWorkingSource(_ input: ReplaceWorkingSourceInput) async throws
+    /// 置換された旧 `sourceFile` の `PendingFileDeletion` への登録を同一トランザクションで行い、
+    /// 登録した参照を返す（新旧が同一の参照なら登録せず nil。現在参照中の実体を削除対象に
+    /// しないため）。呼び出し元はコミット後に戻り値の実体を削除し、成功したら
+    /// `clearPendingFileDeletion` で行を消す（5 章の手順 3）
+    func replaceWorkingSource(_ input: ReplaceWorkingSourceInput) async throws -> ManagedFileRef?
 
     /// 履歴の既存 Project へ処理用素材を再接続する（下記）
     func attachWorkingSourceToExistingProject(

@@ -1387,11 +1387,12 @@ protocol ManagedFileStore: Sendable {
     ) async throws -> R
 
     /// 新規作成。body が書いた一時ファイルを、復帰後に上の順序で確定する。
-    /// 返す `ManagedFileRef` は常に新規であり、過去に発行したどの参照とも一致しない
-    /// （`ManagedFileID` の `UUID` を採番のたびに新しく生成することで満たす。発行済み ID の
-    /// 台帳は持たず、UUID を再利用しないことを前提とする。削除済み・削除予定の参照が新しい
-    /// ファイルとして再登場しないこと、したがって `PendingFileDeletion` に残った参照が現用の
-    /// 実体を指さないことを、参照を保持する各 Saga はこの契約に依存してよい）
+    /// **常に新しいファイルを作成し、既存ファイルの参照を返す実装を禁止する**
+    /// （内容による重複排除・呼び出し側から渡された参照の転用を含む）。`ManagedFileID` は
+    /// 採番のたびに新しい `UUID` を生成し、発行済み ID の台帳は持たない（過去の発行値との
+    /// 不一致は UUID の一意性に依拠する。ADR 0005 の受容範囲）。この契約の下では、
+    /// 削除済み・削除予定の参照が新しいファイルとして再登場せず、`PendingFileDeletion` に
+    /// 残った参照が現用の実体を指さないことに、参照を保持する各 Saga は依存してよい
     func createFile<R: Sendable>(
         kind: ManagedFileKind,
         _ body: @Sendable (URL) async throws -> R
