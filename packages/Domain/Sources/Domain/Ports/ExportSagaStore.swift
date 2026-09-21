@@ -18,7 +18,12 @@ import Foundation
 
 /// Application が使う書き出し Saga の永続化ポート（export-saga.md 0 章）。
 public protocol ExportSagaStore: Sendable {
-    /// 認可を評価し ExportJob を挿入する（1 章）。expectedProjectRevision と不一致なら throw
+    /// バッチを作成する。認可（1.3）の評価と Batch 行の挿入を単一 DB トランザクションで行い、
+    /// 評価した認可を Batch 行へ固定する。blocked ならバッチを作らず理由を返す（行は挿入されない）
+    func createBatch(_ input: CreateBatchInput) async throws -> BatchCreateDecision
+    /// ExportJob を挿入する（1 章）。input.batchID == nil なら認可（1.3）をこの場で評価し、
+    /// 非 nil なら対応する Batch 行に固定済みの認可を読む（再評価しない。1.5）。
+    /// expectedProjectRevision と不一致なら `.staleProjectRevision` を返す（throw しない）
     func startExport(_ input: StartExportInput, expectedProjectRevision: Int64) async throws -> ExportStartDecision
     /// 確認用の OutputRecord(settledAt: nil) を作成する（3 章）。同じ projectID の未確定 OutputRecord が
     /// 既に存在すれば throw（部分 UNIQUE 制約。詳細は 3 章）。台帳・ExportRecord・WorkingSourceRecord には触れない
@@ -50,7 +55,7 @@ public protocol ExportSagaStore: Sendable {
     func deleteUnsettledBatches() async throws
 }
 
-/// 手順 0 の入力（export-saga.md 0 章）。
+/// 手順 0 の入力（認可の評価材料は含めない。1.3「評価入力の出所」）（export-saga.md 0 章）。
 /// 正本は Sendable のみ（PreviewConfirmation は Equatable だが StartExportInput 自体を
 /// 値として比較する用途が正本コードブロックに無いため Equatable を追加しない）
 public struct StartExportInput: Sendable {
@@ -75,6 +80,27 @@ public struct StartExportInput: Sendable {
     }
 }
 
+/// バッチ作成の入力（認可の評価材料は含めない。1.3「評価入力の出所」）（export-saga.md 0 章）。
+/// 正本は Sendable のみ（BatchPolicySnapshot は Equatable だが CreateBatchInput 自体を
+/// 値として比較する用途が正本コードブロックに無いため Equatable を追加しない。StartExportInput と同じ判断）
+public struct CreateBatchInput: Sendable {
+    public let batchID: BatchID
+    public let policy: BatchPolicySnapshot   // 作成時の設定定数から作る（アーキテクチャ設計 6.4）
+    public let createdAt: Date
+
+    public init(batchID: BatchID, policy: BatchPolicySnapshot, createdAt: Date) {
+        self.batchID = batchID
+        self.policy = policy
+        self.createdAt = createdAt
+    }
+}
+
+/// createBatch の判定結果（export-saga.md 0 章）。
+public enum BatchCreateDecision: Sendable {
+    case blocked(ExportStartBlock)          // バッチは作成されない
+    case created(ExportAuthorization)       // Batch 行へ固定された認可
+}
+
 /// 手順4（生成）の入力。ExportJob から導出できない値だけを渡す（export-saga.md 0 章）。
 /// 正本は Sendable のみ（outputSHA256 等のバイト列を含み、値としての比較用途が
 /// 正本コードブロックに無いため Equatable を追加しない。OutputRecord と同じ判断）
@@ -95,5 +121,8 @@ public struct RecordOutputInput: Sendable {
 /// startExport の判定結果（export-saga.md 0 章）。
 public enum ExportStartDecision: Sendable {
     case blocked(ExportStartBlock)
+    /// 1.6 の手順 5: expectedProjectRevision の不一致。ExportJob は作られない。
+    /// バッチの項目は itemFailed（1.6）、単体はそのまま不開始として利用者へ返る
+    case staleProjectRevision
     case authorized(ExportJob)
 }
